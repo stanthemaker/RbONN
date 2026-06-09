@@ -89,7 +89,8 @@ def write_santec_csv(data: np.ndarray, csv_path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     height, width = data_uint16.shape
-    with open(path, "w", encoding="utf-8-sig", newline="") as file:
+    # plain ASCII without BOM: the DLL's CSV reader may not skip a UTF-8 BOM
+    with open(path, "w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["y/x", *range(width)])
         for y in range(height):

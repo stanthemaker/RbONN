@@ -1,35 +1,14 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
-import os
 import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .driver import MODE_DVI, MODE_MEMORY, SLM_DVI_Driver as SLMDriver
 from .generator import generate_center_scan, make_vertical_window, write_santec_csv
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_DLL_DIR = _PROJECT_ROOT / "SLM_DLL_ver.2.51" / "dll" / "x64"
-os.environ.setdefault("SLM_DLL_DIR", str(_DEFAULT_DLL_DIR))
-_DLL_DIRECTORY_HANDLE = None
-if hasattr(os, "add_dll_directory") and _DEFAULT_DLL_DIR.exists():
-    _DLL_DIRECTORY_HANDLE = os.add_dll_directory(str(_DEFAULT_DLL_DIR))
-
-
-def _load_driver_class() -> Any:
-    driver_path = Path(__file__).resolve().parent / "driver" / "driver.py"
-    spec = importlib.util.spec_from_file_location("slm_module_driver_impl", driver_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load SLM driver module from {driver_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.SLM_DVI_Driver
-
-
-SLMDriver = _load_driver_class()
 
 
 def validate_slm_csv(
@@ -132,26 +111,65 @@ def validate_slm_csv(
 
 
 class SLMController:
-    def __init__(self, display_no: int = 1, driver: Any | None = None):
+    def __init__(
+        self,
+        display_no: int = 1,
+        driver: Any | None = None,
+        rate120: bool = False,
+    ):
         self.display_no = int(display_no)
-        self.driver = driver if driver is not None else SLMDriver(display_no)
+        if driver is not None:
+            self.driver = driver
+        else:
+            self.driver = SLMDriver(display_no, rate120=rate120)
+        self._opened = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._opened
 
     def get_slm_info(self) -> tuple[int, int]:
         return self.driver.slm_info()
 
+    def detect_displays(self) -> list[tuple[int, int, int, str]]:
+        """Probe display numbers and return (no, width, height, name) tuples.
+
+        The SLM reports a name starting with "LCOS-SLM" (Guide 2.4.2).
+        """
+        if not hasattr(self.driver, "search_displays"):
+            raise RuntimeError("driver does not support display search")
+        return self.driver.search_displays()
+
     def open_slm(self) -> None:
         self.driver.open_slm()
+        self._opened = True
 
     def close_slm(self) -> None:
-        self.driver.close_slm()
+        try:
+            self.driver.close_slm()
+        finally:
+            self._opened = False
+
+    def _ensure_open(self) -> None:
+        # Guide 1.3.2: SLM_Disp_Open must precede the display functions.
+        if not self._opened:
+            self.open_slm()
+
+    def set_dvi_mode(self, slm_number: int = 1) -> None:
+        self.driver.set_video_mode(MODE_DVI, slm_number=slm_number)
+
+    def set_memory_mode(self, slm_number: int = 1) -> None:
+        self.driver.set_video_mode(MODE_MEMORY, slm_number=slm_number)
 
     def display_grayscale(self, grayscale_value: int, interval: float = 0.2) -> None:
         grayscale_value = _validate_level(grayscale_value)
+        self._ensure_open()
         self.driver.load_grayscale(grayscale_value, interval)
 
     def display_csv(self, csv_path: str | Path, interval: float = 0.2) -> None:
         slm_width, slm_height = self.get_slm_info()
         validate_slm_csv(csv_path, expected_width=slm_width, expected_height=slm_height)
+        self._ensure_open()
         self.driver.load_csv(str(Path(csv_path).resolve()), interval)
 
     def display_mask_csv(
@@ -165,6 +183,7 @@ class SLMController:
             csv_path = _temporary_csv_path("slm_mask_")
         csv_path = write_santec_csv(data, csv_path)
         validate_slm_csv(csv_path, expected_width=slm_width, expected_height=slm_height)
+        self._ensure_open()
         self.driver.load_csv(str(csv_path), interval)
         return csv_path
 
@@ -200,6 +219,7 @@ class SLMController:
             output_path = Path(output_dir).resolve()
             output_path.mkdir(parents=True, exist_ok=True)
 
+        self._ensure_open()
         paths: list[Path] = []
         for index, pattern in enumerate(
             generate_center_scan(

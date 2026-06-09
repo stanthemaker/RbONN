@@ -14,7 +14,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ..calibration import CalibrationFit, fit_calibration, load_calibration_csv
 from ..controller import SLMController
-from ..generator import iter_center_scan_positions, make_vertical_window
+from ..generator import MAX_LEVEL, iter_center_scan_positions, make_vertical_window
 
 
 class WorkerSignals(QtCore.QObject):
@@ -38,10 +38,11 @@ class FunctionWorker(QtCore.QRunnable):
 
 class MainWindow(QtWidgets.QMainWindow):
     scan_progress = QtCore.pyqtSignal(int, str)
+    scan_total = QtCore.pyqtSignal(int, int, int)
 
     def __init__(
         self,
-        controller_factory: Callable[[int], SLMController] = SLMController,
+        controller_factory: Callable[..., SLMController] = SLMController,
         parent: QtWidgets.QWidget | None = None,
     ):
         super().__init__(parent)
@@ -59,6 +60,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._apply_style()
         self.scan_progress.connect(self._on_scan_progress)
+        self.scan_total.connect(self._on_scan_total)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -95,17 +97,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.display_no_spin.setRange(1, 8)
         self.display_no_spin.setValue(1)
         self.display_no_spin.valueChanged.connect(self._reset_controller)
+        self.rate120_check = QtWidgets.QCheckBox("120 Hz model")
+        self.rate120_check.toggled.connect(self._reset_controller)
+        self.conn_status_label = QtWidgets.QLabel("Status: closed")
         self.info_label = QtWidgets.QLabel("Size: unknown")
 
+        detect_button = QtWidgets.QPushButton("Detect SLM")
         open_button = QtWidgets.QPushButton("Open")
         close_button = QtWidgets.QPushButton("Close")
         info_button = QtWidgets.QPushButton("Read Info")
-        open_button.clicked.connect(
-            lambda: self._run_task("Open SLM", lambda: self._controller().open_slm())
-        )
-        close_button.clicked.connect(
-            lambda: self._run_task("Close SLM", lambda: self._controller().close_slm())
-        )
+        detect_button.clicked.connect(self._detect_slm)
+        open_button.clicked.connect(self._open_slm)
+        close_button.clicked.connect(self._close_slm)
         info_button.clicked.connect(
             lambda: self._run_task(
                 "Read SLM info",
@@ -114,12 +117,28 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
+        self.usb_slm_no_spin = QtWidgets.QSpinBox()
+        self.usb_slm_no_spin.setRange(1, 8)
+        self.usb_slm_no_spin.setValue(1)
+        dvi_mode_button = QtWidgets.QPushButton("Switch to DVI Mode")
+        dvi_mode_button.setToolTip(
+            "Set the SLM video interface to DVI over USB "
+            "(required before using the display functions)"
+        )
+        dvi_mode_button.clicked.connect(self._switch_to_dvi_mode)
+
         connection_layout.addWidget(QtWidgets.QLabel("Display"), 0, 0)
         connection_layout.addWidget(self.display_no_spin, 0, 1)
-        connection_layout.addWidget(open_button, 0, 2)
-        connection_layout.addWidget(close_button, 0, 3)
-        connection_layout.addWidget(info_button, 0, 4)
-        connection_layout.addWidget(self.info_label, 1, 0, 1, 5)
+        connection_layout.addWidget(detect_button, 0, 2)
+        connection_layout.addWidget(open_button, 0, 3)
+        connection_layout.addWidget(close_button, 0, 4)
+        connection_layout.addWidget(info_button, 0, 5)
+        connection_layout.addWidget(QtWidgets.QLabel("USB SLM"), 1, 0)
+        connection_layout.addWidget(self.usb_slm_no_spin, 1, 1)
+        connection_layout.addWidget(dvi_mode_button, 1, 2)
+        connection_layout.addWidget(self.rate120_check, 1, 3, 1, 2)
+        connection_layout.addWidget(self.conn_status_label, 2, 0, 1, 3)
+        connection_layout.addWidget(self.info_label, 2, 3, 1, 3)
 
         grayscale = self._panel("Grayscale")
         grayscale_layout = QtWidgets.QGridLayout(grayscale)
@@ -313,20 +332,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _controller(self) -> SLMController:
         display_no = self.display_no_spin.value()
+        rate120 = self.rate120_check.isChecked()
         if self.controller is None or self.controller_display_no != display_no:
-            self.controller = self.controller_factory(display_no)
+            try:
+                controller = self.controller_factory(display_no, rate120=rate120)
+            except TypeError:
+                controller = self.controller_factory(display_no)
+            self.controller = controller
             self.controller_display_no = display_no
         return self.controller
 
     def _reset_controller(self) -> None:
+        old_controller = self.controller
         self.controller = None
         self.controller_display_no = None
+        self.conn_status_label.setText("Status: closed")
+        if old_controller is not None and getattr(old_controller, "is_open", False):
+            self._run_task("Close previous SLM", old_controller.close_slm)
 
     def _run_task(
         self,
         label: str,
         func: Callable[[], Any],
         on_success: Callable[[Any], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
     ) -> FunctionWorker:
         self._log(f"{label} started")
         worker = FunctionWorker(func)
@@ -338,7 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def fail(error: str) -> None:
             self._workers.discard(worker)
-            self._fail_task(label, error)
+            self._fail_task(label, error, on_error)
 
         worker.signals.finished.connect(finish)
         worker.signals.error.connect(fail)
@@ -354,18 +383,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"{label} complete")
         if on_success is not None:
             on_success(result)
+        self._refresh_conn_status()
 
-    def _fail_task(self, label: str, error: str) -> None:
+    def _refresh_conn_status(self) -> None:
+        is_open = self.controller is not None and getattr(self.controller, "is_open", False)
+        self.conn_status_label.setText("Status: open" if is_open else "Status: closed")
+
+    def _fail_task(
+        self,
+        label: str,
+        error: str,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
         self._log(f"{label} failed")
         self._log(error)
+        if on_error is not None:
+            on_error(error)
         QtWidgets.QMessageBox.critical(self, label, error)
-        self.start_scan_button.setEnabled(True)
-        self.stop_scan_button.setEnabled(False)
 
     def _log(self, message: str) -> None:
         if hasattr(self, "log_box"):
             self.log_box.appendPlainText(message.rstrip())
         self.statusBar().showMessage(message.splitlines()[0], 6000)
+
+    def _open_slm(self) -> None:
+        self._run_task("Open SLM", lambda: self._controller().open_slm())
+
+    def _close_slm(self) -> None:
+        self._run_task("Close SLM", lambda: self._controller().close_slm())
+
+    def _detect_slm(self) -> None:
+        self._run_task(
+            "Detect SLM",
+            lambda: self._controller().detect_displays(),
+            self._on_detect,
+        )
+
+    def _on_detect(self, displays: list[tuple[int, int, int, str]]) -> None:
+        if not displays:
+            self._log("No displays found")
+            return
+        slm_no = None
+        for display_no, width, height, name in displays:
+            self._log(f"Display {display_no}: {width} x {height} ({name})")
+            if slm_no is None and name.startswith("LCOS-SLM"):
+                slm_no = display_no
+        if slm_no is None:
+            self._log("No LCOS-SLM display found; check connection and mode")
+            return
+        self._log(f"LCOS-SLM found on display {slm_no}")
+        self.display_no_spin.setValue(slm_no)
+
+    def _switch_to_dvi_mode(self) -> None:
+        slm_number = self.usb_slm_no_spin.value()
+        self._run_task(
+            "Switch to DVI mode",
+            lambda: self._controller().set_dvi_mode(slm_number),
+        )
 
     def _on_info_read(self, result: tuple[int, int]) -> None:
         width, height = result
@@ -394,6 +468,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _display_csv(self) -> None:
         path = self.csv_path_edit.text().strip()
         if not path:
+            self._log("Select a CSV file first")
             return
         self._run_task("Display CSV", lambda: self._controller().display_csv(path))
 
@@ -407,6 +482,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_calibration_fit(self) -> None:
         path = self.calibration_path_edit.text().strip()
         if not path:
+            self._log("Select a calibration CSV first")
             return
 
         def fit_file() -> dict[float, CalibrationFit]:
@@ -484,46 +560,59 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scan_output_edit.setText(path)
 
     def _start_center_scan(self) -> None:
-        width, _ = self.slm_size
-        params = {
-            "level": self.scan_level_spin.value(),
-            "window_px": self.window_px_spin.value(),
-            "step_px": self.step_px_spin.value(),
-            "start_x": self.start_x_spin.value(),
-            "end_x": min(self.end_x_spin.value(), width - 1),
-            "dwell_seconds": self.dwell_spin.value(),
-            "output_dir": self.scan_output_edit.text().strip() or None,
-        }
-        positions = list(
-            iter_center_scan_positions(
-                width,
-                window_px=params["window_px"],
-                step_px=params["step_px"],
-                start_x=params["start_x"],
-                end_x=params["end_x"],
-            )
-        )
-        self.scan_progress_bar.setMaximum(max(len(positions), 1))
+        level = self.scan_level_spin.value()
+        window_px = self.window_px_spin.value()
+        step_px = self.step_px_spin.value()
+        start_x = self.start_x_spin.value()
+        end_x = self.end_x_spin.value()
+        dwell_seconds = self.dwell_spin.value()
+        output_dir = self.scan_output_edit.text().strip() or None
+
         self.scan_progress_bar.setValue(0)
         self.scan_stop_event = threading.Event()
         self.start_scan_button.setEnabled(False)
         self.stop_scan_button.setEnabled(True)
 
         def run_scan() -> list[Path]:
-            return self._controller().display_center_scan(
+            controller = self._controller()
+            width, height = controller.get_slm_info()
+            clamped_start = min(start_x, width - 1)
+            clamped_end = min(end_x, width - 1)
+            positions = list(
+                iter_center_scan_positions(
+                    width,
+                    window_px=window_px,
+                    step_px=step_px,
+                    start_x=clamped_start,
+                    end_x=clamped_end,
+                )
+            )
+            self.scan_total.emit(len(positions), width, height)
+            return controller.display_center_scan(
+                level,
+                window_px=window_px,
+                step_px=step_px,
+                start_x=clamped_start,
+                end_x=clamped_end,
+                dwell_seconds=dwell_seconds,
+                output_dir=output_dir,
                 stop_event=self.scan_stop_event,
                 progress_callback=lambda index, path: self.scan_progress.emit(
                     index + 1, str(path)
                 ),
-                **params,
             )
 
-        self._run_task("Center scan", run_scan, self._on_scan_finished)
+        self._run_task("Center scan", run_scan, self._on_scan_finished, self._on_scan_error)
 
     def _stop_center_scan(self) -> None:
         if self.scan_stop_event is not None:
             self.scan_stop_event.set()
             self._log("Center scan stop requested")
+
+    def _on_scan_total(self, total: int, width: int, height: int) -> None:
+        self.scan_progress_bar.setMaximum(max(total, 1))
+        self.slm_size = (width, height)
+        self.scan_size_label.setText(f"Using SLM size {width} x {height}")
 
     def _on_scan_progress(self, count: int, path: str) -> None:
         self.scan_progress_bar.setValue(count)
@@ -532,7 +621,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_scan_finished(self, paths: list[Path]) -> None:
         self.start_scan_button.setEnabled(True)
         self.stop_scan_button.setEnabled(False)
+        self.scan_stop_event = None
         self._log(f"Center scan frames displayed: {len(paths)}")
+
+    def _on_scan_error(self, _error: str) -> None:
+        self.start_scan_button.setEnabled(True)
+        self.stop_scan_button.setEnabled(False)
+        self.scan_stop_event = None
 
     def _update_scan_preview(self) -> None:
         width, height = self.slm_size
@@ -548,7 +643,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview_label.setText(str(exc))
             return
 
-        preview = np.where(data > 0, 235, 18).astype(np.uint8)
+        # render the real grayscale levels (0..1023) as display brightness
+        preview = (data.astype(np.float32) / MAX_LEVEL * 217.0 + 18.0).astype(np.uint8)
         image = QtGui.QImage(
             preview.data,
             preview.shape[1],
@@ -567,6 +663,17 @@ class MainWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "preview_label"):
             self._update_scan_preview()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self.scan_stop_event is not None:
+            self.scan_stop_event.set()
+        self.thread_pool.waitForDone(3000)
+        if self.controller is not None and getattr(self.controller, "is_open", False):
+            try:
+                self.controller.close_slm()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
