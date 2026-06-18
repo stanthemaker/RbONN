@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -130,12 +131,19 @@ def local_peak_centroid(
     wavelengths_m: np.ndarray,
     intensity_W: np.ndarray,
     half_window: int = 100,
+    *,
+    half_window_nm: float | None = None,
 ) -> tuple[float, int, float]:
     """
     Estimate peak center by local weighted centroid.
 
     The returned center uses the same unit as wavelengths_m. The name is kept
     for compatibility with earlier code, but callers may pass nm or m.
+
+    The local window is either a fixed number of samples on each side of the
+    peak (``half_window``) or, when ``half_window_nm`` is given, every sample
+    within +/- half_window_nm of the peak wavelength. The nm form keeps the
+    averaging width physical and independent of the OSA sampling density.
 
     Returns:
         center_wavelength
@@ -162,11 +170,20 @@ def local_peak_centroid(
 
     idx = int(np.argmax(y))
     peak_strength = float(y[idx])
-    lo = max(0, idx - half_window)
-    hi = min(y.size, idx + half_window + 1)
 
-    x_local = wavelengths[lo:hi]
-    y_local = y[lo:hi].copy()
+    if half_window_nm is not None:
+        window = float(half_window_nm)
+        if not np.isfinite(window) or window <= 0:
+            raise ValueError("half_window_nm must be a positive, finite number")
+        mask = np.abs(wavelengths - wavelengths[idx]) <= window
+        x_local = wavelengths[mask]
+        y_local = y[mask].copy()
+    else:
+        lo = max(0, idx - half_window)
+        hi = min(y.size, idx + half_window + 1)
+        x_local = wavelengths[lo:hi]
+        y_local = y[lo:hi].copy()
+
     y_local -= np.min(y_local)
     y_local = np.clip(y_local, 0.0, None)
 
@@ -236,10 +253,16 @@ def wavelength_calibration(
     window_size: int = 8,
     peak_half_window: int = 100,
     *,
+    peak_half_window_nm: float | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> CalibrationResult:
-    """Map SLM x coordinates to wavelengths using a bright-window sweep."""
+    """Map SLM x coordinates to wavelengths using a bright-window sweep.
+
+    The peak of each window measurement is located by weighted centroid over a
+    +/- peak_half_window_nm wavelength window when that is given, otherwise over
+    peak_half_window samples on each side.
+    """
 
     del levels
     slm_width, slm_height = slm.get_slm_info()
@@ -272,7 +295,10 @@ def wavelength_calibration(
             trace, _trace_power_w(trace), background_power, reference_power
         )
         wavelength, _, _ = local_peak_centroid(
-            trace_wavelengths, normalized, half_window=peak_half_window
+            trace_wavelengths,
+            normalized,
+            half_window=peak_half_window,
+            half_window_nm=peak_half_window_nm,
         )
         coordinate = x_start + window_size // 2
         coordinates.append(coordinate)
@@ -467,6 +493,146 @@ def write_intensity_calibration_csv(
                     ]
                 )
     return path
+
+
+def save_calibration_result(
+    calibration_results: CalibrationResult,
+    path: str | Path,
+) -> Path:
+    """Write a full CalibrationResult to JSON so a later step can resume from it.
+
+    Every field is stored (arrays as nested lists), so loading the file rebuilds
+    an equivalent CalibrationResult.
+    """
+
+    payload = {
+        "schema": "calibration_result_v1",
+        "wavelength": _to_jsonable(calibration_results.wavelength),
+        "coordinates": _to_jsonable(calibration_results.coordinates),
+        "max_level": _to_jsonable(calibration_results.max_level),
+        "min_level": _to_jsonable(calibration_results.min_level),
+        "level_range": _to_jsonable(calibration_results.level_range),
+        "intensity_levels": _to_jsonable(calibration_results.intensity_levels),
+        "raw_intensity_levels": _to_jsonable(calibration_results.raw_intensity_levels),
+        "wavelength_fit_coefficients": _to_jsonable(
+            calibration_results.wavelength_fit_coefficients
+        ),
+    }
+    out = Path(path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+    return out
+
+
+def load_calibration_result(path: str | Path) -> CalibrationResult:
+    """Rebuild a CalibrationResult written by save_calibration_result."""
+
+    src = Path(path).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"Calibration result not found: {src}")
+    with open(src, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    return CalibrationResult(
+        wavelength=_array_or_empty(payload.get("wavelength")),
+        coordinates=_array_or_empty(payload.get("coordinates")),
+        max_level=_scalar_level(payload.get("max_level")),
+        min_level=_scalar_level(payload.get("min_level")),
+        level_range=_array_or_empty(payload.get("level_range")),
+        intensity_levels=_array_or_none(payload.get("intensity_levels")),
+        raw_intensity_levels=_array_or_none(payload.get("raw_intensity_levels")),
+        wavelength_fit_coefficients=_array_or_none(
+            payload.get("wavelength_fit_coefficients")
+        ),
+    )
+
+
+def load_wavelength_map_csv(
+    path: str | Path,
+    *,
+    min_level: int | None = None,
+    max_level: int | None = None,
+    level_range: Iterable[int] | None = None,
+) -> CalibrationResult:
+    """Build a CalibrationResult from a coordinate->wavelength CSV.
+
+    Reads the ``coordinate_px`` and ``wavelength_nm`` columns (extra columns,
+    e.g. the long-format calibration CSV's level/intensity, are ignored). One
+    row per coordinate is kept. min/max levels and the level range come from the
+    caller, since a bare wavelength map does not carry them; they default to the
+    full 0..1023 range so the result is still usable for the dark/bright
+    reference patterns when not supplied.
+    """
+
+    src = Path(path).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"Wavelength map CSV not found: {src}")
+
+    with open(src, "r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if reader.fieldnames is None:
+            raise ValueError("Wavelength map CSV is empty")
+        normalized = {name.strip(): name for name in reader.fieldnames}
+        for column in ("coordinate_px", "wavelength_nm"):
+            if column not in normalized:
+                raise ValueError(
+                    f"Wavelength map CSV missing required column: {column}"
+                )
+
+        mapping: dict[float, float] = {}
+        for row in reader:
+            if not any((value or "").strip() for value in row.values()):
+                continue
+            coordinate = float(row[normalized["coordinate_px"]])
+            wavelength = float(row[normalized["wavelength_nm"]])
+            mapping.setdefault(coordinate, wavelength)
+
+    if not mapping:
+        raise ValueError("Wavelength map CSV does not contain any rows")
+
+    coordinates = np.asarray(list(mapping.keys()), dtype=float)
+    wavelengths = np.asarray(list(mapping.values()), dtype=float)
+    levels = (
+        np.asarray(list(level_range), dtype=int)
+        if level_range is not None
+        else np.asarray([], dtype=int)
+    )
+    return CalibrationResult(
+        wavelength=wavelengths,
+        coordinates=coordinates,
+        max_level=int(max_level) if max_level is not None else 1023,
+        min_level=int(min_level) if min_level is not None else 0,
+        level_range=levels,
+    )
+
+
+def _to_jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _array_or_empty(value: Any) -> np.ndarray:
+    if value is None:
+        return np.asarray([], dtype=float)
+    return np.asarray(value, dtype=float)
+
+
+def _array_or_none(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    return np.asarray(value, dtype=float)
+
+
+def _scalar_level(value: Any) -> int | np.ndarray:
+    if isinstance(value, list):
+        return np.asarray(value, dtype=int)
+    return int(value)
 
 
 def _trace_power_w(trace: TraceData) -> np.ndarray:

@@ -22,6 +22,9 @@ from ..calibration.calibration_new import (
     CalibrationResult,
     find_min_max_intensity_levels,
     intensity_calibration,
+    load_calibration_result,
+    load_wavelength_map_csv,
+    save_calibration_result,
     wavelength_calibration,
     write_intensity_calibration_csv,
 )
@@ -37,6 +40,10 @@ from ..generator import (
 )
 from ..keepalive import SLMKeepAlive
 from .style import DARK_STYLESHEET
+
+
+# a calibration progress callback marshalled onto the GUI thread via a signal
+ProgressEmit = Callable[[CalibrationProgress], None]
 
 
 class WorkerSignals(QtCore.QObject):
@@ -479,11 +486,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return page
 
     def _build_acquisition_panel(self) -> QtWidgets.QGroupBox:
-        """OSA-driven calibration: connect, sweep, and write a calibration CSV."""
+        """OSA-driven calibration: connect, then run the 3 steps independently."""
         panel = self._panel("Acquisition (OSA + SLM)")
-        grid = QtWidgets.QGridLayout(panel)
+        outer = QtWidgets.QVBoxLayout(panel)
 
-        # --- OSA connection ---
+        # --- shared OSA connection row ---
+        conn = QtWidgets.QGridLayout()
         self.osa_host_edit = QtWidgets.QLineEdit("192.168.1.11")
         self.osa_host_edit.setPlaceholderText("OSA host / IP")
         self.osa_port_spin = self._spin(1, 65535, 10001)
@@ -495,76 +503,273 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status(self.osa_status_label, "OSA: closed", "off")
         self.osa_connect_button.clicked.connect(self._connect_osa)
         self.osa_disconnect_button.clicked.connect(self._disconnect_osa)
+        conn.addWidget(QtWidgets.QLabel("OSA Host"), 0, 0)
+        conn.addWidget(self.osa_host_edit, 0, 1)
+        conn.addWidget(QtWidgets.QLabel("Port"), 0, 2)
+        conn.addWidget(self.osa_port_spin, 0, 3)
+        conn.addWidget(self.osa_connect_button, 0, 4)
+        conn.addWidget(self.osa_disconnect_button, 0, 5)
+        conn.addWidget(self.osa_status_label, 0, 6)
+        conn.setColumnStretch(1, 1)
+        outer.addLayout(conn)
 
-        grid.addWidget(QtWidgets.QLabel("OSA Host"), 0, 0)
-        grid.addWidget(self.osa_host_edit, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("Port"), 0, 2)
-        grid.addWidget(self.osa_port_spin, 0, 3)
-        grid.addWidget(self.osa_connect_button, 0, 4)
-        grid.addWidget(self.osa_disconnect_button, 0, 5)
-        grid.addWidget(self.osa_status_label, 0, 6)
+        # per-step widget registry: self.step_widgets[step][key]
+        self.step_widgets: dict[int, dict[str, Any]] = {1: {}, 2: {}, 3: {}}
 
-        # --- measurement settings ---
-        self.cal_center_wl_edit = QtWidgets.QLineEdit("778nm")
-        self.cal_span_edit = QtWidgets.QLineEdit("8nm")
-        self.cal_sensitivity_combo = QtWidgets.QComboBox()
-        self.cal_sensitivity_combo.addItems(["NORM", "MID", "HIGH1", "HIGH2", "HIGH3"])
-        self.cal_sensitivity_combo.setCurrentText("HIGH2")
-        self.cal_ref_level_edit = QtWidgets.QLineEdit("10uW")
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._build_step1_tab(), "Step 1 · Min/Max")
+        tabs.addTab(self._build_step2_tab(), "Step 2 · Wavelength")
+        tabs.addTab(self._build_step3_tab(), "Step 3 · Intensity")
+        outer.addWidget(tabs)
 
-        grid.addWidget(QtWidgets.QLabel("Center λ"), 1, 0)
-        grid.addWidget(self.cal_center_wl_edit, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("Span"), 1, 2)
-        grid.addWidget(self.cal_span_edit, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Sensitivity"), 1, 4)
-        grid.addWidget(self.cal_sensitivity_combo, 1, 5)
-        grid.addWidget(self.cal_ref_level_edit, 1, 6)
-
-        # --- sweep configuration ---
-        self.cal_level_start_spin = self._spin(0, 1023, 0)
-        self.cal_level_stop_spin = self._spin(0, 1023, 1023)
-        self.cal_level_step_spin = self._spin(1, 1023, 64)
-        self.cal_window_spin = self._spin(1, 8191, 8)
-        self.cal_wl_window_spin = QtWidgets.QDoubleSpinBox()
-        self.cal_wl_window_spin.setRange(0.0, 50.0)
-        self.cal_wl_window_spin.setDecimals(3)
-        self.cal_wl_window_spin.setSingleStep(0.1)
-        self.cal_wl_window_spin.setValue(0.0)
-        self.cal_wl_window_spin.setSuffix(" nm")
-        self.cal_wl_window_spin.setToolTip(
-            "Averaging window around each wavelength; 0 uses nearest-point averaging"
-        )
-
-        grid.addWidget(QtWidgets.QLabel("Level start"), 2, 0)
-        grid.addWidget(self.cal_level_start_spin, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("stop"), 2, 2)
-        grid.addWidget(self.cal_level_stop_spin, 2, 3)
-        grid.addWidget(QtWidgets.QLabel("step"), 2, 4)
-        grid.addWidget(self.cal_level_step_spin, 2, 5)
-        grid.addWidget(QtWidgets.QLabel("Window px"), 3, 0)
-        grid.addWidget(self.cal_window_spin, 3, 1)
-        grid.addWidget(QtWidgets.QLabel("Avg λ window"), 3, 2)
-        grid.addWidget(self.cal_wl_window_spin, 3, 3)
-
-        # --- output + run ---
-        self.cal_output_edit = QtWidgets.QLineEdit()
-        self.cal_output_edit.setPlaceholderText("Calibration CSV output (blank = temp file)")
-        cal_browse_button = QtWidgets.QPushButton("Browse")
-        cal_browse_button.clicked.connect(self._browse_acquisition_csv)
-        self.run_cal_button = QtWidgets.QPushButton("Run Calibration")
-        self.run_cal_button.setEnabled(False)
-        self.run_cal_button.clicked.connect(self._run_full_calibration)
+        # --- shared bottom row ---
+        bottom = QtWidgets.QHBoxLayout()
+        self.run_all_button = QtWidgets.QPushButton("Run All (1→2→3)")
+        self.run_all_button.setEnabled(False)
+        self.run_all_button.clicked.connect(self._run_all)
         self.stop_cal_button = QtWidgets.QPushButton("Stop")
         self.stop_cal_button.setProperty("variant", "danger")
         self.stop_cal_button.setEnabled(False)
         self.stop_cal_button.clicked.connect(self._stop_full_calibration)
+        bottom.addStretch(1)
+        bottom.addWidget(self.run_all_button)
+        bottom.addWidget(self.stop_cal_button)
+        outer.addLayout(bottom)
 
-        grid.addWidget(QtWidgets.QLabel("Output CSV"), 4, 0)
-        grid.addWidget(self.cal_output_edit, 4, 1, 1, 3)
-        grid.addWidget(cal_browse_button, 4, 4)
-        grid.addWidget(self.run_cal_button, 4, 5)
-        grid.addWidget(self.stop_cal_button, 4, 6)
+        # every Run button, toggled together by _set_calibration_running
+        self.calibration_run_buttons = [
+            self.step_widgets[1]["run"],
+            self.step_widgets[2]["run"],
+            self.step_widgets[3]["run"],
+            self.run_all_button,
+        ]
         return panel
+
+    def _build_measurement_group(self, step: int, defaults: dict[str, str]) -> QtWidgets.QGroupBox:
+        """OSA measurement settings (center λ / span / sensitivity / ref) for a step."""
+        box = QtWidgets.QGroupBox("OSA settings")
+        grid = QtWidgets.QGridLayout(box)
+        widgets = self.step_widgets[step]
+        widgets["center_wl"] = QtWidgets.QLineEdit(defaults.get("center_wl", "778nm"))
+        widgets["span"] = QtWidgets.QLineEdit(defaults.get("span", "8nm"))
+        widgets["sensitivity"] = QtWidgets.QComboBox()
+        widgets["sensitivity"].addItems(["NORM", "MID", "HIGH1", "HIGH2", "HIGH3"])
+        widgets["sensitivity"].setCurrentText(defaults.get("sensitivity", "HIGH2"))
+        widgets["ref_level"] = QtWidgets.QLineEdit(defaults.get("ref_level", "10uW"))
+        grid.addWidget(QtWidgets.QLabel("Center λ"), 0, 0)
+        grid.addWidget(widgets["center_wl"], 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Span"), 0, 2)
+        grid.addWidget(widgets["span"], 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Sensitivity"), 1, 0)
+        grid.addWidget(widgets["sensitivity"], 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Ref level"), 1, 2)
+        grid.addWidget(widgets["ref_level"], 1, 3)
+        return box
+
+    def _level_sweep_row(self, step: int, *, stop: int = 1023, stepv: int = 64) -> QtWidgets.QWidget:
+        """A 'Levels start / stop / step' row stored on self.step_widgets[step]."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widgets = self.step_widgets[step]
+        widgets["level_start"] = self._spin(0, 1023, 0)
+        widgets["level_stop"] = self._spin(0, 1023, stop)
+        widgets["level_step"] = self._spin(1, 1023, stepv)
+        layout.addWidget(QtWidgets.QLabel("Levels"))
+        layout.addWidget(widgets["level_start"])
+        layout.addWidget(QtWidgets.QLabel("→"))
+        layout.addWidget(widgets["level_stop"])
+        layout.addWidget(QtWidgets.QLabel("step"))
+        layout.addWidget(widgets["level_step"])
+        layout.addStretch(1)
+        return row
+
+    def _output_row(self, step: int, key: str, label: str, default_name: str, is_csv: bool) -> QtWidgets.QWidget:
+        """An output path edit + Browse, stored under self.step_widgets[step][key]."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        edit = QtWidgets.QLineEdit()
+        edit.setPlaceholderText(f"{label} (blank = temp file)")
+        button = QtWidgets.QPushButton("Browse")
+        filt = "CSV Files (*.csv)" if is_csv else "JSON Files (*.json)"
+        button.clicked.connect(lambda: self._browse_save_into(edit, default_name, filt))
+        self.step_widgets[step][key] = edit
+        layout.addWidget(QtWidgets.QLabel(label))
+        layout.addWidget(edit, 1)
+        layout.addWidget(button)
+        return row
+
+    def _input_file_row(self, step: int, caption: str, filt: str) -> QtWidgets.QWidget:
+        """An input path edit + Browse for a step, stored under [step]['in_path']."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        edit = QtWidgets.QLineEdit()
+        button = QtWidgets.QPushButton("Browse")
+        button.clicked.connect(lambda: self._browse_open_into(edit, caption, filt))
+        self.step_widgets[step]["in_path"] = edit
+        layout.addWidget(QtWidgets.QLabel("Input file"))
+        layout.addWidget(edit, 1)
+        layout.addWidget(button)
+        return row
+
+    def _min_max_row(self, step: int, label: str) -> QtWidgets.QWidget:
+        """A manual min/max level pair stored under [step]['min'] / [step]['max']."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        widgets = self.step_widgets[step]
+        widgets["min"] = self._spin(0, 1023, 0)
+        widgets["max"] = self._spin(0, 1023, 1023)
+        layout.addWidget(QtWidgets.QLabel(label))
+        layout.addWidget(QtWidgets.QLabel("min"))
+        layout.addWidget(widgets["min"])
+        layout.addWidget(QtWidgets.QLabel("max"))
+        layout.addWidget(widgets["max"])
+        layout.addStretch(1)
+        return row
+
+    def _run_row(self, step: int, run_text: str, slot: Callable[[], None]) -> QtWidgets.QWidget:
+        """A status label + Run button row, stored under [step]['status'] / ['run']."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        status = QtWidgets.QLabel("\N{EN DASH}")
+        button = QtWidgets.QPushButton(run_text)
+        button.setEnabled(False)
+        button.clicked.connect(slot)
+        self.step_widgets[step]["status"] = status
+        self.step_widgets[step]["run"] = button
+        layout.addWidget(status, 1)
+        layout.addWidget(button)
+        return row
+
+    def _build_step1_tab(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.addWidget(
+            self._caption("Sweep full-screen levels to find the darkest/brightest levels.")
+        )
+        layout.addWidget(self._build_measurement_group(1, {}))
+        layout.addWidget(self._level_sweep_row(1, stop=1023, stepv=64))
+        layout.addWidget(self._output_row(1, "out", "Output JSON", "calib_step1.json", False))
+        layout.addWidget(self._run_row(1, "Run Step 1", self._run_step1))
+        layout.addStretch(1)
+        return page
+
+    def _build_step2_tab(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.addWidget(
+            self._caption("Map x→wavelength with a bright window. Needs min/max levels.")
+        )
+        layout.addWidget(self._build_measurement_group(2, {}))
+
+        cfg = QtWidgets.QHBoxLayout()
+        widgets = self.step_widgets[2]
+        widgets["window"] = self._spin(1, 8191, 8)
+        widgets["peak_nm"] = self._double_spin(0.0, 50.0, 0.2, " nm", 3)
+        widgets["peak_nm"].setToolTip("Centroid half-window around the peak, in nm")
+        cfg.addWidget(QtWidgets.QLabel("Window px"))
+        cfg.addWidget(widgets["window"])
+        cfg.addWidget(QtWidgets.QLabel("Peak ± window"))
+        cfg.addWidget(widgets["peak_nm"])
+        cfg.addStretch(1)
+        layout.addLayout(cfg)
+
+        # input source
+        src_row = QtWidgets.QHBoxLayout()
+        widgets["source"] = QtWidgets.QComboBox()
+        widgets["source"].addItems(
+            ["Step 1 result (memory)", "From file…", "Manual min/max"]
+        )
+        widgets["source"].currentIndexChanged.connect(self._toggle_step2_source)
+        src_row.addWidget(QtWidgets.QLabel("Min/max source"))
+        src_row.addWidget(widgets["source"])
+        src_row.addStretch(1)
+        layout.addLayout(src_row)
+
+        widgets["in_row"] = self._input_file_row(
+            2, "Open Step 1/2 result", "JSON Files (*.json)"
+        )
+        layout.addWidget(widgets["in_row"])
+        widgets["manual_row"] = self._min_max_row(2, "Manual levels")
+        layout.addWidget(widgets["manual_row"])
+
+        layout.addWidget(self._output_row(2, "out", "Output JSON", "calib_step2.json", False))
+        layout.addWidget(self._run_row(2, "Run Step 2", self._run_step2))
+        layout.addStretch(1)
+        self._toggle_step2_source()
+        return page
+
+    def _build_step3_tab(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.addWidget(
+            self._caption(
+                "Sweep levels at each calibrated wavelength. Narrow window + higher "
+                "sensitivity = less noise."
+            )
+        )
+        # higher precision defaults: HIGH3 + narrower span
+        layout.addWidget(
+            self._build_measurement_group(3, {"sensitivity": "HIGH3", "span": "4nm"})
+        )
+
+        cfg = QtWidgets.QHBoxLayout()
+        widgets = self.step_widgets[3]
+        widgets["window"] = self._spin(1, 8191, 3)
+        widgets["avg_nm"] = self._double_spin(0.0, 50.0, 0.1, " nm", 3)
+        widgets["avg_nm"].setToolTip("Averaging window around each wavelength, in nm")
+        cfg.addWidget(QtWidgets.QLabel("Window px"))
+        cfg.addWidget(widgets["window"])
+        cfg.addWidget(QtWidgets.QLabel("Avg ± window"))
+        cfg.addWidget(widgets["avg_nm"])
+        cfg.addStretch(1)
+        layout.addLayout(cfg)
+        layout.addWidget(self._level_sweep_row(3, stop=1023, stepv=32))
+
+        # wavelength source
+        src_row = QtWidgets.QHBoxLayout()
+        widgets["source"] = QtWidgets.QComboBox()
+        widgets["source"].addItems(["Step 2 result (memory)", "From file…"])
+        widgets["source"].currentIndexChanged.connect(self._toggle_step3_source)
+        src_row.addWidget(QtWidgets.QLabel("Wavelength source"))
+        src_row.addWidget(widgets["source"])
+        src_row.addStretch(1)
+        layout.addLayout(src_row)
+
+        widgets["in_row"] = self._input_file_row(
+            3, "Open Step 2 result or λ-map CSV", "Calibration (*.json *.csv)"
+        )
+        layout.addWidget(widgets["in_row"])
+        widgets["manual_row"] = self._min_max_row(3, "min/max for CSV source")
+        layout.addWidget(widgets["manual_row"])
+
+        layout.addWidget(self._output_row(3, "out", "Output JSON", "calib_step3.json", False))
+        layout.addWidget(self._output_row(3, "out_csv", "Output CSV", "calibration.csv", True))
+        layout.addWidget(self._run_row(3, "Run Step 3", self._run_step3))
+        layout.addStretch(1)
+        self._toggle_step3_source()
+        return page
+
+    def _caption(self, text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("PageSubtitle")
+        label.setWordWrap(True)
+        return label
+
+    def _double_spin(
+        self, minimum: float, maximum: float, value: float, suffix: str, decimals: int
+    ) -> QtWidgets.QDoubleSpinBox:
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setDecimals(decimals)
+        spin.setSingleStep(0.1)
+        spin.setValue(value)
+        spin.setSuffix(suffix)
+        return spin
 
     def _build_scan_page(self) -> QtWidgets.QWidget:
         page = self._page_shell("Center Scan")
@@ -1166,12 +1371,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"Saved calibration result: {path}")
 
     # ----- OSA-driven acquisition -----
-    def _browse_acquisition_csv(self) -> None:
+    def _browse_save_into(self, edit: QtWidgets.QLineEdit, default_name: str, filt: str) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Calibration CSV Output", "calibration.csv", "CSV Files (*.csv)"
+            self, "Select output", default_name, filt
         )
         if path:
-            self.cal_output_edit.setText(path)
+            edit.setText(path)
+
+    def _browse_open_into(self, edit: QtWidgets.QLineEdit, caption: str, filt: str) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, caption, "", filt)
+        if path:
+            edit.setText(path)
+
+    def _toggle_step2_source(self) -> None:
+        index = self.step_widgets[2]["source"].currentIndex()
+        self.step_widgets[2]["in_row"].setVisible(index == 1)
+        self.step_widgets[2]["manual_row"].setVisible(index == 2)
+
+    def _toggle_step3_source(self) -> None:
+        index = self.step_widgets[3]["source"].currentIndex()
+        self.step_widgets[3]["in_row"].setVisible(index == 1)
+        # manual min/max only matter for a bare wavelength-map CSV source
+        self.step_widgets[3]["manual_row"].setVisible(index == 1)
 
     def _connect_osa(self) -> None:
         host = self.osa_host_edit.text().strip()
@@ -1192,79 +1413,317 @@ class MainWindow(QtWidgets.QMainWindow):
         osa, identity = payload
         self.osa_controller = osa
         self._set_status(self.osa_status_label, "OSA: open", "ok")
-        self.osa_connect_button.setEnabled(False)
-        self.osa_disconnect_button.setEnabled(True)
-        self.run_cal_button.setEnabled(True)
+        self._set_calibration_running(False)
         self._log(f"OSA connected: {identity.strip()}")
 
     def _on_osa_error(self, _error: str) -> None:
         self._set_status(self.osa_status_label, "OSA: error", "error")
-        self.osa_connect_button.setEnabled(True)
+        self._set_calibration_running(False)
 
     def _disconnect_osa(self) -> None:
         osa = self.osa_controller
         self.osa_controller = None
-        self.run_cal_button.setEnabled(False)
-        self.osa_disconnect_button.setEnabled(False)
-        self.osa_connect_button.setEnabled(True)
         self._set_status(self.osa_status_label, "OSA: closed", "off")
+        self._set_calibration_running(False)
         if osa is not None:
             self._run_task("Disconnect OSA", osa.disconnect)
 
-    def _calibration_levels(self) -> list[int]:
-        start = self.cal_level_start_spin.value()
-        stop = self.cal_level_stop_spin.value()
-        step = self.cal_level_step_spin.value()
+    def _set_calibration_running(self, running: bool) -> None:
+        connected = self.osa_controller is not None
+        for button in getattr(self, "calibration_run_buttons", []):
+            button.setEnabled(connected and not running)
+        self.stop_cal_button.setEnabled(running)
+        self.osa_connect_button.setEnabled(not running and not connected)
+        self.osa_disconnect_button.setEnabled(not running and connected)
+
+    # ----- per-step config readers (GUI thread) -----
+    def _step_settings(self, step: int) -> MeasurementSettings:
+        widgets = self.step_widgets[step]
+        return MeasurementSettings(
+            center_wl=widgets["center_wl"].text().strip() or "778nm",
+            span=widgets["span"].text().strip() or "8nm",
+            sensitivity=widgets["sensitivity"].currentText(),
+            reference_level=widgets["ref_level"].text().strip() or "10uW",
+            y_unit="LINear",
+        )
+
+    def _step_levels(self, step: int) -> list[int]:
+        widgets = self.step_widgets[step]
+        start = widgets["level_start"].value()
+        stop = widgets["level_stop"].value()
+        step_size = widgets["level_step"].value()
         if stop < start:
             raise ValueError("level stop must be >= level start")
-        levels = list(range(start, stop + 1, step))
+        levels = list(range(start, stop + 1, step_size))
         if not levels:
             levels = [start]
         if levels[-1] != stop:
             levels.append(stop)
         return levels
 
-    def _measurement_settings(self) -> MeasurementSettings:
-        return MeasurementSettings(
-            center_wl=self.cal_center_wl_edit.text().strip() or "778nm",
-            span=self.cal_span_edit.text().strip() or "8nm",
-            sensitivity=self.cal_sensitivity_combo.currentText(),
-            reference_level=self.cal_ref_level_edit.text().strip() or "10uW",
-            y_unit="LINear",
+    def _resolve_output_path(self, text: str, default_name: str) -> Path:
+        text = text.strip()
+        if text:
+            return Path(text)
+        suffix = Path(default_name).suffix or ".json"
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", suffix=suffix, prefix="santec_calib_", delete=False
         )
+        handle.close()
+        return Path(handle.name)
 
-    def _set_calibration_running(self, running: bool) -> None:
-        self.run_cal_button.setEnabled(not running and self.osa_controller is not None)
-        self.stop_cal_button.setEnabled(running)
-        self.osa_connect_button.setEnabled(False if running else self.osa_controller is None)
-        self.osa_disconnect_button.setEnabled(
-            False if running else self.osa_controller is not None
-        )
+    def _resolve_step_input(self, step: int) -> CalibrationResult:
+        widgets = self.step_widgets[step]
+        index = widgets["source"].currentIndex()
+        if step == 2:
+            if index == 2:  # manual min/max
+                low = widgets["min"].value()
+                high = widgets["max"].value()
+                if high < low:
+                    raise ValueError("max level must be >= min level")
+                return CalibrationResult(
+                    wavelength=np.asarray([]),
+                    coordinates=np.asarray([]),
+                    max_level=high,
+                    min_level=low,
+                    level_range=np.asarray([], dtype=int),
+                )
+            result = self._load_input_result(
+                index,
+                widgets["in_path"].text().strip(),
+                "run Step 1 first, or choose a file / manual min/max",
+                "choose a Step 1/2 result file",
+            )
+            self._require_levels(result)
+            return result
 
-    def _run_full_calibration(self) -> None:
+        # step 3 wavelength source
+        if index == 1:  # from file (JSON snapshot or coordinate-wavelength CSV)
+            path = widgets["in_path"].text().strip()
+            if not path:
+                raise ValueError("choose a Step 2 result or wavelength-map CSV")
+            if path.lower().endswith(".csv"):
+                result = load_wavelength_map_csv(
+                    path,
+                    min_level=widgets["min"].value(),
+                    max_level=widgets["max"].value(),
+                )
+            else:
+                result = load_calibration_result(path)
+        else:  # memory
+            result = self.calibration_result
+            if result is None:
+                raise ValueError("run Step 2 first, or choose a file")
+        if (
+            np.asarray(result.coordinates).size == 0
+            or np.asarray(result.wavelength).size == 0
+        ):
+            raise ValueError("the wavelength source has no coordinate -> wavelength map")
+        self._require_levels(result)
+        return result
+
+    def _load_input_result(
+        self, index: int, path: str, empty_msg: str, no_path_msg: str
+    ) -> CalibrationResult:
+        if index == 1:  # from file
+            if not path:
+                raise ValueError(no_path_msg)
+            return load_calibration_result(path)
+        result = self.calibration_result  # in memory
+        if result is None:
+            raise ValueError(empty_msg)
+        return result
+
+    def _require_levels(self, result: CalibrationResult) -> None:
+        try:
+            int(np.asarray(result.min_level).flat[0])
+            int(np.asarray(result.max_level).flat[0])
+        except (ValueError, IndexError, TypeError):
+            raise ValueError("min/max levels are missing from the input")
+
+    def _reject_calibration(self, exc: Exception) -> None:
+        self._log(f"Calibration input rejected: {exc}")
+        QtWidgets.QMessageBox.warning(self, "Calibration", str(exc))
+
+    # ----- per-step run handlers -----
+    def _osa_ready(self) -> OSAController | None:
         osa = self.osa_controller
         if osa is None or not osa.is_connected:
             self._log("Connect to the OSA first")
+            return None
+        return osa
+
+    def _run_step1(self) -> None:
+        osa = self._osa_ready()
+        if osa is None:
             return
         try:
-            levels = self._calibration_levels()
+            settings = self._step_settings(1)
+            levels = self._step_levels(1)
         except ValueError as exc:
-            self._log(f"Invalid level sweep: {exc}")
-            QtWidgets.QMessageBox.warning(self, "Calibration", str(exc))
-            return
-
-        settings = self._measurement_settings()
-        window = self.cal_window_spin.value()
-        wl_window = self.cal_wl_window_spin.value() or None
-        output = self.cal_output_edit.text().strip() or None
+            return self._reject_calibration(exc)
+        out_path = self._resolve_output_path(
+            self.step_widgets[1]["out"].text(), "calib_step1.json"
+        )
         controller = self._controller()
+        self._log(f"Step 1 started: {len(levels)} levels")
+
+        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            _mn, _mx, min_level, max_level, _rec = find_min_max_intensity_levels(
+                osa, controller, levels, settings,
+                stop_event=stop_event, progress_callback=report,
+            )
+            result = CalibrationResult(
+                wavelength=np.asarray([]),
+                coordinates=np.asarray([]),
+                max_level=max_level,
+                min_level=min_level,
+                level_range=np.asarray(levels, dtype=int),
+            )
+            save_calibration_result(result, out_path)
+            return {
+                "status": "ok", "step": 1, "result": result, "saved": out_path,
+                "summary": f"min level {min_level}, max level {max_level}",
+            }
+
+        self._launch_calibration("Run step 1", work)
+
+    def _run_step2(self) -> None:
+        osa = self._osa_ready()
+        if osa is None:
+            return
+        try:
+            settings = self._step_settings(2)
+            seed = self._resolve_step_input(2)
+            window = self.step_widgets[2]["window"].value()
+            peak_nm = self.step_widgets[2]["peak_nm"].value() or None
+        except ValueError as exc:
+            return self._reject_calibration(exc)
+        out_path = self._resolve_output_path(
+            self.step_widgets[2]["out"].text(), "calib_step2.json"
+        )
+        controller = self._controller()
+        self._log(f"Step 2 started: window {window} px")
+
+        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            result = wavelength_calibration(
+                osa, controller, [], settings, seed,
+                window_size=window, peak_half_window_nm=peak_nm,
+                stop_event=stop_event, progress_callback=report,
+            )
+            save_calibration_result(result, out_path)
+            return {
+                "status": "ok", "step": 2, "result": result, "saved": out_path,
+                "summary": f"{result.coordinates.size} coordinates",
+            }
+
+        self._launch_calibration("Run step 2", work)
+
+    def _run_step3(self) -> None:
+        osa = self._osa_ready()
+        if osa is None:
+            return
+        try:
+            settings = self._step_settings(3)
+            mapping = self._resolve_step_input(3)
+            levels = self._step_levels(3)
+            window = self.step_widgets[3]["window"].value()
+            avg_nm = self.step_widgets[3]["avg_nm"].value() or None
+        except ValueError as exc:
+            return self._reject_calibration(exc)
+        out_json = self._resolve_output_path(
+            self.step_widgets[3]["out"].text(), "calib_step3.json"
+        )
+        out_csv = self._resolve_output_path(
+            self.step_widgets[3]["out_csv"].text(), "calibration.csv"
+        )
+        controller = self._controller()
+        self._log(f"Step 3 started: {len(levels)} levels, window {window} px")
+
+        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            result = intensity_calibration(
+                osa, controller, levels, settings, mapping,
+                window_size=window, wavelength_window_nm=avg_nm,
+                stop_event=stop_event, progress_callback=report,
+            )
+            save_calibration_result(result, out_json)
+            csv_path = write_intensity_calibration_csv(result, out_csv)
+            return {
+                "status": "ok", "step": 3, "result": result, "saved": out_json,
+                "csv": csv_path, "summary": f"{result.coordinates.size} coordinates",
+            }
+
+        self._launch_calibration("Run step 3", work)
+
+    def _run_all(self) -> None:
+        osa = self._osa_ready()
+        if osa is None:
+            return
+        try:
+            s1 = self._step_settings(1)
+            levels1 = self._step_levels(1)
+            s2 = self._step_settings(2)
+            window2 = self.step_widgets[2]["window"].value()
+            peak_nm = self.step_widgets[2]["peak_nm"].value() or None
+            s3 = self._step_settings(3)
+            levels3 = self._step_levels(3)
+            window3 = self.step_widgets[3]["window"].value()
+            avg_nm = self.step_widgets[3]["avg_nm"].value() or None
+        except ValueError as exc:
+            return self._reject_calibration(exc)
+        out1 = self._resolve_output_path(self.step_widgets[1]["out"].text(), "calib_step1.json")
+        out2 = self._resolve_output_path(self.step_widgets[2]["out"].text(), "calib_step2.json")
+        out3 = self._resolve_output_path(self.step_widgets[3]["out"].text(), "calib_step3.json")
+        out_csv = self._resolve_output_path(
+            self.step_widgets[3]["out_csv"].text(), "calibration.csv"
+        )
+        controller = self._controller()
+        self._log("Run all started (steps 1 -> 2 -> 3)")
+
+        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            _mn, _mx, min_level, max_level, _rec = find_min_max_intensity_levels(
+                osa, controller, levels1, s1,
+                stop_event=stop_event, progress_callback=report,
+            )
+            seed = CalibrationResult(
+                wavelength=np.asarray([]), coordinates=np.asarray([]),
+                max_level=max_level, min_level=min_level,
+                level_range=np.asarray(levels1, dtype=int),
+            )
+            save_calibration_result(seed, out1)
+            wl_result = wavelength_calibration(
+                osa, controller, [], s2, seed,
+                window_size=window2, peak_half_window_nm=peak_nm,
+                stop_event=stop_event, progress_callback=report,
+            )
+            save_calibration_result(wl_result, out2)
+            final = intensity_calibration(
+                osa, controller, levels3, s3, wl_result,
+                window_size=window3, wavelength_window_nm=avg_nm,
+                stop_event=stop_event, progress_callback=report,
+            )
+            save_calibration_result(final, out3)
+            csv_path = write_intensity_calibration_csv(final, out_csv)
+            return {
+                "status": "ok", "step": "all", "result": final, "saved": out3,
+                "csv": csv_path,
+                "summary": (
+                    f"min {min_level}, max {max_level}, "
+                    f"{final.coordinates.size} coordinates"
+                ),
+            }
+
+        self._launch_calibration("Run all", work)
+
+    def _launch_calibration(
+        self,
+        label: str,
+        work: Callable[[ProgressEmit, threading.Event], dict[str, Any]],
+    ) -> None:
         stop_event = threading.Event()
         self.calibration_stop_event = stop_event
         self._set_calibration_running(True)
         self._open_calibration_dialog()
-        self._log(
-            f"Calibration started: {len(levels)} levels, window {window} px"
-        )
 
         # the callback runs on the worker thread, so hop to the GUI thread
         def report(progress: CalibrationProgress) -> None:
@@ -1272,65 +1731,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def run() -> dict[str, Any]:
             try:
-                _min_i, _max_i, min_level, max_level, _records = (
-                    find_min_max_intensity_levels(
-                        osa,
-                        controller,
-                        levels,
-                        settings,
-                        stop_event=stop_event,
-                        progress_callback=report,
-                    )
-                )
-                seed = CalibrationResult(
-                    wavelength=np.asarray([]),
-                    coordinates=np.asarray([]),
-                    max_level=max_level,
-                    min_level=min_level,
-                    level_range=np.asarray(levels, dtype=int),
-                )
-                wl_result = wavelength_calibration(
-                    osa,
-                    controller,
-                    levels,
-                    settings,
-                    seed,
-                    window_size=window,
-                    stop_event=stop_event,
-                    progress_callback=report,
-                )
-                final = intensity_calibration(
-                    osa,
-                    controller,
-                    levels,
-                    settings,
-                    wl_result,
-                    window_size=window,
-                    wavelength_window_nm=wl_window,
-                    stop_event=stop_event,
-                    progress_callback=report,
-                )
-                csv_path = write_intensity_calibration_csv(
-                    final, output or _temporary_calibration_csv()
-                )
+                return work(report, stop_event)
             except CalibrationAborted:
                 # report as an ordinary result so no error dialog is shown
                 return {"status": "aborted"}
-            return {
-                "status": "ok",
-                "result": final,
-                "csv": csv_path,
-                "min_level": min_level,
-                "max_level": max_level,
-            }
 
         # treat acquisition as an SLM task so the DVI keep-alive is suspended
-        self._run_slm_task(
-            "Run calibration",
-            run,
-            self._on_full_calibration,
-            self._on_full_calibration_error,
-        )
+        self._run_slm_task(label, run, self._on_step_finished, self._on_step_error)
 
     def _open_calibration_dialog(self) -> None:
         if self.calibration_dialog is not None:
@@ -1353,7 +1760,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.calibration_stop_event.set()
             self._log("Calibration stop requested")
 
-    def _on_full_calibration(self, payload: dict[str, Any]) -> None:
+    def _on_step_finished(self, payload: dict[str, Any]) -> None:
         self.calibration_stop_event = None
         self._set_calibration_running(False)
         if payload.get("status") == "aborted":
@@ -1361,27 +1768,37 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.calibration_dialog is not None:
                 self.calibration_dialog.finish(False, "Calibration stopped")
             return
-        result = payload["result"]
-        csv_path = payload["csv"]
-        self.calibration_result = result
-        self._log(
-            f"Calibration done: min level {payload['min_level']}, "
-            f"max level {payload['max_level']}, "
-            f"{result.coordinates.size} coordinates"
-        )
-        self._log(f"Calibration CSV saved: {csv_path}")
-        if self.calibration_dialog is not None:
-            self.calibration_dialog.finish(
-                True,
-                f"Done · {result.coordinates.size} coordinates · saved {csv_path}",
-            )
-        self.calibration_path_edit.setText(str(csv_path))
-        self.map_kind_combo.setCurrentIndex(0)
-        self._update_intensity_map()
-        # feed the freshly written CSV into the existing fit + plot flow
-        self._run_calibration_fit()
 
-    def _on_full_calibration_error(self, _error: str) -> None:
+        step = payload["step"]
+        result = payload["result"]
+        summary = payload.get("summary", "")
+        saved = payload.get("saved")
+        self.calibration_result = result
+
+        if step in (1, 2, 3):
+            self.step_widgets[step]["status"].setText(f"Done \N{MIDDLE DOT} {summary}")
+            out_edit = self.step_widgets[step]["out"]
+            if saved is not None and not out_edit.text().strip():
+                out_edit.setText(str(saved))
+        if saved is not None:
+            self._log(f"Saved {saved}")
+
+        label = "Run all" if step == "all" else f"Step {step}"
+        self._log(f"{label} done: {summary}")
+
+        csv_path = payload.get("csv")
+        if csv_path is not None:
+            self._log(f"Calibration CSV saved: {csv_path}")
+            self.calibration_path_edit.setText(str(csv_path))
+            self.map_kind_combo.setCurrentIndex(0)
+            self._update_intensity_map()
+            # feed the freshly written CSV into the existing fit + plot flow
+            self._run_calibration_fit()
+
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.finish(True, f"{label} done \N{MIDDLE DOT} {summary}")
+
+    def _on_step_error(self, _error: str) -> None:
         # _fail_task already logged the traceback and showed a dialog
         self.calibration_stop_event = None
         self._set_calibration_running(False)
@@ -1861,14 +2278,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_style(self) -> None:
         self.setStyleSheet(DARK_STYLESHEET)
-
-
-def _temporary_calibration_csv() -> Path:
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".csv", prefix="santec_calibration_", delete=False
-    )
-    handle.close()
-    return Path(handle.name)
 
 
 def main(argv: list[str] | None = None) -> int:
