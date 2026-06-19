@@ -180,6 +180,32 @@ def generate_center_scan(
         yield PhasePattern(x_start=x_start, x_end=min(width, x_start + window_px), data=data)
 
 
+def read_santec_csv(csv_path: str | Path) -> np.ndarray:
+    """Read a Santec SLM CSV back into a 2D uint16 array.
+
+    Inverse of write_santec_csv: drops the ``y/x`` header row and the leading
+    y-index column, returning the (height, width) grayscale grid that was
+    written. Used to recover exactly what was sent to the SLM for monitoring.
+    """
+    path = Path(csv_path)
+    with open(path, "r", encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.reader(file))
+    # tolerate a trailing empty field left by a line-ending comma
+    rows = [row[:-1] if row and row[-1] == "" else row for row in rows]
+    if len(rows) < 2:
+        raise ValueError(f"CSV has no data rows: {path}")
+    try:
+        data = [[int(cell) for cell in row[1:]] for row in rows[1:]]
+    except ValueError as exc:
+        raise ValueError(f"CSV contains a non-integer grayscale: {path}") from exc
+    array = np.asarray(data, dtype=np.int64)
+    if array.ndim != 2 or array.size == 0:
+        raise ValueError(f"CSV did not parse to a 2D grid: {path}")
+    if np.any(array < MIN_LEVEL) or np.any(array > MAX_LEVEL):
+        raise ValueError(f"CSV grayscale out of range 0..{MAX_LEVEL}: {path}")
+    return array.astype(np.uint16, copy=False)
+
+
 def write_santec_csv(data: np.ndarray, csv_path: str | Path) -> Path:
     data_uint16 = _validate_mask_array(data)
     path = Path(csv_path).resolve()

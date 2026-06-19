@@ -46,6 +46,22 @@ from .style import DARK_STYLESHEET
 ProgressEmit = Callable[[CalibrationProgress], None]
 
 
+def _pattern_to_qimage(data: np.ndarray) -> QtGui.QImage:
+    """Render a 0..1023 grayscale grid as an 8-bit QImage for preview.
+
+    Levels are mapped onto 18..235 so even level 0 is visible against a black
+    background while full scale stays near white.
+    """
+    array = np.asarray(data, dtype=np.float32)
+    preview = (array / MAX_LEVEL * 217.0 + 18.0).clip(0, 255).astype(np.uint8)
+    preview = np.ascontiguousarray(preview)
+    height, width = preview.shape
+    image = QtGui.QImage(
+        preview.data, width, height, width, QtGui.QImage.Format_Grayscale8
+    )
+    return image.copy()
+
+
 class WorkerSignals(QtCore.QObject):
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
@@ -224,6 +240,175 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
+class SLMMonitorWindow(QtWidgets.QDialog):
+    """A standalone live view of the exact pattern currently on the SLM.
+
+    It does not talk to hardware directly: it polls ``get_pattern`` (which
+    returns a copy of the controller's last displayed grid) on a timer and
+    renders both the 2D image and a column-averaged level-vs-x profile, so the
+    user can watch the SLM while operating other pages. ``describe`` returns a
+    short string for the source (grayscale level / CSV path).
+    """
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        get_pattern: Callable[[], np.ndarray | None],
+        describe: Callable[[], str | None],
+    ):
+        super().__init__(parent)
+        self._get_pattern = get_pattern
+        self._describe = describe
+        self._last_shape: tuple[int, int] | None = None
+        self.setWindowTitle("SLM Pattern Monitor")
+        self.setModal(False)
+        self.resize(820, 680)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.live_check = QtWidgets.QCheckBox("Live")
+        self.live_check.setChecked(True)
+        self.live_check.toggled.connect(self._on_live_toggled)
+        self.interval_spin = QtWidgets.QDoubleSpinBox()
+        self.interval_spin.setRange(0.1, 10.0)
+        self.interval_spin.setSingleStep(0.1)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setValue(0.5)
+        self.interval_spin.setSuffix(" s")
+        self.interval_spin.valueChanged.connect(self._on_interval_changed)
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh)
+        self.save_button = QtWidgets.QPushButton("Save PNG…")
+        self.save_button.setProperty("variant", "ghost")
+        self.save_button.clicked.connect(self._save_png)
+        controls.addWidget(self.live_check)
+        controls.addWidget(QtWidgets.QLabel("Every"))
+        controls.addWidget(self.interval_spin)
+        controls.addStretch(1)
+        controls.addWidget(self.refresh_button)
+        controls.addWidget(self.save_button)
+        layout.addLayout(controls)
+
+        self.info_label = QtWidgets.QLabel("\N{EN DASH}")
+        self.info_label.setObjectName("PageSubtitle")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        self.image_label = QtWidgets.QLabel()
+        self.image_label.setMinimumHeight(300)
+        self.image_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.image_label.setObjectName("Preview")
+        layout.addWidget(self.image_label, 1)
+
+        self.figure = Figure(figsize=(6, 2.2), tight_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setMaximumHeight(200)
+        self.axes = self.figure.add_subplot(111)
+        self._style_axes()
+        layout.addWidget(self.canvas)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start(int(self.interval_spin.value() * 1000))
+        self.refresh()
+
+    def _style_axes(self) -> None:
+        self.figure.patch.set_facecolor("#101820")
+        axes = self.axes
+        axes.set_facecolor("#101820")
+        axes.grid(True, color="#2b3a42", linewidth=0.7)
+        axes.tick_params(colors="#d8dee9", labelsize=8)
+        axes.xaxis.label.set_color("#d8dee9")
+        axes.yaxis.label.set_color("#d8dee9")
+        for spine in axes.spines.values():
+            spine.set_color("#41515c")
+        axes.set_xlabel("x column (px)")
+        axes.set_ylabel("mean level")
+
+    def _on_live_toggled(self, checked: bool) -> None:
+        if checked:
+            self._timer.start(int(self.interval_spin.value() * 1000))
+            self.refresh()
+        else:
+            self._timer.stop()
+
+    def _on_interval_changed(self, value: float) -> None:
+        if self.live_check.isChecked():
+            self._timer.start(int(value * 1000))
+
+    def refresh(self) -> None:
+        pattern = None
+        try:
+            pattern = self._get_pattern()
+        except Exception as exc:  # never let a poll error kill the timer
+            self.info_label.setText(f"Monitor error: {exc}")
+            return
+        if pattern is None:
+            self.info_label.setText(
+                "Nothing displayed yet (open the SLM and show a pattern)."
+            )
+            self.image_label.setText("\N{EN DASH}")
+            return
+
+        source = None
+        try:
+            source = self._describe()
+        except Exception:
+            source = None
+        height, width = pattern.shape
+        unique = int(np.unique(pattern).size)
+        prefix = f"{source}  ·  " if source else ""
+        self.info_label.setText(
+            f"{prefix}{width} x {height} px  ·  level "
+            f"{int(pattern.min())}–{int(pattern.max())}  ·  {unique} distinct"
+        )
+
+        image = _pattern_to_qimage(pattern)
+        pixmap = QtGui.QPixmap.fromImage(image).scaled(
+            self.image_label.size().expandedTo(QtCore.QSize(760, 280)),
+            QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+        self.image_label.setPixmap(pixmap)
+        self._draw_profile(pattern)
+        self._last_shape = (width, height)
+
+    def _draw_profile(self, pattern: np.ndarray) -> None:
+        profile = pattern.astype(np.float32).mean(axis=0)
+        xs = np.arange(profile.size)
+        reset = self._last_shape != (pattern.shape[1], pattern.shape[0])
+        self.axes.clear()
+        self._style_axes()
+        self.axes.plot(xs, profile, color="#47b8e0", linewidth=1.0)
+        self.axes.set_ylim(-20, MAX_LEVEL + 20)
+        if reset and profile.size:
+            self.axes.set_xlim(0, profile.size - 1)
+        self.canvas.draw_idle()
+
+    def _save_png(self) -> None:
+        pattern = None
+        try:
+            pattern = self._get_pattern()
+        except Exception:
+            pattern = None
+        if pattern is None:
+            QtWidgets.QMessageBox.information(
+                self, "SLM Monitor", "There is no pattern to save yet."
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save SLM Pattern", "slm_pattern.png", "PNG Image (*.png)"
+        )
+        if not path:
+            return
+        _pattern_to_qimage(pattern).save(path, "PNG")
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._timer.stop()
+        super().closeEvent(event)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     scan_progress = QtCore.pyqtSignal(int, int, str)
     scan_started = QtCore.pyqtSignal(int, int, int, int)
@@ -248,6 +433,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_result: CalibrationResult | None = None
         self.calibration_stop_event: threading.Event | None = None
         self.calibration_dialog: CalibrationProgressDialog | None = None
+        self.slm_monitor: SLMMonitorWindow | None = None
         self.scan_stop_event: threading.Event | None = None
         self.scan_pause_event: threading.Event | None = None
         self.scan_params: ScanParams | None = None
@@ -349,6 +535,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         dvi_mode_button.clicked.connect(self._switch_to_dvi_mode)
 
+        monitor_button = QtWidgets.QPushButton("SLM Monitor")
+        monitor_button.setToolTip(
+            "Open a separate live view of the exact pattern currently on the SLM"
+        )
+        monitor_button.clicked.connect(self._open_slm_monitor)
+
         self.keepalive_check = QtWidgets.QCheckBox("DVI keep-alive")
         self.keepalive_check.setToolTip(
             "Re-send the current pattern over DVI at a fixed interval so the "
@@ -359,7 +551,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.keepalive_interval_spin.setRange(0.5, 30.0)
         self.keepalive_interval_spin.setDecimals(1)
         self.keepalive_interval_spin.setSingleStep(0.5)
-        self.keepalive_interval_spin.setValue(15.0)
+        self.keepalive_interval_spin.setValue(0.5)
         self.keepalive_interval_spin.setSuffix(" s")
         self.keepalive_interval_spin.valueChanged.connect(self._on_keepalive_interval)
         self.keepalive_status_label = QtWidgets.QLabel("Keep-alive: off")
@@ -375,6 +567,7 @@ class MainWindow(QtWidgets.QMainWindow):
         connection_layout.addWidget(self.usb_slm_no_spin, 1, 1)
         connection_layout.addWidget(dvi_mode_button, 1, 2)
         connection_layout.addWidget(self.rate120_check, 1, 3, 1, 2)
+        connection_layout.addWidget(monitor_button, 1, 5)
         connection_layout.addWidget(self.keepalive_check, 2, 0, 1, 2)
         connection_layout.addWidget(QtWidgets.QLabel("Interval"), 2, 2)
         connection_layout.addWidget(self.keepalive_interval_spin, 2, 3)
@@ -1198,6 +1391,43 @@ class MainWindow(QtWidgets.QMainWindow):
             controller.get_slm_info,
             self._on_info_read,
         )
+
+    def _open_slm_monitor(self) -> None:
+        """Open (or re-focus) the standalone live SLM pattern monitor."""
+        if self.slm_monitor is not None:
+            self.slm_monitor.show()
+            self.slm_monitor.raise_()
+            self.slm_monitor.activateWindow()
+            return
+        monitor = SLMMonitorWindow(
+            self,
+            get_pattern=self._current_slm_pattern,
+            describe=self._describe_slm_pattern,
+        )
+        monitor.finished.connect(self._on_monitor_closed)
+        self.slm_monitor = monitor
+        monitor.show()
+
+    def _on_monitor_closed(self, _result: int) -> None:
+        self.slm_monitor = None
+
+    def _current_slm_pattern(self) -> np.ndarray | None:
+        controller = self.controller
+        if controller is None:
+            return None
+        try:
+            return controller.current_pattern()
+        except Exception:
+            return None
+
+    def _describe_slm_pattern(self) -> str | None:
+        controller = self.controller
+        if controller is None:
+            return None
+        try:
+            return controller.describe_last_display()
+        except Exception:
+            return None
 
     def _toggle_keepalive(self, checked: bool) -> None:
         if checked:
@@ -2091,14 +2321,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _render_pattern_preview(self, label: QtWidgets.QLabel, data: np.ndarray) -> None:
         # render the real grayscale levels (0..1023) as display brightness
-        preview = (data.astype(np.float32) / MAX_LEVEL * 217.0 + 18.0).astype(np.uint8)
-        image = QtGui.QImage(
-            preview.data,
-            preview.shape[1],
-            preview.shape[0],
-            preview.shape[1],
-            QtGui.QImage.Format_Grayscale8,
-        ).copy()
+        image = _pattern_to_qimage(data)
         pixmap = QtGui.QPixmap.fromImage(image).scaled(
             label.size().expandedTo(QtCore.QSize(760, 240)),
             QtCore.Qt.KeepAspectRatio,
@@ -2304,6 +2527,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_segment_preview()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self.slm_monitor is not None:
+            self.slm_monitor.close()
+            self.slm_monitor = None
         if self.keepalive is not None:
             self.keepalive.stop()
             self.keepalive = None

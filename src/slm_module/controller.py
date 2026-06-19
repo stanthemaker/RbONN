@@ -19,7 +19,7 @@ from .detector import (
     write_samples_csv,
 )
 from .driver import MODE_DVI, MODE_MEMORY, SLM_DVI_Driver as SLMDriver
-from .generator import make_vertical_window, write_santec_csv
+from .generator import make_vertical_window, read_santec_csv, write_santec_csv
 
 
 def validate_slm_csv(
@@ -247,6 +247,9 @@ class SLMController:
         self._io_lock = threading.RLock()
         # last pattern sent over DVI: ("gray", level) or ("csv", path)
         self._last_display: tuple[str, Any] | None = None
+        # the exact 2D grayscale grid last sent to the SLM, kept so a monitor
+        # can render precisely what is displayed without re-reading from disk
+        self._last_pattern: np.ndarray | None = None
 
     @property
     def is_open(self) -> bool:
@@ -296,16 +299,22 @@ class SLMController:
         with self._io_lock:
             self._ensure_open()
             self.driver.load_grayscale(grayscale_value, interval)
+            slm_width, slm_height = self.driver.slm_info()
             self._last_display = ("gray", grayscale_value)
+            self._last_pattern = np.full(
+                (slm_height, slm_width), grayscale_value, dtype=np.uint16
+            )
 
     def display_csv(self, csv_path: str | Path, interval: float = 0.2) -> None:
         slm_width, slm_height = self.get_slm_info()
         validate_slm_csv(csv_path, expected_width=slm_width, expected_height=slm_height)
         resolved = str(Path(csv_path).resolve())
+        pattern = read_santec_csv(resolved)
         with self._io_lock:
             self._ensure_open()
             self.driver.load_csv(resolved, interval)
             self._last_display = ("csv", resolved)
+            self._last_pattern = pattern
 
     # load npy array as a csv. input should be 2D
     def display_array(self, arr: np.ndarray, interval: float = 0.2) -> None:
@@ -330,10 +339,12 @@ class SLMController:
             csv_path = _temporary_csv_path("slm_mask_")
         csv_path = write_santec_csv(data, csv_path)
         validate_slm_csv(csv_path, expected_width=slm_width, expected_height=slm_height)
+        pattern = np.asarray(data).astype(np.uint16, copy=True)
         with self._io_lock:
             self._ensure_open()
             self.driver.load_csv(str(csv_path), interval)
             self._last_display = ("csv", str(csv_path))
+            self._last_pattern = pattern
         return csv_path
 
     def display_vertical_window(
@@ -384,6 +395,30 @@ class SLMController:
             return True
         finally:
             self._io_lock.release()
+
+    def current_pattern(self) -> np.ndarray | None:
+        """Return a copy of the exact grid last sent to the SLM, or None.
+
+        The read is lock-free: each display replaces ``_last_pattern`` with a
+        fresh, immutable array, so reading the reference always yields a whole,
+        consistent frame even while a scan worker is writing the next one. This
+        lets a live monitor poll the real displayed pattern without contending
+        with the io lock.
+        """
+        pattern = self._last_pattern
+        if pattern is None:
+            return None
+        return np.array(pattern, copy=True)
+
+    def describe_last_display(self) -> str | None:
+        """Human-readable description of what is currently displayed, or None."""
+        last = self._last_display
+        if last is None:
+            return None
+        kind, value = last
+        if kind == "gray":
+            return f"Grayscale level {value}"
+        return f"CSV: {value}"
 
     def run_center_scan(
         self,
@@ -442,6 +477,7 @@ class SLMController:
             with self._io_lock:
                 self.driver.load_csv(str(csv_path), 0.0)
                 self._last_display = ("csv", str(csv_path))
+                self._last_pattern = data
             result.frames.append(csv_path)
 
             dwell_completed = _interruptible_dwell(

@@ -251,6 +251,69 @@ class RunCenterScanTests(unittest.TestCase):
         self.assertTrue(all(value == 100 for value in data_row[2:]))
 
 
+class CurrentPatternTests(unittest.TestCase):
+    def test_none_before_any_display(self) -> None:
+        controller = SLMController(driver=FakeDriver())
+        self.assertIsNone(controller.current_pattern())
+        self.assertIsNone(controller.describe_last_display())
+
+    def test_grayscale_fills_full_grid(self) -> None:
+        fake = FakeDriver(size=(8, 3))
+        controller = SLMController(driver=fake)
+        controller.display_grayscale(321, interval=0.01)
+
+        pattern = controller.current_pattern()
+        self.assertEqual(pattern.shape, (3, 8))
+        self.assertTrue(np.all(pattern == 321))
+        self.assertEqual(controller.describe_last_display(), "Grayscale level 321")
+
+    def test_returns_independent_copy(self) -> None:
+        fake = FakeDriver(size=(6, 2))
+        controller = SLMController(driver=fake)
+        controller.display_grayscale(100, interval=0.01)
+
+        first = controller.current_pattern()
+        first[:] = 0
+        second = controller.current_pattern()
+        self.assertTrue(np.all(second == 100))
+
+    def test_vertical_window_capture_matches_displayed(self) -> None:
+        fake = FakeDriver(size=(10, 3))
+        controller = SLMController(driver=fake)
+        try:
+            controller.display_vertical_window(
+                x_start=4, level=800, window_px=2, background_level=50, interval=0.01
+            )
+            pattern = controller.current_pattern()
+        finally:
+            if fake.loaded_csv:
+                Path(fake.loaded_csv[0][0]).unlink(missing_ok=True)
+
+        self.assertEqual(pattern.shape, (3, 10))
+        self.assertTrue(np.all(pattern[:, 4:6] == 800))
+        self.assertTrue(np.all(pattern[:, :4] == 50))
+        self.assertTrue(np.all(pattern[:, 6:] == 50))
+        self.assertTrue(controller.describe_last_display().startswith("CSV: "))
+
+    def test_scan_updates_captured_frame(self) -> None:
+        fake = FakeDriver(size=(10, 2))
+        controller = SLMController(driver=fake)
+        params = ScanParams(600, window_px=2, step_px=4, dwell_seconds=0.001)
+        captured: list[int] = []
+
+        def progress(index: int, x: int, path: Path) -> None:
+            pattern = controller.current_pattern()
+            # the captured frame matches the window position for this frame
+            captured.append(int(np.argmax(pattern[0] == 600)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller.run_center_scan(
+                params, output_dir=temp_dir, progress_callback=progress
+            )
+
+        self.assertEqual(captured, [0, 4, 8])
+
+
 class RefreshDisplayTests(unittest.TestCase):
     def test_returns_false_when_nothing_displayed(self) -> None:
         controller = SLMController(driver=FakeDriver())

@@ -19,8 +19,29 @@ from slm_module.generator import (
     make_equal_x_segments,
     make_vertical_window,
     make_x_segments,
+    read_santec_csv,
     write_santec_csv,
 )
+
+
+class ReadSantecCsvTests(unittest.TestCase):
+    def test_round_trips_written_pattern(self) -> None:
+        data = make_vertical_window(
+            width=10, height=4, x_start=3, level=700, window_px=2, background_level=120
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = write_santec_csv(data, Path(temp_dir) / "p.csv")
+            loaded = read_santec_csv(path)
+        self.assertEqual(loaded.dtype, np.uint16)
+        self.assertEqual(loaded.shape, data.shape)
+        self.assertTrue(np.array_equal(loaded, data))
+
+    def test_rejects_out_of_range_grayscale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bad.csv"
+            path.write_text("y/x,0,1\n0,5000,3\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_santec_csv(path)
 
 
 class PhaseGeneratorTests(unittest.TestCase):
