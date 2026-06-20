@@ -4,7 +4,7 @@ import csv
 import json
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -346,6 +346,7 @@ def intensity_calibration(
     *,
     average_half_window: int = 2,
     wavelength_window_nm: float | None = None,
+    sweep_span_nm: float | None = None,
     region: tuple[int, int] | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -362,6 +363,16 @@ def intensity_calibration(
     coordinates that fall within that inclusive band of SLM columns. This also
     applies to a mapping loaded from a file, so only the selected slice of the
     loaded range is calibrated; None calibrates every coordinate.
+
+    ``sweep_span_nm`` speeds up acquisition: when set, each coordinate's signal
+    sweep uses a narrow OSA span (``sweep_span_nm`` wide) re-centered on that
+    coordinate's calibrated wavelength, instead of the wide ``measure_settings``
+    span. Far fewer points per sweep (with AUTO sampling) means much faster
+    measurements. The dark/bright reference traces are still measured once with
+    the wide ``measure_settings`` span, so the narrow signal trace no longer
+    shares their wavelength grid; intensities are therefore reduced by sampling
+    each trace at the calibrated wavelength (see ``mean_near_wavelength``) rather
+    than the element-wise ``_reduce_trace`` used when ``sweep_span_nm`` is None.
     """
 
     level_values = _validate_levels(levels)
@@ -373,6 +384,12 @@ def intensity_calibration(
     average_half_window = _validate_non_negative_int(
         average_half_window, "average_half_window"
     )
+    sweep_value = 0.0
+    if sweep_span_nm is not None:
+        sweep_value = float(sweep_span_nm)
+        if not sweep_value > 0:
+            raise ValueError("sweep_span_nm must be positive when provided")
+    use_narrow = sweep_span_nm is not None
     min_level = _level_value(calibration_results.min_level, "min_level")
     max_level = _level_value(calibration_results.max_level, "max_level")
 
@@ -396,30 +413,77 @@ def intensity_calibration(
     ):
         x_start = _window_start_from_coordinate(coordinate, window_size, slm_width)
 
+        if use_narrow:
+            # Re-center a narrow sweep on this coordinate's wavelength so the OSA
+            # only scans a tiny band (few AUTO points -> fast). Configure once and
+            # reuse it for every level below. The dark/bright references keep the
+            # wide span, so they no longer share this trace's wavelength grid:
+            # sample all three at the calibrated wavelength instead of subtracting
+            # element-wise (which _reduce_trace requires).
+            narrow_settings = replace(
+                measure_settings,
+                center_wl=f"{float(wavelength_nm):.4f}nm",
+                span=f"{sweep_value}nm",
+            )
+            osa.configure(narrow_settings)
+            background_at = mean_near_wavelength(
+                background_trace.wavelengths_nm,
+                background_power,
+                float(wavelength_nm),
+                half_window_points=average_half_window,
+                window_nm=wavelength_window_nm,
+            )
+            reference_at = mean_near_wavelength(
+                reference_trace.wavelengths_nm,
+                reference_power,
+                float(wavelength_nm),
+                half_window_points=average_half_window,
+                window_nm=wavelength_window_nm,
+            )
+            denominator = reference_at - background_at
+
         for level_index, level in enumerate(level_values):
             _check_stop(stop_event)
             pattern = dark_pattern.copy()
             pattern[x_start : x_start + window_size] = int(level)
             _display_1d_pattern(slm, pattern, slm_height)
 
-            trace = osa.measure(measure_settings)
-            trace_wavelengths, signal, normalized = _reduce_trace(
-                trace, _trace_power_w(trace), background_power, reference_power
-            )
-            raw_value = mean_near_wavelength(
-                trace_wavelengths,
-                signal,
-                float(wavelength_nm),
-                half_window_points=average_half_window,
-                window_nm=wavelength_window_nm,
-            )
-            normalized_value = mean_near_wavelength(
-                trace_wavelengths,
-                normalized,
-                float(wavelength_nm),
-                half_window_points=average_half_window,
-                window_nm=wavelength_window_nm,
-            )
+            if use_narrow:
+                # measure() with no settings reuses the per-coordinate config
+                # above, so no 7-command reconfigure per level.
+                trace = osa.measure()
+                signal_at = mean_near_wavelength(
+                    trace.wavelengths_nm,
+                    _trace_power_w(trace),
+                    float(wavelength_nm),
+                    half_window_points=average_half_window,
+                    window_nm=wavelength_window_nm,
+                )
+                raw_value = max(0.0, signal_at - background_at)
+                if abs(denominator) > np.finfo(float).eps:
+                    normalized_value = max(0.0, raw_value / denominator)
+                else:
+                    normalized_value = 0.0
+            else:
+                trace = osa.measure(measure_settings)
+                trace_wavelengths, signal, normalized = _reduce_trace(
+                    trace, _trace_power_w(trace), background_power, reference_power
+                )
+                raw_value = mean_near_wavelength(
+                    trace_wavelengths,
+                    signal,
+                    float(wavelength_nm),
+                    half_window_points=average_half_window,
+                    window_nm=wavelength_window_nm,
+                )
+                normalized_value = mean_near_wavelength(
+                    trace_wavelengths,
+                    normalized,
+                    float(wavelength_nm),
+                    half_window_points=average_half_window,
+                    window_nm=wavelength_window_nm,
+                )
+
             raw_intensity_levels[coordinate_index, level_index] = raw_value
             intensity_levels[coordinate_index, level_index] = normalized_value
             _report(

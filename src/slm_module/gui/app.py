@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -62,6 +63,18 @@ def _pattern_to_qimage(data: np.ndarray) -> QtGui.QImage:
     return image.copy()
 
 
+def _format_duration(seconds: float) -> str:
+    """Format a duration as m:ss, or h:mm:ss once it passes an hour."""
+    if not np.isfinite(seconds) or seconds < 0:
+        return "—"
+    total = int(round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 class WorkerSignals(QtCore.QObject):
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
@@ -115,6 +128,7 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
         self._on_stop = on_stop
         self._running = True
         self._phase: str | None = None
+        self._phase_start: float | None = None
         self._xs: list[float] = []
         self._ys: list[float] = []
         self._dirty = False
@@ -126,6 +140,7 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%v / %m  (%p%)")
+        self.eta_label = QtWidgets.QLabel("Elapsed 0:00 · ETA —")
         self.status_label = QtWidgets.QLabel("\N{EN DASH}")
         self.status_label.setWordWrap(True)
 
@@ -152,6 +167,7 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
 
         layout.addWidget(self.phase_label)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.eta_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.canvas, 1)
         layout.addWidget(self.log)
@@ -176,9 +192,11 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
         if progress.phase != self._phase:
             self._enter_phase(progress.phase)
         total = max(int(progress.total), 1)
+        done = min(int(progress.step) + 1, total)
         self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(min(int(progress.step) + 1, total))
+        self.progress_bar.setValue(done)
         self.status_label.setText(progress.message)
+        self._update_eta(done, total)
         if progress.x is not None and progress.y is not None:
             self._xs.append(float(progress.x))
             self._ys.append(float(progress.y))
@@ -186,12 +204,27 @@ class CalibrationProgressDialog(QtWidgets.QDialog):
 
     def _enter_phase(self, phase: str) -> None:
         self._phase = phase
+        self._phase_start = time.perf_counter()
         self._xs.clear()
         self._ys.clear()
         title, _xlabel, _ylabel = self._PHASES.get(phase, (phase, "x", "y"))
         self.phase_label.setText(title)
         self.log.appendPlainText(f"\N{BLACK RIGHT-POINTING TRIANGLE} {title}")
+        self.eta_label.setText("Elapsed 0:00 · ETA —")
         self._dirty = True
+
+    def _update_eta(self, done: int, total: int) -> None:
+        """Estimate time remaining from the average pace of this phase so far."""
+        if self._phase_start is None:
+            return
+        elapsed = time.perf_counter() - self._phase_start
+        if done <= 0:
+            self.eta_label.setText(f"Elapsed {_format_duration(elapsed)} · ETA —")
+            return
+        remaining = (elapsed / done) * max(total - done, 0)
+        self.eta_label.setText(
+            f"Elapsed {_format_duration(elapsed)} · ETA {_format_duration(remaining)}"
+        )
 
     def _redraw(self) -> None:
         if not self._dirty:
@@ -440,6 +473,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.keepalive: SLMKeepAlive | None = None
         self._slm_tasks_active = 0
         self._scan_x_range: tuple[int, int] = (0, 0)
+        self._scan_start_time: float | None = None
         self._segments_updating = False
 
         self.setWindowTitle("Santec SLM Control")
@@ -944,10 +978,17 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets["window"] = self._spin(1, 8191, 3)
         widgets["avg_nm"] = self._double_spin(0.0, 50.0, 0.1, " nm", 3)
         widgets["avg_nm"].setToolTip("Averaging window around each wavelength, in nm")
+        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.5, " nm", 3)
+        widgets["sweep_nm"].setToolTip(
+            "OSA span per coordinate, re-centered on the Step 2 wavelength. "
+            "Narrower = faster. 0 = use the full span above."
+        )
         cfg.addWidget(QtWidgets.QLabel("Window px"))
         cfg.addWidget(widgets["window"])
         cfg.addWidget(QtWidgets.QLabel("Avg ± window"))
         cfg.addWidget(widgets["avg_nm"])
+        cfg.addWidget(QtWidgets.QLabel("Sweep span"))
+        cfg.addWidget(widgets["sweep_nm"])
         cfg.addStretch(1)
         layout.addLayout(cfg)
         layout.addWidget(self._level_sweep_row(3, stop=1023, stepv=32))
@@ -1091,11 +1132,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_progress_bar.setValue(0)
         status_row = QtWidgets.QHBoxLayout()
         self.scan_signal_label = QtWidgets.QLabel("Signal: \N{EN DASH}")
+        self.scan_eta_label = QtWidgets.QLabel("Elapsed 0:00 · ETA —")
         self.scan_center_label = QtWidgets.QLabel("Center: \N{EN DASH}")
         self._set_status(self.scan_center_label, "Center: \N{EN DASH}", "off")
         status_row.addWidget(self.scan_size_label)
         status_row.addStretch(1)
         status_row.addWidget(self.scan_signal_label)
+        status_row.addWidget(self.scan_eta_label)
         status_row.addWidget(self.scan_center_label)
 
         self.preview_label = QtWidgets.QLabel()
@@ -1908,6 +1951,7 @@ class MainWindow(QtWidgets.QMainWindow):
             levels = self._step_levels(3)
             window = self.step_widgets[3]["window"].value()
             avg_nm = self.step_widgets[3]["avg_nm"].value() or None
+            sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
             region = self._step_region(3)
         except ValueError as exc:
             return self._reject_calibration(exc)
@@ -1923,7 +1967,8 @@ class MainWindow(QtWidgets.QMainWindow):
         def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
             result = intensity_calibration(
                 osa, controller, levels, settings, mapping,
-                window_size=window, wavelength_window_nm=avg_nm, region=region,
+                window_size=window, wavelength_window_nm=avg_nm,
+                sweep_span_nm=sweep_nm, region=region,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_json)
@@ -1950,6 +1995,7 @@ class MainWindow(QtWidgets.QMainWindow):
             levels3 = self._step_levels(3)
             window3 = self.step_widgets[3]["window"].value()
             avg_nm = self.step_widgets[3]["avg_nm"].value() or None
+            sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
             region3 = self._step_region(3)
         except ValueError as exc:
             return self._reject_calibration(exc)
@@ -1981,7 +2027,8 @@ class MainWindow(QtWidgets.QMainWindow):
             save_calibration_result(wl_result, out2)
             final = intensity_calibration(
                 osa, controller, levels3, s3, wl_result,
-                window_size=window3, wavelength_window_nm=avg_nm, region=region3,
+                window_size=window3, wavelength_window_nm=avg_nm,
+                sweep_span_nm=sweep_nm, region=region3,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(final, out3)
@@ -2200,6 +2247,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.scan_progress_bar.setValue(0)
         self.scan_signal_label.setText("Signal: \N{EN DASH}")
+        self.scan_eta_label.setText("Elapsed 0:00 · ETA —")
+        self._scan_start_time = time.perf_counter()
         self._set_status(self.scan_center_label, "Center: \N{EN DASH}", "off")
         self.scan_params = params
         self.scan_stop_event = threading.Event()
@@ -2277,8 +2326,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_size_label.setText(f"Using SLM size {width} x {height}")
 
     def _on_scan_progress(self, index: int, x: int, path: str) -> None:
-        start_x, _end_x = self._scan_x_range
-        self.scan_progress_bar.setValue(max(x - start_x + 1, 0))
+        start_x, end_x = self._scan_x_range
+        done = max(x - start_x + 1, 0)
+        self.scan_progress_bar.setValue(done)
+        if self._scan_start_time is not None and done > 0:
+            elapsed = time.perf_counter() - self._scan_start_time
+            total = max(end_x - start_x + 1, 1)
+            remaining = (elapsed / done) * max(total - done, 0)
+            self.scan_eta_label.setText(
+                f"Elapsed {_format_duration(elapsed)} · ETA {_format_duration(remaining)}"
+            )
         self._log(f"Displayed frame {index + 1} at x={x} ({Path(path).name})")
 
     def _on_scan_sample(self, x: float, signal: float) -> None:

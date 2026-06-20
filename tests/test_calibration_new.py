@@ -54,6 +54,27 @@ class FakeSLM:
         self.arrays.append(np.asarray(arr).copy())
 
 
+class FakeNarrowOSA:
+    """Fake supporting the narrow-sweep path: configure() + bare measure()."""
+
+    def __init__(self, traces: list[TraceData]):
+        self.traces = list(traces)
+        self.measure_calls = 0
+        self.configured: list[MeasurementSettings] = []
+        self.measure_settings_seen: list[MeasurementSettings | None] = []
+
+    def configure(self, settings: MeasurementSettings) -> None:
+        self.configured.append(settings)
+
+    def measure(self, settings: MeasurementSettings | None = None) -> TraceData:
+        self.measure_settings_seen.append(settings)
+        if self.measure_calls >= len(self.traces):
+            raise AssertionError("No trace left for FakeNarrowOSA")
+        trace = self.traces[self.measure_calls]
+        self.measure_calls += 1
+        return trace
+
+
 def make_trace(wavelengths_nm: np.ndarray, powers_w: list[float]) -> TraceData:
     return TraceData(
         wavelengths=wavelengths_nm * 1e-9,
@@ -108,6 +129,72 @@ class CalibrationNewTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(result.level_range, np.asarray([0, 100]))
         self.assertEqual(osa.measure_calls, 6)
+
+    def test_intensity_calibration_narrow_span_recenters_per_coordinate(self) -> None:
+        wide = np.asarray([100.0, 101.0, 102.0, 103.0, 104.0])
+        coord0 = np.asarray([100.5, 101.0, 101.5])
+        coord1 = np.asarray([102.5, 103.0, 103.5])
+        traces = [
+            make_trace(wide, [0.1, 0.1, 0.1, 0.1, 0.1]),  # background (wide)
+            make_trace(wide, [2.1, 2.1, 2.1, 2.1, 2.1]),  # reference (wide) -> denom 2.0
+            make_trace(coord0, [0.5, 0.5, 0.5]),  # coord 0 narrow signal -> raw 0.4
+            make_trace(coord1, [0.9, 0.9, 0.9]),  # coord 1 narrow signal -> raw 0.8
+        ]
+        osa = FakeNarrowOSA(traces)
+        slm = FakeSLM(size=(5, 2))
+        seed = CalibrationResult(
+            wavelength=np.asarray([101.0, 103.0]),
+            coordinates=np.asarray([1.0, 3.0]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([200]),
+        )
+
+        result = intensity_calibration(
+            osa,
+            slm,
+            [200],
+            MeasurementSettings(),
+            seed,
+            window_size=2,
+            average_half_window=1,
+            sweep_span_nm=0.5,
+        )
+
+        np.testing.assert_allclose(result.raw_intensity_levels, np.asarray([[0.4], [0.8]]))
+        np.testing.assert_allclose(result.intensity_levels, np.asarray([[0.2], [0.4]]))
+        # one narrow re-center per coordinate, on its Step-2 wavelength
+        self.assertEqual(
+            [s.center_wl for s in osa.configured], ["101.0000nm", "103.0000nm"]
+        )
+        self.assertEqual([s.span for s in osa.configured], ["0.5nm", "0.5nm"])
+        # references use the wide settings; signal sweeps reuse the per-coordinate
+        # config (no settings passed to measure())
+        self.assertEqual(
+            osa.measure_settings_seen,
+            [MeasurementSettings(), MeasurementSettings(), None, None],
+        )
+
+    def test_intensity_calibration_rejects_non_positive_sweep_span(self) -> None:
+        wavelengths = np.asarray([100.0, 101.0, 102.0])
+        traces = [make_trace(wavelengths, [0.1, 0.1, 0.1])] * 4
+        seed = CalibrationResult(
+            wavelength=np.asarray([101.0]),
+            coordinates=np.asarray([1.0]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([200]),
+        )
+        with self.assertRaises(ValueError):
+            intensity_calibration(
+                FakeNarrowOSA(traces),
+                FakeSLM(size=(3, 2)),
+                [200],
+                MeasurementSettings(),
+                seed,
+                window_size=1,
+                sweep_span_nm=0.0,
+            )
 
     def test_intensity_calibration_keeps_raw_and_normalized_maps(self) -> None:
         wavelengths = np.asarray([100.0, 101.0, 102.0])
