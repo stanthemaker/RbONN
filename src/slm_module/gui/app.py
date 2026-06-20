@@ -983,12 +983,25 @@ class MainWindow(QtWidgets.QMainWindow):
             "OSA span per coordinate, re-centered on the Step 2 wavelength. "
             "Narrower = faster. 0 = use the full span above."
         )
+        widgets["stride"] = self._spin(1, 8191, 1)
+        widgets["stride"].setToolTip(
+            "Measure only every Nth calibrated coordinate (1 = every coordinate)."
+        )
+        widgets["refine"] = QtWidgets.QCheckBox("Refine λ")
+        widgets["refine"].setChecked(True)
+        widgets["refine"].setToolTip(
+            "Re-calibrate each coordinate's wavelength from the narrow high-res "
+            "sweep (needs a sweep span above)."
+        )
         cfg.addWidget(QtWidgets.QLabel("Window px"))
         cfg.addWidget(widgets["window"])
         cfg.addWidget(QtWidgets.QLabel("Avg ± window"))
         cfg.addWidget(widgets["avg_nm"])
         cfg.addWidget(QtWidgets.QLabel("Sweep span"))
         cfg.addWidget(widgets["sweep_nm"])
+        cfg.addWidget(QtWidgets.QLabel("Stride"))
+        cfg.addWidget(widgets["stride"])
+        cfg.addWidget(widgets["refine"])
         cfg.addStretch(1)
         layout.addLayout(cfg)
         layout.addWidget(self._level_sweep_row(3, stop=1023, stepv=32))
@@ -1952,6 +1965,8 @@ class MainWindow(QtWidgets.QMainWindow):
             window = self.step_widgets[3]["window"].value()
             avg_nm = self.step_widgets[3]["avg_nm"].value() or None
             sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
+            stride = self.step_widgets[3]["stride"].value()
+            refine = self.step_widgets[3]["refine"].isChecked()
             region = self._step_region(3)
         except ValueError as exc:
             return self._reject_calibration(exc)
@@ -1968,7 +1983,8 @@ class MainWindow(QtWidgets.QMainWindow):
             result = intensity_calibration(
                 osa, controller, levels, settings, mapping,
                 window_size=window, wavelength_window_nm=avg_nm,
-                sweep_span_nm=sweep_nm, region=region,
+                sweep_span_nm=sweep_nm, coordinate_stride=stride,
+                refine_wavelength=refine, region=region,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_json)
@@ -1996,6 +2012,8 @@ class MainWindow(QtWidgets.QMainWindow):
             window3 = self.step_widgets[3]["window"].value()
             avg_nm = self.step_widgets[3]["avg_nm"].value() or None
             sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
+            stride = self.step_widgets[3]["stride"].value()
+            refine = self.step_widgets[3]["refine"].isChecked()
             region3 = self._step_region(3)
         except ValueError as exc:
             return self._reject_calibration(exc)
@@ -2028,7 +2046,8 @@ class MainWindow(QtWidgets.QMainWindow):
             final = intensity_calibration(
                 osa, controller, levels3, s3, wl_result,
                 window_size=window3, wavelength_window_nm=avg_nm,
-                sweep_span_nm=sweep_nm, region=region3,
+                sweep_span_nm=sweep_nm, coordinate_stride=stride,
+                refine_wavelength=refine, region=region3,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(final, out3)

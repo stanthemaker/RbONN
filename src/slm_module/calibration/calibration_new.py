@@ -347,6 +347,8 @@ def intensity_calibration(
     average_half_window: int = 2,
     wavelength_window_nm: float | None = None,
     sweep_span_nm: float | None = None,
+    coordinate_stride: int = 1,
+    refine_wavelength: bool = False,
     region: tuple[int, int] | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -373,11 +375,28 @@ def intensity_calibration(
     shares their wavelength grid; intensities are therefore reduced by sampling
     each trace at the calibrated wavelength (see ``mean_near_wavelength``) rather
     than the element-wise ``_reduce_trace`` used when ``sweep_span_nm`` is None.
+
+    ``coordinate_stride`` measures only every Nth calibrated coordinate (after the
+    region selection), trading spatial density for speed; 1 measures every
+    coordinate.
+
+    ``refine_wavelength`` (narrow path only) re-fits the coordinate->wavelength
+    mapping from Step 3's data: the narrow sweep resolves the peak more finely
+    than Step 2's wide sweep, so for each coordinate the strongest level's trace
+    is centroided to a refined peak wavelength. The returned ``wavelength`` array
+    and ``wavelength_fit_coefficients`` then reflect those refined values.
     """
 
     level_values = _validate_levels(levels)
     coordinates, wavelengths = _calibrated_mapping(calibration_results)
     coordinates, wavelengths = _select_region_mapping(coordinates, wavelengths, region)
+
+    coordinate_stride = int(coordinate_stride)
+    if coordinate_stride < 1:
+        raise ValueError("coordinate_stride must be >= 1")
+    if coordinate_stride > 1:
+        coordinates = coordinates[::coordinate_stride]
+        wavelengths = wavelengths[::coordinate_stride]
 
     slm_width, slm_height = slm.get_slm_info()
     window_size = _validate_window_size(window_size, slm_width)
@@ -405,6 +424,8 @@ def intensity_calibration(
 
     intensity_levels = np.zeros((coordinates.size, level_values.size), dtype=float)
     raw_intensity_levels = np.zeros((coordinates.size, level_values.size), dtype=float)
+    refine = refine_wavelength and use_narrow
+    refined_wavelengths = np.array(wavelengths, dtype=float)
     total = int(coordinates.size * level_values.size)
     step = 0
 
@@ -412,6 +433,9 @@ def intensity_calibration(
         zip(coordinates, wavelengths)
     ):
         x_start = _window_start_from_coordinate(coordinate, window_size, slm_width)
+        best_strength = 0.0
+        best_wavelengths_nm: np.ndarray | None = None
+        best_power: np.ndarray | None = None
 
         if use_narrow:
             # Re-center a narrow sweep on this coordinate's wavelength so the OSA
@@ -452,9 +476,10 @@ def intensity_calibration(
                 # measure() with no settings reuses the per-coordinate config
                 # above, so no 7-command reconfigure per level.
                 trace = osa.measure()
+                power = _trace_power_w(trace)
                 signal_at = mean_near_wavelength(
                     trace.wavelengths_nm,
-                    _trace_power_w(trace),
+                    power,
                     float(wavelength_nm),
                     half_window_points=average_half_window,
                     window_nm=wavelength_window_nm,
@@ -464,6 +489,11 @@ def intensity_calibration(
                     normalized_value = max(0.0, raw_value / denominator)
                 else:
                     normalized_value = 0.0
+                if refine and signal_at > best_strength:
+                    # keep the brightest trace; its peak localizes λ best
+                    best_strength = signal_at
+                    best_wavelengths_nm = trace.wavelengths_nm
+                    best_power = power
             else:
                 trace = osa.measure(measure_settings)
                 trace_wavelengths, signal, normalized = _reduce_trace(
@@ -499,15 +529,30 @@ def intensity_calibration(
             )
             step += 1
 
+        if refine and best_wavelengths_nm is not None and best_power is not None:
+            refined_center, _, _ = local_peak_centroid(
+                best_wavelengths_nm,
+                best_power,
+                half_window_nm=sweep_value / 2.0,
+            )
+            refined_wavelengths[coordinate_index] = refined_center
+
+    if refine:
+        result_wavelengths = refined_wavelengths
+        _, fit_coefficients = _fit_wavelength_mapping(coordinates, refined_wavelengths)
+    else:
+        result_wavelengths = wavelengths
+        fit_coefficients = calibration_results.wavelength_fit_coefficients
+
     return CalibrationResult(
-        wavelength=wavelengths,
+        wavelength=result_wavelengths,
         coordinates=coordinates,
         max_level=max_level,
         min_level=min_level,
         level_range=level_values,
         intensity_levels=intensity_levels,
         raw_intensity_levels=raw_intensity_levels,
-        wavelength_fit_coefficients=calibration_results.wavelength_fit_coefficients,
+        wavelength_fit_coefficients=fit_coefficients,
     )
 
 

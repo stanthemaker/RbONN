@@ -175,6 +175,76 @@ class CalibrationNewTests(unittest.TestCase):
             [MeasurementSettings(), MeasurementSettings(), None, None],
         )
 
+    def test_intensity_calibration_stride_skips_coordinates(self) -> None:
+        wide = np.asarray([100.0, 101.0, 102.0, 103.0, 104.0])
+        traces = [
+            make_trace(wide, [0.0, 0.0, 0.0, 0.0, 0.0]),  # background (wide)
+            make_trace(wide, [1.0, 1.0, 1.0, 1.0, 1.0]),  # reference (wide)
+            make_trace(np.asarray([100.8, 101.0, 101.2]), [0.4, 0.5, 0.4]),  # coord 1
+            make_trace(np.asarray([102.8, 103.0, 103.2]), [0.6, 0.7, 0.6]),  # coord 3
+        ]
+        osa = FakeNarrowOSA(traces)
+        seed = CalibrationResult(
+            wavelength=np.asarray([101.0, 102.0, 103.0, 104.0]),
+            coordinates=np.asarray([1.0, 2.0, 3.0, 4.0]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([200]),
+        )
+
+        result = intensity_calibration(
+            osa,
+            FakeSLM(size=(5, 2)),
+            [200],
+            MeasurementSettings(),
+            seed,
+            window_size=1,
+            average_half_window=1,
+            sweep_span_nm=0.5,
+            coordinate_stride=2,
+        )
+
+        np.testing.assert_array_equal(result.coordinates, np.asarray([1.0, 3.0]))
+        np.testing.assert_array_equal(result.wavelength, np.asarray([101.0, 103.0]))
+        self.assertEqual(result.intensity_levels.shape, (2, 1))
+        self.assertEqual(
+            [s.center_wl for s in osa.configured], ["101.0000nm", "103.0000nm"]
+        )
+        self.assertEqual(osa.measure_calls, 4)  # 2 references + 2 strided coordinates
+
+    def test_intensity_calibration_refines_wavelength_from_narrow_peak(self) -> None:
+        wide = np.asarray([100.0, 101.0, 102.0])
+        narrow = np.asarray([100.8, 101.0, 101.2, 101.4, 101.6])
+        traces = [
+            make_trace(wide, [0.0, 0.0, 0.0]),  # background (wide)
+            make_trace(wide, [1.0, 1.0, 1.0]),  # reference (wide) -> denom 1.0
+            make_trace(narrow, [0.1, 0.3, 0.6, 1.0, 0.5]),  # narrow peak near 101.4
+        ]
+        osa = FakeNarrowOSA(traces)
+        seed = CalibrationResult(
+            wavelength=np.asarray([101.0]),  # Step 2's coarse estimate
+            coordinates=np.asarray([1.0]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([200]),
+        )
+
+        result = intensity_calibration(
+            osa,
+            FakeSLM(size=(3, 2)),
+            [200],
+            MeasurementSettings(),
+            seed,
+            window_size=1,
+            average_half_window=1,
+            sweep_span_nm=1.0,
+            refine_wavelength=True,
+        )
+
+        # centroid over |λ - 101.4| <= 0.5 of [0.3,0.6,1.0,0.5] (min-subtracted)
+        np.testing.assert_allclose(result.wavelength, np.asarray([101.383333]), atol=1e-4)
+        self.assertIsNotNone(result.wavelength_fit_coefficients)
+
     def test_intensity_calibration_rejects_non_positive_sweep_span(self) -> None:
         wavelengths = np.asarray([100.0, 101.0, 102.0])
         traces = [make_trace(wavelengths, [0.1, 0.1, 0.1])] * 4
