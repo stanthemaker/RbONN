@@ -51,8 +51,9 @@ from torchvision import datasets, transforms
 from .pca_encoder import PCAEncoder
 from .twin import RbONNTwin, RbONNDeep, DETECTION_MODES
 
-DATA_DIR = Path("data")
-OUTPUT_DIR = Path("outputs/rbONN")
+HERE = Path(__file__).resolve().parent
+DATA_DIR = HERE / "data"
+OUTPUT_DIR = HERE / "output"
 N_CLASSES = 10
 TRACKIO_PROJECT = "rbONN_sim"
 PATCH_SIZE = 20   # SLM spatial channels = pixels per patch

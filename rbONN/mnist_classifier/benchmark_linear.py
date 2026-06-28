@@ -1,31 +1,25 @@
-"""Benchmark: single optical NL layer on raw 28x28 MNIST pixels.
+"""Benchmark: pure linear classifier on raw 28x28 MNIST pixels.
 
-Direct apples-to-apples counterpart of benchmark_linear.py.  IDENTICAL structure
-(784 -> 10, flat input, same Adam + cosine LR, same CrossEntropyLoss, same JSON
-schema) -- the ONLY difference is the layer:
+This is the reference upper bound for a *single* weight layer with no optical
+physics and no nonlinearity:
 
-    linear  :  logit_k = sum_i  W[k,i] * x_i              (real weighted sum)
-    optical :  logit_k = | sum_i  W~[k,i] * x~_i |^2       (coherent sum + |.|^2)
+    logits_k = sum_i  W[k,i] * x_i        (k = class, i = pixel)
+    pred     = argmax_k logits_k
 
-  where  x~_i = amplitudes_to_efield(x_i)   (pixel -> E-field, |x~|=x)
-         W~[k,i] = exp-shaped E-field of the learnable phase phi_w[k,i]
-
-Input encoding: flat 784 vector for BOTH models (no 4x4 patches).  A single
-fully-connected layer gives every pixel its own weight, so pixel order is
-irrelevant -- flatten vs patch makes no difference here.  No saturation.
-
-10 classes x 784 phases = 7,840 trainable params (same count as the linear model).
+10 classes x 784 pixels = 7,840 real weights (+ 10 bias).  Plain multinomial
+logistic regression.  Trained identically to the RbONN twin (Adam + cosine LR,
+CrossEntropyLoss) so the numbers are directly comparable, and the metrics JSON
+is written in the same schema as train_sim.py.
 
 Usage
 -----
-  python -m rbONN.benchmark_optical
-  python -m rbONN.benchmark_optical --epochs 80 --name optical_7840
+  python -m rbONN.benchmark_linear
+  python -m rbONN.benchmark_linear --epochs 80 --no-bias --name linear_nobias
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import numpy as np
@@ -34,10 +28,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
-from .twin import amplitudes_to_efield, phases_to_efield
-
-DATA_DIR = Path("data")
-OUTPUT_DIR = Path("outputs/rbONN")
+HERE = Path(__file__).resolve().parent
+DATA_DIR = HERE / "data"
+OUTPUT_DIR = HERE / "output"
 N_CLASSES = 10
 
 
@@ -57,30 +50,12 @@ def _confusion_matrix(pred: torch.Tensor, truth: torch.Tensor) -> np.ndarray:
     return cm
 
 
-class OpticalLayer(nn.Module):
-    """One optical neuron per class: global coherent sum over all 784 pixels.
-
-    Identical fan-in to nn.Linear(784, 10, bias=False) -- 7,840 phase weights --
-    but with complex E-field weights and square-law (|.|^2) detection instead of
-    a real dot product.  No nonlinearity beyond the physical square-law.
-    """
-
-    def __init__(self, n_in: int = 784, n_out: int = N_CLASSES):
-        super().__init__()
-        self.phi_w = nn.Parameter(torch.rand(n_out, n_in) * 2.0 * math.pi)
-
-    def forward(self, a: torch.Tensor) -> torch.Tensor:
-        x = amplitudes_to_efield(a)        # (batch, 784) complex, |x| = pixel
-        W = phases_to_efield(self.phi_w)   # (n_out, 784) complex
-        S = x @ W.T                        # (batch, n_out) complex coherent sum
-        return S.abs().pow(2)              # (batch, n_out) square-law logits
-
-
-def train_optical(
+def train_linear(
     epochs: int = 80,
     batch_size: int = 256,
     lr: float = 1e-2,
-    name: str = "optical_7840",
+    bias: bool = True,
+    name: str = "linear_baseline",
 ) -> dict:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,9 +68,9 @@ def train_optical(
     y_tr_t = torch.tensor(y_tr, dtype=torch.long, device=device)
     y_te_t = torch.tensor(y_te, dtype=torch.long, device=device)
 
-    model = OpticalLayer(784, N_CLASSES).to(device)
+    model = nn.Linear(784, N_CLASSES, bias=bias).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: optical NL 784 -> {N_CLASSES}  |S|^2  |  {n_params} parameters")
+    print(f"Model: pure linear 784 -> {N_CLASSES}  (bias={bias})  |  {n_params} parameters")
 
     loader = DataLoader(TensorDataset(A_tr, y_tr_t), batch_size=batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -110,7 +85,6 @@ def train_optical(
             optimizer.zero_grad()
             loss = criterion(model(xb), yb)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             running += loss.item() * len(xb)
         scheduler.step()
@@ -144,8 +118,8 @@ def train_optical(
     with open(metrics_path, "w") as f:
         json.dump({
             "run_name": name,
-            "detection_mode": "intensity",
-            "encoding": "raw_784px_flat_optical_NL",
+            "detection_mode": "linear",
+            "encoding": "raw_784px_pure_linear",
             "n_params": n_params,
             "best_acc": best_acc,
             "epochs": epochs,
@@ -164,9 +138,13 @@ def main():
     p.add_argument("--epochs", type=int, default=80)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--name", type=str, default="optical_7840")
+    p.add_argument("--no-bias", action="store_true", help="pure weighted sum, no bias term")
+    p.add_argument("--name", type=str, default="linear_baseline")
     args = p.parse_args()
-    train_optical(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, name=args.name)
+    train_linear(
+        epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+        bias=not args.no_bias, name=args.name,
+    )
 
 
 if __name__ == "__main__":
