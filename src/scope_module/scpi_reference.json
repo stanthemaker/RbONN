@@ -1,0 +1,138 @@
+{
+  "_about": "R&S RTO6 SCPI commands used by scope_module, verified against the RTO6 User Manual (1801.6687.02-13). 'page' = page number in that manual. This is a human reference; the driver in driver.py is the source of truth for what is actually sent.",
+  "instrument": "Rohde & Schwarz RTO6 oscilloscope",
+  "manual": "RTO6 User Manual 1801.6687.02 – 13 (RTO6_UserManual_scpicmd.pdf)",
+
+  "transport": {
+    "_note": "PyVISA over HiSLIP is R&S's recommended high-throughput LAN protocol; raw socket also works.",
+    "hislip_resource": "TCPIP::<ip>::hislip0::INSTR",
+    "vxi11_resource": "TCPIP::<ip>::inst0::INSTR",
+    "socket_resource": "TCPIP::<ip>::5025::SOCKET",
+    "backend": "pyvisa-py ('@py') — pure-Python, implements HiSLIP/TCPIP natively"
+  },
+
+  "ieee4882": {
+    "*IDN?": {"desc": "Identification query: manufacturer, model, serial, firmware."},
+    "*CLS": {"desc": "Clear status: empties the event registers and error queue."},
+    "*OPC": {"desc": "Sets the OPC bit (ESR bit 0) when all pending operations finish. Used as 'SINGle;*OPC' then poll *ESR? for an abortable wait."},
+    "*OPC?": {"desc": "Blocks and returns 1 when operations complete. Manual's examples use 'SINGle;*OPC?'. We avoid the blocking form so acquisitions stay abortable."},
+    "*ESR?": {"desc": "Reads and clears the standard event status register. Bit 0 (0x01) is Operation Complete.", "opc_bit": "0x01"},
+    "*WAI": {"desc": "Wait-to-continue; alternative overlap guard."}
+  },
+
+  "format": {
+    "FORMat[:DATA]": {
+      "command": "FORMat:DATA <Format>[,<Length>]",
+      "args": "ASCii | REAL,32 | INT,8 | INT,16",
+      "page": 1456,
+      "used": "REAL,32 (samples already in volts; simplest). INT,16 returns raw counts and needs scaling.",
+      "set_by": "_open_transport"
+    },
+    "FORMat:BORDer": {
+      "command": "FORMat:BORDer <ByteOrder>",
+      "args": "LSBFirst | MSBFirst",
+      "page": 1458,
+      "used": "LSBFirst → query_binary_values(is_big_endian=False). Relevant for INT,16/REAL,32.",
+      "set_by": "_open_transport"
+    },
+    "EXPort:WAVeform:INCXvalues": {
+      "command": "EXPort:WAVeform:INCXvalues <ON|OFF>",
+      "page": 1510,
+      "used": "Forced OFF so CHANnel:DATA? returns Y-values only; the time axis is rebuilt from the header. If ON, X and Y come back interleaved.",
+      "set_by": "_open_transport"
+    }
+  },
+
+  "vertical": {
+    "CHANnel<ch>[:STATe]": {"command": "CHANnel<ch>:STATe <ON|OFF>", "page": 1509, "suffix": "ch = 1..4", "set_by": "configure_channel"},
+    "CHANnel<ch>:SCALe":   {"command": "CHANnel<ch>:SCALe <Scale>",   "page": 1509, "unit": "V/div", "set_by": "configure_channel"},
+    "CHANnel<ch>:OFFSet":  {"command": "CHANnel<ch>:OFFSet <Offset>", "page": 1507, "unit": "V", "set_by": "configure_channel"},
+    "CHANnel<ch>:COUPling":{"command": "CHANnel<ch>:COUPling <Value>","page": 1505, "args": "DC | DCLimit | AC", "notes": "DC=50Ω, DCLimit=1MΩ DC, AC=1MΩ AC.", "set_by": "configure_channel"}
+  },
+
+  "decimation": {
+    "CHANnel<ch>[:WAVeform<wf>]:TYPE": {
+      "command": "CHANnel<ch>:TYPE <DecimationMode>",
+      "args": "SAMPle | PDETect | HRESolution | RMS",
+      "page": 1501,
+      "rst": "SAMPle",
+      "notes": "PDETect (peak detect) records the min and max of each sample interval → 2 values per sample, so a reduced record length still captures true pulse peaks. HRESolution = boxcar average; RMS = root-mean-square per interval.",
+      "set_by": "set_decimation"
+    },
+    "CHANnel<ch>[:WAVeform<wf>]:ARIThmetics": {
+      "command": "CHANnel<ch>:ARIThmetics <Arithmetics>",
+      "args": "OFF | AVERage | ENVelope",
+      "page": 1501,
+      "rst": "OFF",
+      "notes": "Across-acquisition combination (with ACQuire:COUNt). OFF = raw single-shot; AVERage = mean of N acquisitions; ENVelope = accumulated min/max. Forced OFF by configure() so captures are deterministically raw regardless of front-panel state. Distinct from decimation (TYPE), which reduces within one acquisition.",
+      "set_by": "set_arithmetics"
+    }
+  },
+
+  "horizontal_acquisition": {
+    "TIMebase:RANGe": {"command": "TIMebase:RANGe <AcqTime>", "page": 1493, "unit": "s", "notes": "Total acquisition time window. RANGe = 10 * SCALe.", "set_by": "set_time_range"},
+    "TIMebase:SCALe": {"command": "TIMebase:SCALe <TimeScale>", "page": 1492, "unit": "s/div", "notes": "Alternative to RANGe (10 divisions)."},
+    "ACQuire:POINts:AUTO": {
+      "command": "ACQuire:POINts:AUTO <RESolution|RECLength>",
+      "page": 1498,
+      "rst": "RESolution",
+      "notes": "Selects which quantity is held constant when the time scale changes. RECLength pins record length (resolution adapts) — used to fix a point budget over 1 s. NOT an ON/OFF toggle.",
+      "set_by": "set_record_length"
+    },
+    "ACQuire:POINts[:VALue]": {
+      "command": "ACQuire:POINts <RecordLength>",
+      "query": "ACQuire:POINts?",
+      "page": 1500,
+      "range": "1000 to 1E9 pts (increment 2)",
+      "notes": "With AUTO RECLength + a fixed RANGe, resolution = RANGe / POINts (e.g. 1 s / 1e6 = 1 µs → 1 MSa/s effective).",
+      "set_by": "set_record_length",
+      "read_by": "record_length"
+    },
+    "ACQuire:RESolution": {"command": "ACQuire:RESolution <s>", "page": 1500, "notes": "Time between waveform points; alternative to POINts."},
+    "ACQuire:SRATe": {"command": "ACQuire:SRATe <Sa/s>", "query": "ACQuire:SRATe?", "page": 1500, "notes": "Configured sample rate.", "read_by": "sample_rate"},
+    "ACQuire:SRReal?": {"command": "ACQuire:SRReal?", "page": 1500, "firmware": "FW 3.40", "notes": "Realized waveform points/s after decimation."},
+    "ACQuire:POINts:ARATe?": {"command": "ACQuire:POINts:ARATe?", "page": 1499, "notes": "ADC sample rate (points sampled per second)."},
+    "ACQuire:COUNt": {"command": "ACQuire:COUNt <MaxAcqCnt>", "page": 1497, "rst": "1", "notes": "Number of acquisitions for a SINGle/averaging run. Default 1 = one acquisition."}
+  },
+
+  "run_control": {
+    "RUN":        {"command": "RUN", "page": 1491, "notes": "Continuous acquisition."},
+    "RUNContinous": {"command": "RUNContinous", "page": 1491, "notes": "Alias of RUN (note R&S's spelling)."},
+    "RUNSingle":  {"command": "RUNSingle", "page": 1492, "notes": "Alias of SINGle."},
+    "SINGle":     {"command": "SINGle", "page": 1492, "notes": "Run ACQuire:COUNt acquisitions then stop. We send 'SINGle;*OPC' and poll *ESR? bit 0.", "used_by": "single_acquisition"},
+    "STOP":       {"command": "STOP", "page": 1492, "notes": "Stop acquisition. Used to abort a polled single acquisition.", "used_by": "stop"}
+  },
+
+  "waveform_readout": {
+    "CHANnel<ch>[:WAVeform<wf>]:DATA:HEADer?": {
+      "command": "CHANnel<ch>:DATA:HEADer?",
+      "page": 1510,
+      "returns": ["XStart [s]", "XStop [s]", "RecordLength", "ValuesPerSample"],
+      "example": "CHAN1:WAV1:DATA:HEAD?  ->  -9.477E-008,9.477E-008,200000,1",
+      "notes": "ValuesPerSample is 2 for peak-detect/envelope (interleaved min,max), else 1. [:WAVeform<wf>] omitted = waveform 1.",
+      "read_by": "read_waveform_header"
+    },
+    "CHANnel<ch>[:WAVeform<wf>]:DATA[:VALues]?": {
+      "command": "CHANnel<ch>:DATA? | CHANnel<ch>:WAVeform<wf>:DATA:VALues? [<Offset>],[<Length>]",
+      "page": 1510,
+      "notes": "Y-values per FORMat[:DATA] (when INCXvalues OFF). Offset/Length allow chunked reads. Returned as an IEEE-488.2 binary block under REAL,32/INT,16.",
+      "read_by": "read_waveform"
+    }
+  },
+
+  "typical_sequence": [
+    "*CLS",
+    "FORMat:DATA REAL,32",
+    "FORMat:BORDer LSBFirst",
+    "EXPort:WAVeform:INCXvalues OFF",
+    "CHANnel2:STATe ON",
+    "CHANnel2:TYPE PDETect",
+    "TIMebase:RANGe 1.0",
+    "ACQuire:POINts:AUTO RECLength",
+    "ACQuire:POINts 1000000",
+    "SINGle;*OPC",
+    "(poll) *ESR?   # bit 0 set when done",
+    "CHANnel2:DATA:HEADer?   # -> XStart,XStop,RecordLength,ValuesPerSample",
+    "CHANnel2:DATA?          # binary block of REAL,32 Y-values"
+  ]
+}

@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from osa_module.controller import MeasurementSettings, OSAController
+from scope_module.controller import ScopeController, ScopeSettings, Waveform
 
 from ..calibration import CalibrationFit, fit_calibration, load_calibration_csv
 from ..calibration.calibration_new import (
@@ -491,6 +492,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_result: ModulationErrorResult | None = None
         self.analysis_stop_event: threading.Event | None = None
         self._ana_capture_dir: str | None = None
+        self.scope_controller: ScopeController | None = None
+        self.scope_stop_event: threading.Event | None = None
+        self.scope_waveform: Waveform | None = None
 
         self.setWindowTitle("Santec SLM Control")
         self.resize(1280, 840)
@@ -533,6 +537,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
             ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding"),
             ("\N{LEFT-POINTING MAGNIFYING GLASS}  Mod Error", "Single-channel spectral error"),
+            ("\N{HIGH VOLTAGE SIGN}  Scope", "RTO6 ch1 waveform capture"),
         )
         for label, tooltip in nav_items:
             item = QtWidgets.QListWidgetItem(label)
@@ -548,6 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack.addWidget(self._build_segments_page())
         self.stack.addWidget(self._build_tpa_page())
         self.stack.addWidget(self._build_analysis_page())
+        self.stack.addWidget(self._build_scope_page())
 
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
@@ -1993,6 +1999,262 @@ class MainWindow(QtWidgets.QMainWindow):
                 msg += f"  (raw NPZ copy failed: {exc})"
         self.ana_status.setText(msg)
 
+    # ===================== Scope (RTO6) page =========================
+    def _build_scope_page(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Oscilloscope (R&S RTO6)")
+        subtitle = QtWidgets.QLabel(
+            "Capture a channel's waveform over a chosen time window. Peak-detect "
+            "decimation keeps the min/max of each interval, so a reduced record "
+            "length still preserves the true pulse peaks of the 80 MHz signal."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- connection ---
+        conn = self._panel("Connection")
+        cgrid = QtWidgets.QGridLayout(conn)
+        self.scope_host_edit = QtWidgets.QLineEdit("192.168.1.2")
+        self.scope_host_edit.setPlaceholderText("RTO6 host / IP")
+        self.scope_status_label = QtWidgets.QLabel("Scope: closed")
+        self.scope_status_label.setObjectName("StatusPill")
+        self.scope_connect_button = QtWidgets.QPushButton("Connect")
+        self.scope_connect_button.clicked.connect(self._connect_scope)
+        self.scope_disconnect_button = QtWidgets.QPushButton("Disconnect")
+        self.scope_disconnect_button.setProperty("variant", "ghost")
+        self.scope_disconnect_button.setEnabled(False)
+        self.scope_disconnect_button.clicked.connect(self._disconnect_scope)
+        cgrid.addWidget(QtWidgets.QLabel("Host"), 0, 0)
+        cgrid.addWidget(self.scope_host_edit, 0, 1)
+        cgrid.addWidget(self.scope_status_label, 0, 2)
+        cgrid.addWidget(self.scope_connect_button, 0, 3)
+        cgrid.addWidget(self.scope_disconnect_button, 0, 4)
+        page.layout().addWidget(conn)
+
+        # --- acquisition settings ---
+        cfg = self._panel("Acquisition")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.scope_channel = QtWidgets.QComboBox()
+        self.scope_channel.addItems(["1", "2", "3", "4"])
+        self.scope_time_range = QtWidgets.QLineEdit("1.0")
+        self.scope_time_range.setToolTip("Total acquisition window in seconds (TIMebase:RANGe)")
+        self.scope_record_length = QtWidgets.QSpinBox()
+        self.scope_record_length.setRange(1000, 2_000_000_000)
+        self.scope_record_length.setSingleStep(100_000)
+        self.scope_record_length.setValue(1_000_000)
+        self.scope_record_length.setGroupSeparatorShown(True)
+        self.scope_decimation = QtWidgets.QComboBox()
+        self.scope_decimation.addItems(["PDETect", "SAMPle", "HRESolution", "RMS"])
+        self.scope_format = QtWidgets.QComboBox()
+        self.scope_format.addItems(["REAL,32", "INT,16"])
+        self.scope_coupling = QtWidgets.QComboBox()
+        self.scope_coupling.addItems(["(keep)", "DC", "DCLimit", "AC"])
+        self.scope_vscale = QtWidgets.QLineEdit("")
+        self.scope_vscale.setPlaceholderText("keep")
+        self.scope_vscale.setToolTip("Vertical scale, V/div (blank = keep current)")
+        grid.addWidget(QtWidgets.QLabel("Channel"), 0, 0)
+        grid.addWidget(self.scope_channel, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Time range (s)"), 0, 2)
+        grid.addWidget(self.scope_time_range, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Record length"), 0, 4)
+        grid.addWidget(self.scope_record_length, 0, 5)
+        grid.addWidget(QtWidgets.QLabel("Decimation"), 1, 0)
+        grid.addWidget(self.scope_decimation, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Format"), 1, 2)
+        grid.addWidget(self.scope_format, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Coupling"), 1, 4)
+        grid.addWidget(self.scope_coupling, 1, 5)
+        grid.addWidget(QtWidgets.QLabel("V/div"), 2, 0)
+        grid.addWidget(self.scope_vscale, 2, 1)
+        self.scope_size_hint = QtWidgets.QLabel("")
+        self.scope_size_hint.setObjectName("PageSubtitle")
+        grid.addWidget(self.scope_size_hint, 2, 2, 1, 4)
+        page.layout().addWidget(cfg)
+        for w in (self.scope_record_length, self.scope_format):
+            (w.valueChanged if isinstance(w, QtWidgets.QSpinBox)
+             else w.currentTextChanged).connect(self._scope_update_size_hint)
+        self.scope_decimation.currentTextChanged.connect(self._scope_update_size_hint)
+        self._scope_update_size_hint()
+
+        # --- plot ---
+        self.scope_fig = Figure(figsize=(7, 3.4), tight_layout=True)
+        self.scope_canvas = FigureCanvas(self.scope_fig)
+        page.layout().addWidget(
+            self._panel_with_widget("Waveform", self.scope_canvas), 1
+        )
+
+        # --- controls ---
+        self.scope_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.scope_acquire_button = QtWidgets.QPushButton("Acquire")
+        self.scope_acquire_button.clicked.connect(self._scope_acquire)
+        self.scope_acquire_button.setEnabled(False)
+        self.scope_stop_button = QtWidgets.QPushButton("Stop")
+        self.scope_stop_button.setProperty("variant", "danger")
+        self.scope_stop_button.setEnabled(False)
+        self.scope_stop_button.clicked.connect(self._scope_stop)
+        self.scope_save_csv_button = QtWidgets.QPushButton("Save CSV…")
+        self.scope_save_csv_button.setProperty("variant", "ghost")
+        self.scope_save_csv_button.setEnabled(False)
+        self.scope_save_csv_button.clicked.connect(lambda: self._scope_save("csv"))
+        self.scope_save_npz_button = QtWidgets.QPushButton("Save NPZ…")
+        self.scope_save_npz_button.setProperty("variant", "ghost")
+        self.scope_save_npz_button.setEnabled(False)
+        self.scope_save_npz_button.clicked.connect(lambda: self._scope_save("npz"))
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.scope_status, 1)
+        ctrl.addWidget(self.scope_save_csv_button)
+        ctrl.addWidget(self.scope_save_npz_button)
+        ctrl.addWidget(self.scope_acquire_button)
+        ctrl.addWidget(self.scope_stop_button)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _scope_update_size_hint(self) -> None:
+        pts = self.scope_record_length.value()
+        vps = 2 if self.scope_decimation.currentText() == "PDETect" else 1
+        bytes_per = 2 if self.scope_format.currentText() == "INT,16" else 4
+        mb = pts * vps * bytes_per / 1e6
+        warn = "  \N{WARNING SIGN} large transfer" if mb > 200 else ""
+        self.scope_size_hint.setText(
+            f"Transfer ≈ {mb:,.1f} MB ({pts:,} pts × {vps} val × {bytes_per} B){warn}"
+        )
+
+    def _scope_settings(self) -> ScopeSettings:
+        coupling = self.scope_coupling.currentText()
+        vscale = self.scope_vscale.text().strip()
+        return ScopeSettings(
+            channel=int(self.scope_channel.currentText()),
+            vertical_scale=vscale or None,
+            coupling=None if coupling == "(keep)" else coupling,
+            time_range=self.scope_time_range.text().strip() or "1.0",
+            record_length=self.scope_record_length.value(),
+            decimation=self.scope_decimation.currentText(),
+            data_format=self.scope_format.currentText(),
+        )
+
+    def _connect_scope(self) -> None:
+        host = self.scope_host_edit.text().strip()
+        if not host:
+            self._log("Enter the scope host first")
+            return
+        self.scope_connect_button.setEnabled(False)
+
+        def connect() -> tuple[ScopeController, str]:
+            scope = ScopeController(host=host)
+            scope.connect()
+            return scope, scope.identify()
+
+        self._run_task("Connect scope", connect, self._on_scope_connected, self._on_scope_error)
+
+    def _on_scope_connected(self, payload: tuple[ScopeController, str]) -> None:
+        scope, identity = payload
+        self.scope_controller = scope
+        self._set_status(self.scope_status_label, "Scope: open", "ok")
+        self.scope_connect_button.setEnabled(False)
+        self.scope_disconnect_button.setEnabled(True)
+        self.scope_acquire_button.setEnabled(True)
+        self._log(f"Scope connected: {identity.strip()}")
+
+    def _on_scope_error(self, _error: str) -> None:
+        self._set_status(self.scope_status_label, "Scope: error", "error")
+        self.scope_connect_button.setEnabled(True)
+
+    def _disconnect_scope(self) -> None:
+        scope = self.scope_controller
+        self.scope_controller = None
+        self._set_status(self.scope_status_label, "Scope: closed", "off")
+        self.scope_connect_button.setEnabled(True)
+        self.scope_disconnect_button.setEnabled(False)
+        self.scope_acquire_button.setEnabled(False)
+        if scope is not None:
+            self._run_task("Disconnect scope", scope.disconnect)
+
+    def _scope_set_running(self, running: bool) -> None:
+        connected = self.scope_controller is not None
+        self.scope_acquire_button.setEnabled(connected and not running)
+        self.scope_stop_button.setEnabled(running)
+        self.scope_disconnect_button.setEnabled(connected and not running)
+        has_wf = self.scope_waveform is not None
+        self.scope_save_csv_button.setEnabled(has_wf and not running)
+        self.scope_save_npz_button.setEnabled(has_wf and not running)
+
+    def _scope_acquire(self) -> None:
+        scope = self.scope_controller
+        if scope is None or not scope.is_connected:
+            self.scope_status.setText("Connect the scope first.")
+            return
+        settings = self._scope_settings()
+        try:
+            time_range = float(settings.time_range)
+        except ValueError:
+            time_range = 1.0
+        timeout = max(60.0, time_range * 10.0 + 30.0)
+        stop_event = threading.Event()
+        self.scope_stop_event = stop_event
+        self.scope_status.setText("Acquiring…")
+        self._scope_set_running(True)
+
+        def work() -> Waveform:
+            return scope.acquire(settings, timeout=timeout, stop_event=stop_event)
+
+        self._run_task("Scope acquire", work, self._scope_finished, self._scope_error)
+
+    def _scope_stop(self) -> None:
+        if self.scope_stop_event is not None:
+            self.scope_stop_event.set()
+            self.scope_status.setText("Stopping…")
+
+    def _scope_finished(self, waveform: Waveform) -> None:
+        self.scope_stop_event = None
+        self.scope_waveform = waveform
+        self._scope_set_running(False)
+        self._scope_draw(waveform)
+        rate = waveform.sample_rate
+        rate_txt = f"{rate/1e6:.3f} MSa/s" if rate else "?"
+        peak = float(np.max(waveform.maxs)) if waveform.n_points else float("nan")
+        self.scope_status.setText(
+            f"Done · {waveform.n_points:,} pts · {rate_txt} · peak {peak:.4g} V"
+        )
+
+    def _scope_error(self, _error: str) -> None:
+        self.scope_stop_event = None
+        self._scope_set_running(False)
+        self.scope_status.setText("Acquisition failed (see Status log)")
+
+    def _scope_draw(self, waveform: Waveform) -> None:
+        self.scope_fig.clear()
+        self.scope_fig.patch.set_facecolor("#101820")
+        ax = self.scope_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Signal (V)")
+        if waveform.n_points:
+            t = waveform.times
+            if waveform.values_per_sample == 2:
+                ax.fill_between(t, waveform.mins, waveform.maxs,
+                                color="#47b8e0", alpha=0.35, linewidth=0)
+                ax.plot(t, waveform.maxs, color="#47b8e0", linewidth=0.8)
+            else:
+                ax.plot(t, waveform.values, color="#47b8e0", linewidth=0.8)
+        self.scope_canvas.draw_idle()
+
+    def _scope_save(self, kind: str) -> None:
+        waveform = self.scope_waveform
+        if waveform is None:
+            return
+        if kind == "csv":
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save waveform CSV", "scope_ch1.csv", "CSV (*.csv)")
+            if path:
+                saved = waveform.to_csv(path)
+                self._log(f"Waveform saved: {saved}")
+        else:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save waveform NPZ", "scope_ch1.npz", "NumPy (*.npz)")
+            if path:
+                saved = waveform.to_npz(path)
+                self._log(f"Waveform saved: {saved}")
+
     def _page_shell(self, title: str) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
@@ -3366,6 +3628,14 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.osa_controller = None
+        if self.scope_stop_event is not None:
+            self.scope_stop_event.set()
+        if self.scope_controller is not None:
+            try:
+                self.scope_controller.disconnect()
+            except Exception:
+                pass
+            self.scope_controller = None
         super().closeEvent(event)
 
     def _apply_style(self) -> None:
