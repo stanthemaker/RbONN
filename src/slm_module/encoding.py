@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 
@@ -195,12 +195,31 @@ def encode_to_pattern(
     layout: ChannelLayout,
     slm_width: int,
     slm_height: int,
+    *,
+    col_ratio: np.ndarray | None = None,
+    level_trim: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Map value arrays onto an SLM grayscale pattern.
 
     x_vals / w_vals: each layout.n_channels floats in [0, 1].
     Background/padding columns are set to the off level of their nearest
-    calibration coordinate; each channel band is set to level_for(val).
+    calibration coordinate.
+
+    col_ratio: optional per-column ratio profile of length
+        ``layout.channel_width_px`` (values in [0, 1]), applied *multiplicatively*
+        to the channel value so column j of every channel encodes
+        ``level_for(val * col_ratio[j])``. Because ``level_for`` maps through the
+        measured transfer curve (target = off + v*(on-off)), this realises
+        ``edge = ratio * (max - min) + min`` with the floor being the channel's
+        *measured* off level (ratio -> 0 sits the column at the measured
+        background, not literal zero). ``None`` -> uniform 1.0, i.e. the flat band
+        used before this profile existed (byte-identical output). Ratios are
+        normalised intensity ratios, not field-amplitude ratios.
+
+    level_trim: optional callable applied to each channel's per-column level
+        vector after ``level_for``, before it is written into the pattern;
+        ``None`` -> identity. It is independent of the OSA intensity-profile
+        optimiser.
     """
     x_vals = np.asarray(x_vals, dtype=float)
     w_vals = np.asarray(w_vals, dtype=float)
@@ -208,15 +227,88 @@ def encode_to_pattern(
     if x_vals.shape != (n,) or w_vals.shape != (n,):
         raise ValueError(f"x_vals and w_vals must each have {n} elements")
 
+    width = int(layout.channel_width_px)
+    if col_ratio is None:
+        ratios = np.ones(width, dtype=float)
+    else:
+        ratios = np.asarray(col_ratio, dtype=float)
+        if ratios.shape != (width,):
+            raise ValueError(
+                f"col_ratio must have {width} elements (channel_width_px)"
+            )
+        ratios = np.clip(ratios, 0.0, 1.0)
+
     # per-column off-level background, broadcast across all rows
     bg_row = layout.background_for_columns(slm_width)
     pattern = np.broadcast_to(bg_row, (slm_height, slm_width)).copy()
 
     for ch, val in list(zip(layout.x_channels, x_vals)) + list(zip(layout.w_channels, w_vals)):
-        level = ch.level_for(val)
+        col_levels = np.array(
+            [ch.level_for(float(val) * float(r)) for r in ratios], dtype=np.uint16
+        )
+        if level_trim is not None:
+            col_levels = np.clip(level_trim(col_levels), 0, 1023).astype(np.uint16)
+        # profile index -> absolute column, honouring x-range clipping
         x0 = max(0, ch.x_start)
         x1 = min(slm_width, ch.x_end)
         if x0 < x1:
-            pattern[:, x0:x1] = level
+            off = x0 - ch.x_start
+            pattern[:, x0:x1] = col_levels[off:off + (x1 - x0)]
 
     return pattern
+
+
+def optimize_from_osa(
+    layout: ChannelLayout,
+    trace=None,
+    *,
+    col_ratio: np.ndarray | None = None,
+    level_trim: Callable[[np.ndarray], np.ndarray] | None = None,
+    osa=None,
+    slm=None,
+    initial_l: np.ndarray | None = None,
+    config=None,
+    stop_event=None,
+    progress_callback=None,
+    **kwargs,
+):
+    """Run the live two-stage OSA optimisation.
+
+    ``initial_l`` is the independent half-profile and always contains
+    normalised *intensity* ratios (eight values for the required 15-pixel
+    channel).  For compatibility with the Edge Ratio UI, a symmetric full
+    ``col_ratio`` may be supplied instead.  The optimiser does not load an
+    initial profile from a model or file.
+
+    A downloaded ``trace`` is insufficient because each COBYQA evaluation
+    requires a new SLM pattern and OSA sweep; callers must provide live ``osa``
+    and ``slm`` controllers.
+    """
+    if kwargs:
+        names = ", ".join(sorted(kwargs))
+        raise TypeError(f"unexpected optimisation arguments: {names}")
+    if trace is not None:
+        raise ValueError("live optimisation does not accept a pre-recorded trace")
+    if level_trim is not None:
+        raise ValueError("per-level trim is not part of the intensity-profile plan")
+    if osa is None or slm is None:
+        raise ValueError("live OSA and SLM controllers are required")
+
+    from .optimization import (
+        independent_intensity_profile,
+        run_osa_optimization,
+    )
+
+    if initial_l is None:
+        if col_ratio is None:
+            raise ValueError("an eight-value initial intensity profile is required")
+        initial_l = independent_intensity_profile(col_ratio)
+    return run_osa_optimization(
+        osa,
+        slm,
+        layout,
+        initial_l,
+        config=config,
+        stop_event=stop_event,
+        progress_callback=progress_callback,
+    )

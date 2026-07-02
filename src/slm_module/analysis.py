@@ -61,6 +61,10 @@ class ChannelSpectrum:
     peak_wl_nm: float = 0.0
     fwhm_nm: float = 0.0
     total_power_w: float = 0.0
+    # peak-centred band integrals: the encoding window (channel_width) and the
+    # whole-channel region (pitch). window/channel is the in-window throughput.
+    window_power_w: float = 0.0
+    channel_power_w: float = 0.0
     in_band_fraction: float = 0.0
     neighbor_leakage: float = 0.0    # sum of +/-1 neighbour bands / total
     # fraction of this channel's power landing in offset neighbour bands
@@ -131,17 +135,25 @@ def _channel_metrics(
     nominal_center: float,
     nominal_bw: float,
     pitch_nm: float,
-) -> tuple[float, float, float, float, dict[int, float]]:
-    """Return (peak_wl, fwhm_nm, total_power, in_band_fraction, crosstalk).
+) -> tuple[float, float, float, float, float, float, dict[int, float]]:
+    """Per-channel band metrics.
 
-    crosstalk maps neighbour offset (+/-1, +/-2 pitches) -> fraction of this
-    channel's total power that falls within that neighbour's nominal band.
+    Returns ``(peak_wl, fwhm_nm, total_power, window_power, channel_power,
+    in_band_fraction, crosstalk)``.
+
+    The integration centre is *relocated* to the measured peak (within +/- one
+    pitch of the nominal centre): ``window_power`` integrates the encoding
+    window (``nominal_bw`` wide) and ``channel_power`` the whole-channel region
+    (``pitch_nm`` wide), both centred on that peak. ``crosstalk`` maps neighbour
+    offset (+/-1, +/-2 pitches, from the peak) -> fraction of this channel's
+    total power in that neighbour's band.
     """
-    empty = (0.0, 0.0, 0.0, 0.0, {o: 0.0 for o in _NEIGHBOR_OFFSETS})
+    empty = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, {o: 0.0 for o in _NEIGHBOR_OFFSETS})
     if wl.size == 0 or sig.size == 0:
         return empty
 
-    # locate the peak within +/- one pitch of the nominal centre
+    # locate the peak within +/- one pitch of the nominal centre, then use it as
+    # the relocated integration centre
     local = (wl >= nominal_center - pitch_nm) & (wl <= nominal_center + pitch_nm)
     if local.any():
         local_idx = np.where(local)[0]
@@ -152,16 +164,20 @@ def _channel_metrics(
     fwhm = _fwhm(wl, sig, peak_idx)
 
     half_bw = nominal_bw / 2.0
+    half_pitch = pitch_nm / 2.0
+    window_power = _band_power(wl, sig, peak_wl - half_bw, peak_wl + half_bw)
+    channel_power = _band_power(wl, sig, peak_wl - half_pitch, peak_wl + half_pitch)
+
     total = float(_trapz(np.clip(sig, 0.0, None), wl))
     if total <= 0:
-        return peak_wl, fwhm, 0.0, 0.0, {o: 0.0 for o in _NEIGHBOR_OFFSETS}
+        return peak_wl, fwhm, 0.0, window_power, channel_power, 0.0, \
+            {o: 0.0 for o in _NEIGHBOR_OFFSETS}
 
-    in_band = _band_power(wl, sig, nominal_center - half_bw, nominal_center + half_bw)
     crosstalk = {}
     for offset in _NEIGHBOR_OFFSETS:
-        c = nominal_center + offset * pitch_nm
+        c = peak_wl + offset * pitch_nm
         crosstalk[offset] = _band_power(wl, sig, c - half_bw, c + half_bw) / total
-    return peak_wl, fwhm, total, in_band / total, crosstalk
+    return peak_wl, fwhm, total, window_power, channel_power, window_power / total, crosstalk
 
 
 def measure_channel_spectra(
@@ -176,6 +192,8 @@ def measure_channel_spectra(
     capture_dir: str | Path | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
+    col_ratio: np.ndarray | None = None,
+    level_trim: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> ModulationErrorResult:
     """Sweep every (strided) channel on the grid, isolated, and measure the OSA.
 
@@ -185,6 +203,13 @@ def measure_channel_spectra(
     ``subtract_background`` is set, an all-off trace is taken at the same centre
     just before the channel-on trace and subtracted. ``stride`` measures only
     every Nth channel index per side.
+
+    ``col_ratio`` / ``level_trim`` are forwarded to :func:`encode_to_pattern`, so
+    the sweep can be run with a particular edge-ratio profile (and reserved
+    per-level trim) applied. Running once with ``col_ratio=None`` (flat band) and
+    once with a tuned profile, then comparing the per-channel metrics via
+    :func:`encoding_gain`, quantifies the encoding's benefit (leakage down,
+    in-band up).
 
     When ``capture_dir`` is given, each channel's raw spectrum is written there
     immediately after measurement (crash-safe), and a consolidated ``spectra.npz``
@@ -204,7 +229,8 @@ def measure_channel_spectra(
         if stop_event is not None and stop_event.is_set():
             raise AnalysisAborted("analysis stopped by request")
 
-    bg_pattern = encode_to_pattern(zeros, zeros, layout, slm_width, slm_height)
+    bg_pattern = encode_to_pattern(zeros, zeros, layout, slm_width, slm_height,
+                                   col_ratio=col_ratio, level_trim=level_trim)
 
     indices = list(range(0, n, max(1, stride)))
     targets: list[tuple[int, str]] = [(i, "x") for i in indices] + [
@@ -233,7 +259,8 @@ def measure_channel_spectra(
             x_vals[i] = 1.0
         else:
             w_vals[i] = 1.0
-        pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height)
+        pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height,
+                                    col_ratio=col_ratio, level_trim=level_trim)
         slm.display_array(pattern)
 
         trace = osa.measure(ch_settings, averages=averages, stop_event=stop_event)
@@ -246,7 +273,7 @@ def measure_channel_spectra(
         else:
             signal = np.clip(power, 0.0, None)
 
-        peak_wl, fwhm, total_p, in_band, crosstalk = _channel_metrics(
+        peak_wl, fwhm, total_p, window_p, channel_p, in_band, crosstalk = _channel_metrics(
             wl, signal, channel.wavelength_nm, nominal_bw, pitch_nm
         )
         leak = crosstalk.get(-1, 0.0) + crosstalk.get(1, 0.0)
@@ -261,6 +288,8 @@ def measure_channel_spectra(
             peak_wl_nm=peak_wl,
             fwhm_nm=fwhm,
             total_power_w=total_p,
+            window_power_w=window_p,
+            channel_power_w=channel_p,
             in_band_fraction=in_band,
             neighbor_leakage=leak,
             crosstalk=crosstalk,
@@ -332,6 +361,8 @@ def build_spectra_npz(result: ModulationErrorResult, path: str | Path) -> str:
     data["meta_nominal_bw_nm"] = np.array([c.nominal_bw_nm for c in result.channels])
     data["meta_fwhm_nm"] = np.array([c.fwhm_nm for c in result.channels])
     data["meta_total_power_w"] = np.array([c.total_power_w for c in result.channels])
+    data["meta_window_power_w"] = np.array([c.window_power_w for c in result.channels])
+    data["meta_channel_power_w"] = np.array([c.channel_power_w for c in result.channels])
     data["meta_in_band_fraction"] = np.array([c.in_band_fraction for c in result.channels])
     data["meta_neighbor_leakage"] = np.array([c.neighbor_leakage for c in result.channels])
     for offset in _NEIGHBOR_OFFSETS:
@@ -347,6 +378,166 @@ def build_spectra_npz(result: ModulationErrorResult, path: str | Path) -> str:
     return str(out)
 
 
+# ---------------------------------------------------------------------------
+# A/B encoding gain: compare two sweeps (flat baseline vs tuned profile)
+# ---------------------------------------------------------------------------
+
+
+def _rel_loss(before: float, after: float) -> float:
+    """Fractional intensity loss of ``after`` relative to ``before`` (>=0 = lost)."""
+    if before <= 0:
+        return 0.0
+    return (before - after) / before
+
+
+@dataclass
+class ChannelGain:
+    side: str
+    index: int
+    nominal_wl_nm: float
+    leak_before: float
+    leak_after: float
+    in_band_before: float
+    in_band_after: float
+    # peak-centred band integrals (W): "before" = flat/rectangular baseline
+    window_before: float = 0.0
+    window_after: float = 0.0
+    channel_before: float = 0.0
+    channel_after: float = 0.0
+
+    @property
+    def d_leak(self) -> float:
+        return self.leak_after - self.leak_before
+
+    @property
+    def d_in_band(self) -> float:
+        return self.in_band_after - self.in_band_before
+
+    @property
+    def loss_window(self) -> float:
+        """Encoding-window intensity lost vs the trivial rectangular encoding."""
+        return _rel_loss(self.window_before, self.window_after)
+
+    @property
+    def loss_total(self) -> float:
+        """Whole-channel intensity lost vs the trivial rectangular encoding."""
+        return _rel_loss(self.channel_before, self.channel_after)
+
+
+@dataclass
+class EncodingGain:
+    """Per-channel and aggregate deltas between a baseline and a tuned sweep.
+
+    ``leak`` is ``neighbor_leakage`` (sum of the +/-1 neighbour bands / total);
+    lower is better. ``in_band`` is ``in_band_fraction``; higher is better.
+    "before" = baseline (typically the flat band), "after" = tuned profile.
+    """
+    channels: list[ChannelGain]
+
+    @property
+    def n(self) -> int:
+        return len(self.channels)
+
+    def _mean(self, attr: str) -> float:
+        if not self.channels:
+            return 0.0
+        return float(np.mean([getattr(c, attr) for c in self.channels]))
+
+    @property
+    def mean_leak_before(self) -> float:
+        return self._mean("leak_before")
+
+    @property
+    def mean_leak_after(self) -> float:
+        return self._mean("leak_after")
+
+    @property
+    def mean_in_band_before(self) -> float:
+        return self._mean("in_band_before")
+
+    @property
+    def mean_in_band_after(self) -> float:
+        return self._mean("in_band_after")
+
+    @property
+    def mean_d_leak(self) -> float:
+        return self.mean_leak_after - self.mean_leak_before
+
+    @property
+    def mean_d_in_band(self) -> float:
+        return self.mean_in_band_after - self.mean_in_band_before
+
+    @property
+    def mean_loss_window(self) -> float:
+        return self._mean("loss_window")
+
+    @property
+    def mean_loss_total(self) -> float:
+        return self._mean("loss_total")
+
+
+def encoding_gain(baseline: ModulationErrorResult,
+                  tuned: ModulationErrorResult) -> EncodingGain:
+    """Compare two modulation-error sweeps channel-by-channel.
+
+    Channels are matched on ``(side, index)``; only channels present in *both*
+    results contribute. Run once with a flat/rectangular baseline
+    (``col_ratio=None``) and once with a tuned ``col_ratio`` to quantify the
+    edge-ratio encoding's benefit (leakage down, in-band up) and its cost — the
+    intensity lost in the encoding window / whole channel relative to that
+    trivial rectangular baseline (``loss_window`` / ``loss_total``).
+    """
+    tuned_by_key = {(c.side, c.index): c for c in tuned.channels}
+    rows: list[ChannelGain] = []
+    for b in baseline.channels:
+        t = tuned_by_key.get((b.side, b.index))
+        if t is None:
+            continue
+        rows.append(ChannelGain(
+            side=b.side, index=b.index, nominal_wl_nm=b.nominal_wl_nm,
+            leak_before=b.neighbor_leakage, leak_after=t.neighbor_leakage,
+            in_band_before=b.in_band_fraction, in_band_after=t.in_band_fraction,
+            window_before=b.window_power_w, window_after=t.window_power_w,
+            channel_before=b.channel_power_w, channel_after=t.channel_power_w,
+        ))
+    return EncodingGain(channels=rows)
+
+
+def write_gain_csv(gain: EncodingGain, path: str) -> str:
+    """Write the per-channel A/B gain table (+ a mean row) to CSV."""
+    import csv
+
+    out = Path(path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["side", "index", "nominal_wl_nm",
+             "leak_before", "leak_after", "d_leak",
+             "in_band_before", "in_band_after", "d_in_band",
+             "window_before_w", "window_after_w", "loss_window",
+             "channel_before_w", "channel_after_w", "loss_total"]
+        )
+        for c in gain.channels:
+            writer.writerow([
+                c.side, c.index, f"{c.nominal_wl_nm:.5f}",
+                f"{c.leak_before:.5f}", f"{c.leak_after:.5f}", f"{c.d_leak:.5f}",
+                f"{c.in_band_before:.5f}", f"{c.in_band_after:.5f}", f"{c.d_in_band:.5f}",
+                f"{c.window_before:.6e}", f"{c.window_after:.6e}", f"{c.loss_window:.5f}",
+                f"{c.channel_before:.6e}", f"{c.channel_after:.6e}", f"{c.loss_total:.5f}",
+            ])
+        writer.writerow([
+            "mean", "", "",
+            f"{gain.mean_leak_before:.5f}", f"{gain.mean_leak_after:.5f}",
+            f"{gain.mean_d_leak:.5f}",
+            f"{gain.mean_in_band_before:.5f}", f"{gain.mean_in_band_after:.5f}",
+            f"{gain.mean_d_in_band:.5f}",
+            "", "", f"{gain.mean_loss_window:.5f}",
+            "", "", f"{gain.mean_loss_total:.5f}",
+        ])
+    return str(out)
+
+
 def write_analysis_csv(result: ModulationErrorResult, path: str) -> str:
     """Write the per-channel metrics table to CSV."""
     import csv
@@ -358,7 +549,8 @@ def write_analysis_csv(result: ModulationErrorResult, path: str) -> str:
         writer = csv.writer(f)
         writer.writerow(
             ["side", "index", "x_center", "nominal_wl_nm", "peak_wl_nm",
-             "nominal_bw_nm", "fwhm_nm", "total_power_w", "in_band_fraction",
+             "nominal_bw_nm", "fwhm_nm", "total_power_w",
+             "window_power_w", "channel_power_w", "in_band_fraction",
              "neighbor_leakage", "xtalk_-2", "xtalk_-1", "xtalk_+1", "xtalk_+2"]
         )
         for ch in result.channels:
@@ -366,7 +558,9 @@ def write_analysis_csv(result: ModulationErrorResult, path: str) -> str:
                 ch.side, ch.index, ch.x_center,
                 f"{ch.nominal_wl_nm:.5f}", f"{ch.peak_wl_nm:.5f}",
                 f"{ch.nominal_bw_nm:.5f}", f"{ch.fwhm_nm:.5f}",
-                f"{ch.total_power_w:.6e}", f"{ch.in_band_fraction:.5f}",
+                f"{ch.total_power_w:.6e}",
+                f"{ch.window_power_w:.6e}", f"{ch.channel_power_w:.6e}",
+                f"{ch.in_band_fraction:.5f}",
                 f"{ch.neighbor_leakage:.5f}",
                 f"{ch.crosstalk.get(-2, 0.0):.5f}", f"{ch.crosstalk.get(-1, 0.0):.5f}",
                 f"{ch.crosstalk.get(1, 0.0):.5f}", f"{ch.crosstalk.get(2, 0.0):.5f}",

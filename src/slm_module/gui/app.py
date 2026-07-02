@@ -53,9 +53,26 @@ from ..generator import (
 from ..analysis import (
     AnalysisAborted,
     AnalysisProgress,
+    EncodingGain,
     ModulationErrorResult,
+    encoding_gain,
     measure_channel_spectra,
     write_analysis_csv,
+    write_gain_csv,
+)
+from ..encoding import (
+    ChannelLayout,
+    build_channel_layout,
+    encode_to_pattern,
+    optimize_from_osa,
+)
+from ..optimization import (
+    OSAOptimizationConfig,
+    OptimizationAborted,
+    OptimizationProgress,
+    OptimizationResult,
+    amplitudes_to_intensity_commands,
+    load_optimization_result,
 )
 from ..scope_background import (
     BackgroundAborted,
@@ -564,6 +581,8 @@ class MainWindow(QtWidgets.QMainWindow):
     analysis_progress = QtCore.pyqtSignal(object)
     background_progress = QtCore.pyqtSignal(object)
     tpa_progress = QtCore.pyqtSignal(object)
+    edge_gain_progress = QtCore.pyqtSignal(int, int, str)
+    edge_optimization_progress = QtCore.pyqtSignal(object)
     monitor_sample = QtCore.pyqtSignal(object)
     hold_progress = QtCore.pyqtSignal(int, int)
 
@@ -594,6 +613,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._segments_updating = False
         self.encoding_layout: ChannelLayout | None = None
         self._encoding_pattern: np.ndarray | None = None
+        self.enc_col_ratio: np.ndarray | None = None  # per-column edge-ratio profile
+        self._edge_gain: EncodingGain | None = None
+        self._edge_optimization_result: OptimizationResult | None = None
+        self.edge_gain_stop_event: threading.Event | None = None
         self._enc_wheel_step = 0.2   # scroll sensitivity for channel value cells
         self._enc_calib_override: CalibrationResult | None = None
         self.analysis_result: ModulationErrorResult | None = None
@@ -625,6 +648,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_progress.connect(self._on_analysis_progress)
         self.background_progress.connect(self._on_background_progress)
         self.tpa_progress.connect(self._on_tpa_progress)
+        self.edge_gain_progress.connect(self._edge_gain_progress)
+        self.edge_optimization_progress.connect(self._edge_optimization_progress)
         self.monitor_sample.connect(self._on_monitor_sample)
         self.hold_progress.connect(self._on_hold_progress)
 
@@ -658,6 +683,10 @@ class MainWindow(QtWidgets.QMainWindow):
             ("\N{LEFT RIGHT ARROW}  Center Scan", "Sweep a window across x"),
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
             ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding + scope readout"),
+            ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding"),
+            ("\N{DOWNWARDS ARROW WITH TIP RIGHTWARDS}  Edge Ratio",
+             "Per-column edge-taper ratio + OSA optimisation hook"),
+            ("\N{WATCH}  Scope Monitor", "Triggered per-event averaged readout"),
         )
         for label, tooltip in nav_items:
             item = QtWidgets.QListWidgetItem(label)
@@ -673,6 +702,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack.addWidget(self._build_scan_page())
         self.stack.addWidget(self._build_segments_page())
         self.stack.addWidget(self._build_tpa_page())
+        self.stack.addWidget(self._build_edge_ratio_page())
+        self.stack.addWidget(self._build_scope_monitor_page())
 
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
@@ -1765,6 +1796,15 @@ class MainWindow(QtWidgets.QMainWindow):
         val_buttons.addWidget(enc_zeros)
         val_buttons.addWidget(enc_ones)
         val_buttons.addWidget(enc_randomize)
+        self.enc_use_optimized_lut = QtWidgets.QCheckBox(
+            "Values are amplitudes (use optimized LUT)"
+        )
+        self.enc_use_optimized_lut.setEnabled(False)
+        self.enc_use_optimized_lut.setToolTip(
+            "Convert each target amplitude through the nearest measured final "
+            "channel LUT before applying the 15-pixel intensity profile."
+        )
+        val_buttons.addWidget(self.enc_use_optimized_lut)
         val_buttons.addStretch(1)
         val_buttons.addWidget(QtWidgets.QLabel("Scroll step"))
         val_buttons.addWidget(self.enc_wheel_step_spin)
@@ -1976,7 +2016,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.encoding_layout = layout
+        self._edge_optimization_result = None
+        self.enc_use_optimized_lut.setChecked(False)
+        self.enc_use_optimized_lut.setEnabled(False)
         self._enc_populate_val_table(layout)
+        self._edge_sync_layout(layout)
         self.enc_layout_status.setText(
             f"{n_ch} channels per side  |  "
             f"x: {layout.x_channels[-1].wavelength_nm:.3f}–{layout.x_channels[0].wavelength_nm:.3f} nm  |  "
@@ -2071,9 +2115,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if parsed is None:
             return
         x_vals, w_vals = parsed
+        use_amplitude_lut = self.enc_use_optimized_lut.isChecked()
+        if use_amplitude_lut:
+            result = self._edge_optimization_result
+            ratio = self._edge_get_ratio()
+            if result is None:
+                self.enc_status_label.setText("No optimized amplitude LUT is loaded")
+                return
+            if ratio is None or not np.allclose(
+                ratio, result.final_profile, atol=5e-4
+            ):
+                self.enc_status_label.setText(
+                    "Optimized LUT is invalid because the intensity profile changed"
+                )
+                self._enc_log(
+                    "Re-run OSA optimisation before using amplitude-mode encoding."
+                )
+                return
+            try:
+                x_vals, w_vals = amplitudes_to_intensity_commands(
+                    x_vals, w_vals, layout, result.final_luts
+                )
+            except Exception as exc:
+                self.enc_status_label.setText(f"Amplitude LUT error: {exc}")
+                return
         slm_w, slm_h = self.slm_size
         try:
-            pattern = encode_to_pattern(x_vals, w_vals, layout, slm_w, slm_h)
+            pattern = encode_to_pattern(
+                x_vals, w_vals, layout, slm_w, slm_h,
+                col_ratio=self._edge_get_ratio(),
+            )
         except Exception as exc:
             self.enc_status_label.setText(f"Encoding error: {exc}")
             self._enc_log(f"Encoding error: {exc}")
@@ -2177,6 +2248,583 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_task("Scope read on send", work, ok, err)
 
     # ==================================================================
+    # Edge Ratio page: per-column edge-taper ratio + OSA optimisation hook
+    # ==================================================================
+
+    def _build_edge_ratio_page(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Edge Ratio")
+
+        subtitle = QtWidgets.QLabel(
+            "Shape the profile inside each channel with a per-column intensity ratio. "
+            "Column j encodes level_for(intensity command × ratio[j]), i.e. "
+            "edge = ratio × (max − min) + min, where min is the channel's measured "
+            "background. All-1.0 reproduces the flat band. Build a layout on the "
+            "TPA Encoding page first (channel width sets the number of columns)."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- per-column ratio table (1 row, channel_width_px columns) ---
+        self._edge_spins: list[WheelSpinBox] = []
+        self.edge_width_label = QtWidgets.QLabel("Channel width: (no layout built)")
+        self.edge_width_label.setObjectName("PageSubtitle")
+
+        self.edge_table = QtWidgets.QTableWidget(1, 0)
+        self.edge_table.verticalHeader().setVisible(False)
+        self.edge_table.setMaximumHeight(90)
+        self.edge_table.setToolTip(
+            "Ratio per column across the channel width (left→right). 1.0 = full "
+            "value, 0.0 = channel's measured background."
+        )
+
+        edge_buttons = QtWidgets.QHBoxLayout()
+        edge_all1 = QtWidgets.QPushButton("All 1.0")
+        edge_all1.setProperty("variant", "ghost")
+        edge_all1.clicked.connect(lambda: self._edge_set_all(1.0))
+        edge_cos = QtWidgets.QPushButton("Cosine taper…")
+        edge_cos.setProperty("variant", "ghost")
+        edge_cos.setToolTip("Fill a raised-cosine taper over the outer k columns of each edge")
+        edge_cos.clicked.connect(self._edge_apply_cosine)
+        edge_mirror = QtWidgets.QPushButton("Mirror L→R")
+        edge_mirror.setProperty("variant", "ghost")
+        edge_mirror.setToolTip("Copy the left half onto the right half (symmetric profile)")
+        edge_mirror.clicked.connect(self._edge_mirror)
+        edge_buttons.addWidget(self.edge_width_label, 1)
+        edge_buttons.addWidget(edge_all1)
+        edge_buttons.addWidget(edge_cos)
+        edge_buttons.addWidget(edge_mirror)
+
+        ratio_panel = self._panel("Per-column Ratio  [0 = background · 1 = full value]")
+        ratio_layout = QtWidgets.QVBoxLayout(ratio_panel)
+        ratio_layout.addWidget(self.edge_table)
+        ratio_layout.addLayout(edge_buttons)
+
+        # --- preview (matplotlib) ---
+        ref_row = QtWidgets.QHBoxLayout()
+        ref_row.addWidget(QtWidgets.QLabel("Preview at scalar intensity command"))
+        self.edge_ref_val = self._double_spin(0.0, 1.0, 1.0, "", 3)
+        self.edge_ref_val.setSingleStep(0.05)
+        self.edge_ref_val.valueChanged.connect(lambda _=None: self._edge_draw_preview())
+        ref_row.addWidget(self.edge_ref_val)
+        ref_row.addStretch(1)
+
+        self.edge_figure = Figure(figsize=(10, 2.4), tight_layout=True)
+        self.edge_canvas = FigureCanvas(self.edge_figure)
+        self.edge_canvas.setMinimumHeight(180)
+        preview_panel = self._panel("Profile Preview")
+        preview_layout = QtWidgets.QVBoxLayout(preview_panel)
+        preview_layout.addLayout(ref_row)
+        preview_layout.addWidget(self.edge_canvas, 1)
+
+        # --- A/B encoding gain via Modulation Error (chains the two features) ---
+        self.edge_gain_button = QtWidgets.QPushButton("Measure encoding gain")
+        self.edge_gain_button.setToolTip(
+            "Run the Modulation Error sweep twice — flat baseline then the current "
+            "edge-ratio profile — and report the per-channel change in neighbour "
+            "leakage and in-band fraction. Needs OSA + SLM connected and a layout "
+            "built. Uses the sweep settings on Calibration ▸ Step 4."
+        )
+        self.edge_gain_button.clicked.connect(self._edge_measure_gain)
+        self.edge_gain_stop_button = QtWidgets.QPushButton("Stop")
+        self.edge_gain_stop_button.setProperty("variant", "danger")
+        self.edge_gain_stop_button.setEnabled(False)
+        self.edge_gain_stop_button.clicked.connect(self._edge_gain_stop)
+        self.edge_gain_save_button = QtWidgets.QPushButton("Save gain CSV…")
+        self.edge_gain_save_button.setProperty("variant", "ghost")
+        self.edge_gain_save_button.setEnabled(False)
+        self.edge_gain_save_button.clicked.connect(self._edge_gain_save)
+        self.edge_osa_button = QtWidgets.QPushButton("Optimize from OSA")
+        self.edge_osa_button.setToolTip(
+            "Run the two-stage live optimisation: one-hot crosstalk search, "
+            "coarse amplitude LUT, then fixed-LUT modulation-fidelity search. "
+            "The first 8 table values are treated as symmetric intensity ratios."
+        )
+        self.edge_osa_button.clicked.connect(self._edge_optimize_osa)
+        self.edge_load_optimization_button = QtWidgets.QPushButton(
+            "Load optimized result…"
+        )
+        self.edge_load_optimization_button.setProperty("variant", "ghost")
+        self.edge_load_optimization_button.setToolTip(
+            "Load an accepted final_result.json and restore its intensity "
+            "profile plus amplitude LUTs."
+        )
+        self.edge_load_optimization_button.clicked.connect(
+            self._edge_load_optimization_result
+        )
+
+        self.edge_gain_bar = QtWidgets.QProgressBar()
+        self.edge_gain_bar.setValue(0)
+        self.edge_gain_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.edge_gain_status.setWordWrap(True)
+
+        self.edge_gain_table = QtWidgets.QTableWidget(0, 6)
+        self.edge_gain_table.setHorizontalHeaderLabels(
+            ["Ch", "λ (nm)", "Δ Leak (pp)", "Δ In-band (pp)", "Win loss %", "Tot loss %"]
+        )
+        self.edge_gain_table.setToolTip(
+            "Δ Leak / Δ In-band: crosstalk benefit (leak down, in-band up = good). "
+            "Win/Tot loss: intensity lost in the encoding window / whole channel "
+            "vs the trivial rectangular encoding (the taper's cost)."
+        )
+        self.edge_gain_table.verticalHeader().setVisible(False)
+        self.edge_gain_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.edge_gain_table.setAlternatingRowColors(True)
+        ghdr = self.edge_gain_table.horizontalHeader()
+        ghdr.setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+
+        self.edge_log = QtWidgets.QPlainTextEdit()
+        self.edge_log.setReadOnly(True)
+        self.edge_log.setObjectName("LogBox")
+        self.edge_log.setMaximumHeight(90)
+
+        gain_panel = self._panel("Encoding Gain  (Modulation Error A/B: flat vs taper)")
+        gain_layout = QtWidgets.QVBoxLayout(gain_panel)
+        gain_row = QtWidgets.QHBoxLayout()
+        gain_row.addWidget(self.edge_gain_button)
+        gain_row.addWidget(self.edge_gain_stop_button)
+        gain_row.addWidget(self.edge_gain_save_button)
+        gain_row.addStretch(1)
+        gain_row.addWidget(self.edge_load_optimization_button)
+        gain_row.addWidget(self.edge_osa_button)
+        gain_layout.addLayout(gain_row)
+        gain_layout.addWidget(self.edge_gain_bar)
+        gain_layout.addWidget(self.edge_gain_status)
+        gain_layout.addWidget(self.edge_gain_table, 1)
+        gain_layout.addWidget(self.edge_log)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        split.addWidget(ratio_panel)
+        split.addWidget(preview_panel)
+        split.addWidget(gain_panel)
+        split.setSizes([150, 220, 320])
+        page.layout().addWidget(split, 1)
+
+        self._edge_draw_preview()
+        return page
+
+    def _edge_log(self, message: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        self.edge_log.appendPlainText(f"[{stamp}] {message}")
+
+    def _edge_sync_layout(self, layout: ChannelLayout) -> None:
+        """Rebuild the ratio table to the layout's channel width (default 1.0).
+
+        Overlapping columns keep their previous values so tweaking the layout
+        does not silently discard a tuned profile.
+        """
+        width = int(layout.channel_width_px)
+        prev = self._edge_get_ratio()
+        self.edge_table.clear()
+        self.edge_table.setColumnCount(width)
+        self.edge_table.setHorizontalHeaderLabels([str(j) for j in range(width)])
+        self._edge_spins = []
+        for j in range(width):
+            spin = WheelSpinBox(wheel_step=self._enc_wheel_step)
+            spin.setRange(0.0, 1.0)
+            spin.setSingleStep(0.01)
+            spin.setDecimals(3)
+            value = float(prev[j]) if prev is not None and j < len(prev) else 1.0
+            spin.setValue(value)
+            spin.setFrame(False)
+            spin.valueChanged.connect(lambda _=None: self._edge_draw_preview())
+            self.edge_table.setCellWidget(0, j, spin)
+            self._edge_spins.append(spin)
+        self.edge_table.resizeColumnsToContents()
+        self.edge_width_label.setText(
+            f"Channel width: {width} px  ({layout.n_channels} channels/side)"
+        )
+        self._edge_draw_preview()
+
+    def _edge_get_ratio(self) -> np.ndarray | None:
+        """Current per-column ratio profile, or None when no layout is built."""
+        spins = getattr(self, "_edge_spins", None)
+        if not spins:
+            return None
+        return np.array([s.value() for s in spins], dtype=float)
+
+    def _edge_set_all(self, value: float) -> None:
+        for spin in getattr(self, "_edge_spins", []):
+            spin.setValue(float(value))
+
+    def _edge_apply_cosine(self) -> None:
+        spins = getattr(self, "_edge_spins", [])
+        width = len(spins)
+        if width == 0:
+            return
+        k, ok = QtWidgets.QInputDialog.getInt(
+            self, "Cosine taper", "Edge columns to taper (per side):",
+            min(2, width), 1, width, 1
+        )
+        if not ok:
+            return
+        j = np.arange(width, dtype=float)
+        d = np.minimum(j + 0.5, width - j - 0.5)
+        ratios = np.ones(width, dtype=float)
+        taper = d < k
+        ratios[taper] = 0.5 - 0.5 * np.cos(np.pi * d[taper] / k)
+        for spin, r in zip(spins, ratios):
+            spin.setValue(float(r))
+
+    def _edge_mirror(self) -> None:
+        spins = getattr(self, "_edge_spins", [])
+        width = len(spins)
+        if width == 0:
+            return
+        for i in range(width // 2):
+            spins[width - 1 - i].setValue(spins[i].value())
+
+    def _edge_draw_preview(self) -> None:
+        ratios = self._edge_get_ratio()
+        self.edge_figure.clear()
+        ax = self.edge_figure.add_subplot(111)
+        if ratios is None or len(ratios) == 0:
+            ax.text(0.5, 0.5, "Build a layout on the TPA Encoding page",
+                    ha="center", va="center", color="#d8dee9", fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+        else:
+            cols = np.arange(len(ratios))
+            ax.step(cols, ratios, where="mid", color="#88c0d0", linewidth=1.5,
+                    marker="o", markersize=4, label="ratio")
+            ax.set_ylim(-0.05, 1.05)
+            ax.set_xlabel("column within channel", color="#d8dee9", fontsize=8)
+            ax.set_ylabel("ratio", color="#88c0d0", fontsize=8)
+            layout = self.encoding_layout
+            if layout is not None and layout.all_channels:
+                ch = layout.x_channels[0]
+                val = float(self.edge_ref_val.value())
+                levels = np.array([ch.level_for(val * float(r)) for r in ratios])
+                ax2 = ax.twinx()
+                ax2.step(cols, levels, where="mid", color="#ebcb8b", linewidth=1.2,
+                         linestyle="--", marker="s", markersize=3, label="SLM level")
+                ax2.set_ylabel(f"SLM level @ value {val:g}", color="#ebcb8b", fontsize=8)
+                ax2.tick_params(colors="#ebcb8b", labelsize=7)
+                for spine in ax2.spines.values():
+                    spine.set_color("#41515c")
+            ax.tick_params(colors="#d8dee9", labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color("#41515c")
+        self.edge_figure.patch.set_facecolor("#101820")
+        ax.set_facecolor("#101820")
+        self.edge_canvas.draw_idle()
+
+    def _edge_optimize_osa(self) -> None:
+        """Start the live two-stage symmetric intensity-profile optimisation."""
+        layout = self.encoding_layout
+        if layout is None:
+            self._edge_log("Build a layout on the TPA Encoding page first.")
+            return
+        if layout.channel_width_px != 15:
+            self._edge_log("OSA optimisation currently requires a 15 px channel width.")
+            return
+        osa = self._osa_ready()
+        if osa is None:
+            self._edge_log("Connect the OSA first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self._edge_log("Open the SLM first.")
+            return
+        ratio = self._edge_get_ratio()
+        if ratio is None or ratio.size != 15:
+            self._edge_log("A 15-value intensity profile is required.")
+            return
+
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Start OSA optimisation",
+            "This performs hundreds of live OSA sweeps and may run overnight. "
+            "The first 8 intensity values will be mirrored to 15 pixels. Continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+
+        ana = self._ana_settings()
+        settings = MeasurementSettings(
+            center_wl="778nm",
+            span="0.8nm",
+            sensitivity=ana.sensitivity,
+            sampling_points="1001",
+            y_unit=ana.y_unit,
+            reference_level=ana.reference_level,
+            trace_id=ana.trace_id,
+            trace_mode=ana.trace_mode,
+        )
+        config = OSAOptimizationConfig(settings=settings)
+        initial_l = ratio[:8].copy()
+        stop_event = threading.Event()
+        self.edge_gain_stop_event = stop_event
+        self._edge_gain_running(True)
+        self.edge_gain_bar.setRange(0, 0)
+        self.edge_gain_status.setText("Preparing fixed OSA bins and references…")
+        self._edge_log(
+            "OSA optimisation started with 8 intensity ratios: "
+            + np.array2string(initial_l, precision=4)
+        )
+
+        def report(progress: OptimizationProgress) -> None:
+            self.edge_optimization_progress.emit(progress)
+
+        def work() -> dict[str, Any]:
+            try:
+                result = optimize_from_osa(
+                    layout,
+                    osa=osa,
+                    slm=controller,
+                    initial_l=initial_l,
+                    config=config,
+                    stop_event=stop_event,
+                    progress_callback=report,
+                )
+            except OptimizationAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "result": result}
+
+        self._run_slm_task(
+            "OSA intensity-profile optimisation",
+            work,
+            self._edge_optimization_finished,
+            self._edge_optimization_error,
+        )
+
+    def _edge_optimization_progress(self, progress: OptimizationProgress) -> None:
+        if progress.total > 0:
+            self.edge_gain_bar.setRange(0, progress.total)
+            self.edge_gain_bar.setValue(min(progress.step, progress.total))
+            counter = f"[{progress.step}/{progress.total}] "
+        else:
+            self.edge_gain_bar.setRange(0, 0)
+            counter = ""
+        best = "" if progress.best_loss is None else f" · best {progress.best_loss:.5g}"
+        self.edge_gain_status.setText(
+            f"{counter}{progress.stage}: {progress.message}{best}"
+        )
+
+    def _edge_optimization_finished(self, payload: dict[str, Any]) -> None:
+        self.edge_gain_stop_event = None
+        self._edge_gain_running(False)
+        self.edge_gain_bar.setRange(0, 100)
+        if payload.get("status") == "aborted":
+            self.edge_gain_bar.setValue(0)
+            self.edge_gain_status.setText("Stopped — completed candidates remain on disk.")
+            self._edge_log("OSA optimisation stopped; saved candidate data were retained.")
+            return
+        result: OptimizationResult = payload["result"]
+        self._edge_optimization_result = result
+        if result.accepted:
+            for spin, value in zip(self._edge_spins, result.final_profile):
+                spin.setValue(float(value))
+            self.enc_col_ratio = result.final_profile.copy()
+            self.enc_use_optimized_lut.setEnabled(True)
+            self.enc_use_optimized_lut.setChecked(True)
+        else:
+            self.enc_use_optimized_lut.setChecked(False)
+            self.enc_use_optimized_lut.setEnabled(False)
+        self.edge_gain_bar.setValue(100)
+        verdict = "accepted" if result.accepted else "saved, acceptance checks failed"
+        self.edge_gain_status.setText(
+            f"Complete ({verdict}) · results saved in {result.run_dir}"
+        )
+        self._edge_log(
+            "OSA optimisation complete. Final intensity ratios: "
+            + np.array2string(result.final_l, precision=5)
+        )
+        for issue in result.acceptance_issues:
+            self._edge_log(f"Acceptance: {issue}")
+        if not result.accepted:
+            self._edge_log(
+                "The failed candidate was saved for inspection but was not applied "
+                "to the active intensity profile."
+            )
+
+    def _edge_optimization_error(self, _error: str) -> None:
+        self.edge_gain_stop_event = None
+        self._edge_gain_running(False)
+        self.edge_gain_bar.setRange(0, 100)
+        self.edge_gain_bar.setValue(0)
+        self.edge_gain_status.setText("OSA optimisation failed (see Status log).")
+
+    def _edge_load_optimization_result(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self._edge_log("Build the matching 15 px channel layout first.")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load optimized result",
+            str(Path("data/osa_optimization").resolve()),
+            "Optimization result (final_result.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            result = load_optimization_result(path)
+        except Exception as exc:
+            self._edge_log(f"Could not load optimization result: {exc}")
+            return
+        if result.final_profile.shape != (layout.channel_width_px,):
+            self._edge_log(
+                "Loaded profile width does not match the current channel layout."
+            )
+            return
+        self._edge_optimization_result = result
+        if not result.accepted:
+            self.enc_use_optimized_lut.setChecked(False)
+            self.enc_use_optimized_lut.setEnabled(False)
+            self._edge_log(
+                "Loaded result failed its acceptance checks and was not applied."
+            )
+            for issue in result.acceptance_issues:
+                self._edge_log(f"Acceptance: {issue}")
+            return
+        for spin, value in zip(self._edge_spins, result.final_profile):
+            spin.setValue(float(value))
+        self.enc_col_ratio = result.final_profile.copy()
+        self.enc_use_optimized_lut.setEnabled(True)
+        self.enc_use_optimized_lut.setChecked(True)
+        self._edge_log(f"Loaded accepted optimization result from {result.run_dir}")
+
+    # --- A/B encoding gain: flat baseline vs current taper -------------
+
+    def _edge_gain_running(self, running: bool) -> None:
+        self.edge_gain_button.setEnabled(not running)
+        self.edge_gain_stop_button.setEnabled(running)
+        self.edge_osa_button.setEnabled(not running)
+        self.edge_load_optimization_button.setEnabled(not running)
+        self.edge_gain_save_button.setEnabled(not running and self._edge_gain is not None)
+
+    def _edge_measure_gain(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self._edge_log("Build a layout on the TPA Encoding page first.")
+            return
+        osa = self._osa_ready()
+        if osa is None:
+            self._edge_log("Connect the OSA (Connections page) first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self._edge_log("Open the SLM (Connections page) first.")
+            return
+        ratio = self._edge_get_ratio()
+        if ratio is None or np.allclose(ratio, 1.0):
+            self._edge_log(
+                "Edge profile is flat (all 1.0) — the gain would be ~0. Set a "
+                "taper (e.g. Cosine taper…) before measuring."
+            )
+            return
+
+        settings = self._ana_settings()
+        averages = self.ana_averages.value()
+        stride = self.ana_stride.value()
+        subtract_bg = self.ana_bg_check.isChecked()
+        n_targets = 2 * len(range(0, layout.n_channels, max(1, stride)))
+        total = 2 * n_targets  # two sweeps (baseline + taper)
+
+        self.edge_gain_bar.setMaximum(total)
+        self.edge_gain_bar.setValue(0)
+        self.edge_gain_status.setText("Starting baseline (flat) sweep…")
+        self._edge_gain_running(True)
+        stop_event = threading.Event()
+        self.edge_gain_stop_event = stop_event
+
+        def make_cb(offset: int, phase: str):
+            def cb(progress: AnalysisProgress) -> None:
+                self.edge_gain_progress.emit(
+                    offset + progress.step + 1, total, f"{phase} {progress.message}"
+                )
+            return cb
+
+        def work() -> dict[str, Any]:
+            try:
+                baseline = measure_channel_spectra(
+                    osa, controller, layout, settings,
+                    averages=averages, stride=stride, subtract_background=subtract_bg,
+                    stop_event=stop_event, progress_callback=make_cb(0, "[flat]"),
+                    col_ratio=None,
+                )
+                tuned = measure_channel_spectra(
+                    osa, controller, layout, settings,
+                    averages=averages, stride=stride, subtract_background=subtract_bg,
+                    stop_event=stop_event, progress_callback=make_cb(n_targets, "[taper]"),
+                    col_ratio=ratio,
+                )
+            except AnalysisAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "baseline": baseline, "tuned": tuned}
+
+        self._run_slm_task("Encoding gain (A/B)", work,
+                           self._edge_gain_finished, self._edge_gain_error)
+
+    def _edge_gain_stop(self) -> None:
+        if self.edge_gain_stop_event is not None:
+            self.edge_gain_stop_event.set()
+            self.edge_gain_status.setText("Stopping…")
+
+    def _edge_gain_progress(self, done: int, total: int, message: str) -> None:
+        self.edge_gain_bar.setValue(done)
+        self.edge_gain_status.setText(f"[{done}/{total}] {message}")
+
+    def _edge_gain_finished(self, payload: dict[str, Any]) -> None:
+        self.edge_gain_stop_event = None
+        self._edge_gain_running(False)
+        if payload.get("status") == "aborted":
+            self.edge_gain_status.setText("Stopped — partial sweep discarded.")
+            self._edge_log("Gain measurement stopped.")
+            return
+        gain = encoding_gain(payload["baseline"], payload["tuned"])
+        self._edge_gain = gain
+        self._edge_gain_populate(gain)
+
+    def _edge_gain_error(self, _error: str) -> None:
+        self.edge_gain_stop_event = None
+        self._edge_gain_running(False)
+        self.edge_gain_status.setText("Gain measurement failed (see Status log).")
+
+    def _edge_gain_populate(self, gain: EncodingGain) -> None:
+        self.edge_gain_table.setRowCount(gain.n)
+        for row, c in enumerate(gain.channels):
+            cells = [
+                f"{c.side}{c.index}",
+                f"{c.nominal_wl_nm:.3f}",
+                f"{c.d_leak * 100:+.2f}",
+                f"{c.d_in_band * 100:+.2f}",
+                f"{c.loss_window * 100:.2f}",
+                f"{c.loss_total * 100:.2f}",
+            ]
+            for col, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.edge_gain_table.setItem(row, col, item)
+        summary = (
+            f"{gain.n} channels  ·  leak {gain.mean_leak_before * 100:.2f}% → "
+            f"{gain.mean_leak_after * 100:.2f}% (Δ {gain.mean_d_leak * 100:+.2f} pp)  ·  "
+            f"in-band {gain.mean_in_band_before * 100:.1f}% → "
+            f"{gain.mean_in_band_after * 100:.1f}% (Δ {gain.mean_d_in_band * 100:+.2f} pp)  ·  "
+            f"loss: window {gain.mean_loss_window * 100:.1f}%, "
+            f"total {gain.mean_loss_total * 100:.1f}%"
+        )
+        self.edge_gain_status.setText(summary)
+        self.edge_gain_save_button.setEnabled(gain.n > 0)
+        verdict = "improves" if gain.mean_d_leak < 0 else "does not reduce"
+        self._edge_log(f"Gain: taper {verdict} crosstalk — {summary}")
+
+    def _edge_gain_save(self) -> None:
+        if self._edge_gain is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save encoding gain", "encoding_gain.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            write_gain_csv(self._edge_gain, path)
+            self._edge_log(f"Saved gain table → {path}")
+        except Exception as exc:
+            self._edge_log(f"Save failed: {exc}")
+
+    # ==================================================================
     # Modulation Error Analysis page (B1: single-channel spectral shape)
     # ==================================================================
 
@@ -2238,9 +2886,10 @@ class MainWindow(QtWidgets.QMainWindow):
         page.layout().addWidget(self.ana_layout_label)
 
         # --- results: table + plots ---
-        self.ana_table = QtWidgets.QTableWidget(0, 6)
+        self.ana_table = QtWidgets.QTableWidget(0, 8)
         self.ana_table.setHorizontalHeaderLabels(
-            ["Ch", "λ (nm)", "Peak λ", "FWHM (nm)", "In-band %", "Leak %"]
+            ["Ch", "λ (nm)", "Peak λ", "FWHM (nm)",
+             "Window (W)", "Channel (W)", "In-band %", "Leak %"]
         )
         self.ana_table.verticalHeader().setVisible(False)
         self.ana_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -2421,6 +3070,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{ch.nominal_wl_nm:.4f}",
                 f"{ch.peak_wl_nm:.4f}",
                 f"{ch.fwhm_nm:.4f}",
+                f"{ch.window_power_w:.3e}",
+                f"{ch.channel_power_w:.3e}",
                 f"{ch.in_band_fraction*100:.1f}",
                 f"{ch.neighbor_leakage*100:.1f}",
             ]
