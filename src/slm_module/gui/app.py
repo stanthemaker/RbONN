@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -55,6 +56,26 @@ from ..analysis import (
     ModulationErrorResult,
     measure_channel_spectra,
     write_analysis_csv,
+)
+from ..scope_background import (
+    BackgroundAborted,
+    BackgroundProgress,
+    BackgroundResult,
+    load_background_result,
+    measure_scatter_background,
+    save_background_json,
+    save_background_npz,
+    write_background_csv,
+)
+from ..scope_tpa import (
+    TPAAborted,
+    TPAProgress,
+    TPAResult,
+    load_tpa_result,
+    measure_tpa_efficiency,
+    save_tpa_json,
+    save_tpa_npz,
+    write_tpa_csv,
 )
 from ..encoding import ChannelLayout, build_channel_layout, encode_to_pattern
 from ..keepalive import SLMKeepAlive
@@ -541,6 +562,8 @@ class MainWindow(QtWidgets.QMainWindow):
     keepalive_status = QtCore.pyqtSignal(bool, str)
     calibration_progress = QtCore.pyqtSignal(object)
     analysis_progress = QtCore.pyqtSignal(object)
+    background_progress = QtCore.pyqtSignal(object)
+    tpa_progress = QtCore.pyqtSignal(object)
     monitor_sample = QtCore.pyqtSignal(object)
     hold_progress = QtCore.pyqtSignal(int, int)
 
@@ -576,6 +599,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_result: ModulationErrorResult | None = None
         self.analysis_stop_event: threading.Event | None = None
         self._ana_capture_dir: str | None = None
+        self.background_result: BackgroundResult | None = None
+        self.background_stop_event: threading.Event | None = None
+        self._bg_capture_dir: str | None = None
+        self._bg_live: list[tuple[float, float]] = []
+        self.tpa_result: TPAResult | None = None
+        self.tpa_stop_event: threading.Event | None = None
+        self._tpa_capture_dir: str | None = None
+        self._tpa_live: list[tuple[float, float]] = []
         self.scope_controller: ScopeController | None = None
         self.scope_stop_event: threading.Event | None = None
         self.monitor_stop_event: threading.Event | None = None
@@ -592,6 +623,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.keepalive_status.connect(self._on_keepalive_status)
         self.calibration_progress.connect(self._on_calibration_progress)
         self.analysis_progress.connect(self._on_analysis_progress)
+        self.background_progress.connect(self._on_background_progress)
+        self.tpa_progress.connect(self._on_tpa_progress)
         self.monitor_sample.connect(self._on_monitor_sample)
         self.hold_progress.connect(self._on_hold_progress)
 
@@ -826,6 +859,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(self._build_step3_page(), "Step 3 · Intensity")
         tabs.addTab(self._build_analysis_page(), "Step 4 · Mod Error")
         tabs.addTab(self._build_scope_holding_tab(), "Step 5 · Holding")
+        tabs.addTab(self._build_background_tab(), "Step 6 · BG Scatter")
+        tabs.addTab(self._build_tpa_tab(), "Step 7 · TPA Efficiency")
         lay.addWidget(tabs)
 
         # every Run button, toggled together by _set_calibration_running
@@ -1195,9 +1230,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_scope_holding_tab(self) -> QtWidgets.QWidget:
         page = self._page_shell("Scope Holding Time")
         subtitle = QtWidgets.QLabel(
-            "Measure the SLM settling (hold) time: switch a full-screen grayscale "
-            "A→B, capture the CH transient, and average many repeats so the "
-            "deterministic settling emerges above the signal fluctuation."
+            "Measure the SLM settling (hold) time on a single PC-scripted timeline: "
+            "record → hold A (pre-switch) → switch A→B → hold B (post-switch) → stop. "
+            "Each repeat is aligned on the A→B edge detected in its own trace, so the "
+            "settle time is referenced to the real optical transition and is immune "
+            "to the scope-vs-PC clock offset (reported separately)."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
@@ -1218,15 +1255,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hold_gray_b = self._spin(0, 1023, 420)
         self.hold_averages = self._spin(1, 1000, 60)
         self.hold_window = self._double_spin(0.05, 5.0, 0.8, " s", 2)
+        self.hold_window.setToolTip("Time B is held/captured after the A→B switch")
         self.hold_settle = self._double_spin(0.1, 5.0, 0.6, " s", 2)
-        self.hold_baseline = self._double_spin(0.02, 2.0, 0.15, " s", 2)
+        self.hold_settle.setToolTip("Settle at A before recording starts (not measured)")
+        self.hold_baseline = self._double_spin(0.02, 2.0, 0.30, " s", 2)
+        self.hold_baseline.setToolTip("Time A is held after recording starts, before the switch")
         grid.addWidget(QtWidgets.QLabel("Channel"), 0, 0); grid.addWidget(self.hold_channel, 0, 1)
         grid.addWidget(QtWidgets.QLabel("Gray A (start)"), 0, 2); grid.addWidget(self.hold_gray_a, 0, 3)
         grid.addWidget(QtWidgets.QLabel("Gray B (switch to)"), 0, 4); grid.addWidget(self.hold_gray_b, 0, 5)
         grid.addWidget(QtWidgets.QLabel("Averages"), 1, 0); grid.addWidget(self.hold_averages, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("Capture window"), 1, 2); grid.addWidget(self.hold_window, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Post-switch hold (B)"), 1, 2); grid.addWidget(self.hold_window, 1, 3)
         grid.addWidget(QtWidgets.QLabel("Pre-settle"), 1, 4); grid.addWidget(self.hold_settle, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("Baseline"), 2, 0); grid.addWidget(self.hold_baseline, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Pre-switch hold (A)"), 2, 0); grid.addWidget(self.hold_baseline, 2, 1)
         self.hold_status = QtWidgets.QLabel("\N{EN DASH}")
         self.hold_start_button = QtWidgets.QPushButton("Run")
         self.hold_start_button.clicked.connect(self._hold_start)
@@ -1255,10 +1295,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ch = int(self.hold_channel.currentText())
         ga, gb = self.hold_gray_a.value(), self.hold_gray_b.value()
         n = self.hold_averages.value()
-        window = self.hold_window.value()
-        settle = self.hold_settle.value()
-        baseline = self.hold_baseline.value()
-        rl = max(1000, int(window * 100_000))          # ~100 kSa/s
+        pre_hold = self.hold_baseline.value()      # A held after record start, before switch
+        post_hold = self.hold_window.value()       # captured after the switch
+        settle = self.hold_settle.value()          # pre-settle at A before recording
+        total = pre_hold + post_hold + 0.1         # scope record span (+ margin)
+        rl = max(1000, int(total * 100_000))       # ~100 kSa/s
+        align_pre = min(0.1, pre_hold * 0.5)       # kept before the edge in the aligned avg
         stop_event = threading.Event()
         self.hold_stop_event = stop_event
         self.hold_progress.emit(0, n)
@@ -1268,13 +1310,13 @@ class MainWindow(QtWidgets.QMainWindow):
             drv = scope.driver
             drv.configure_channel(ch, state=True, scale="0.02", offset="0", coupling="DCLimit")
             drv.set_decimation(ch, "HRESolution")
-            drv.set_time_range(str(window)); drv.set_record_length(rl)
+            drv.set_time_range(str(total)); drv.set_record_length(rl)
             drv.set_post_trigger_window(); drv.write("TRIGger1:MODE AUTO")
 
             # center the vertical range on the gray-A level
             controller.display_grayscale(ga, interval=0.0); time.sleep(settle)
             drv.single_acquisition()
-            dl = time.monotonic() + 4
+            dl = time.monotonic() + total + 4
             while time.monotonic() < dl and not drv.is_acquisition_complete():
                 time.sleep(0.02)
             y0 = drv.read_waveform(ch)
@@ -1283,43 +1325,116 @@ class MainWindow(QtWidgets.QMainWindow):
             drv.configure_channel(ch, state=True, scale=f"{scale:.4f}",
                                   offset=f"{mid:.4f}", coupling="DCLimit")
 
-            acc = None; t = None; cmds = []; first = None
+            raws: list[np.ndarray] = []; onsets: list[int] = []
+            switch_rels: list[float] = []; t_axis = None; dt = None
             for i in range(n):
                 if stop_event.is_set():
                     return {"status": "aborted"}
+                # ---- one PC-scripted timeline (a single clock drives the sequence) ----
                 controller.display_grayscale(ga, interval=0.0); time.sleep(settle)
-                drv.single_acquisition(); t0 = time.monotonic()
-                time.sleep(baseline)
-                controller.display_grayscale(gb, interval=0.0)     # A -> B transition
-                cmds.append(time.monotonic() - t0)
-                dl = time.monotonic() + 4
+                drv.single_acquisition(); t0 = time.monotonic()   # start recording
+                time.sleep(pre_hold)                              # hold A (pre-switch)
+                controller.display_grayscale(gb, interval=0.0)    # A -> B switch
+                switch_rels.append(time.monotonic() - t0)         # PC time of the switch
+                dl = time.monotonic() + total + 4
                 while time.monotonic() < dl and not drv.is_acquisition_complete():
                     if stop_event.is_set():
                         return {"status": "aborted"}
                     time.sleep(0.02)
                 xs, xe, npts, vps = drv.read_waveform_header(ch)
-                y = np.asarray(drv.read_waveform(ch))
-                if acc is None:
-                    acc = np.zeros_like(y); t = np.linspace(xs, xe, y.size); first = y.copy()
-                acc[: y.size] += y[: acc.size]
+                y = np.asarray(drv.read_waveform(ch), dtype=float)
+                if t_axis is None:
+                    t_axis = np.linspace(xs, xe, y.size)
+                    dt = (xe - xs) / max(y.size - 1, 1)
+                raws.append(y)
+                onsets.append(self._hold_edge_onset(y, dt))
                 self.hold_progress.emit(i + 1, n)
 
-            avg = acc / n
-            tcmd = float(np.mean(cmds))
-            base = avg[t < (tcmd - 0.01)]
-            initial = float(base.mean()) if base.size else float(avg[:100].mean())
-            final = float(avg[t > t[-1] - 0.1].mean())
-            step = final - initial
-            resid = float(base.std()) if base.size else 0.0
-            post = np.where(t > tcmd)[0]
-            band = 0.02 * abs(step)
-            outside = post[np.abs(avg[post] - final) > band] if post.size else np.array([])
-            tset = float(t[outside[-1]]) if outside.size else tcmd
-            return {"status": "ok", "t": t, "avg": avg, "first": first, "tcmd": tcmd,
-                    "initial": initial, "final": final, "step": step, "resid": resid,
-                    "settle": tset - tcmd, "n": n}
+            return self._hold_reduce(raws, onsets, switch_rels, t_axis, dt,
+                                     align_pre, post_hold, pre_hold, n)
 
         self._run_task("Scope holding", work, self._hold_finished, self._hold_error)
+
+    @staticmethod
+    def _hold_edge_onset(y: np.ndarray, dt: float) -> int:
+        """Index where the trace first leaves its initial baseline (A→B edge onset).
+
+        Referenced to the signal itself, so it is independent of the scope-vs-PC
+        clock offset. Returns -1 if no clear edge is found.
+        """
+        n5 = max(10, y.size // 20)
+        initial = float(np.median(y[:n5]))
+        final = float(np.median(y[-n5:]))
+        noise = float(np.std(y[:n5]))
+        step = final - initial
+        thr = max(0.1 * abs(step), 5.0 * noise, 1e-9)
+        guard = min(y.size - 1, int(0.03 / dt) if dt and dt > 0 else 0)
+        hit = np.where(np.abs(y[guard:] - initial) > thr)[0]
+        return int(hit[0] + guard) if hit.size else -1
+
+    @staticmethod
+    def _hold_reduce(raws, onsets, switch_rels, t_axis, dt, align_pre,
+                     post_hold, pre_hold, n_req) -> dict[str, Any]:
+        """Edge-align the per-repeat traces, average, and derive settle metrics.
+
+        Each repeat is cropped to a common [-align_pre, +post_hold] window around
+        its own detected edge, so averaging sharpens the transition instead of
+        smearing it with the trigger jitter. Time is returned with t=0 at the edge.
+        """
+        pre_n = max(1, int(align_pre / dt))
+        post_n = max(1, int(post_hold / dt))
+        subs: list[np.ndarray] = []; onset_times: list[float] = []
+        for y, on in zip(raws, onsets):
+            if on < 0 or on - pre_n < 0 or on + post_n > y.size:
+                continue
+            subs.append(y[on - pre_n: on + post_n])
+            onset_times.append(float(t_axis[on]))
+
+        used = len(subs)
+        if used:
+            avg = np.mean(np.vstack(subs), axis=0)
+            first = subs[0]
+            t_rel = (np.arange(avg.size) - pre_n) * dt
+            edge_scope = float(np.median(onset_times))
+        else:
+            # fallback: no detectable edge — average unaligned, reference to the mean
+            m = min(y.size for y in raws)
+            avg = np.mean(np.vstack([y[:m] for y in raws]), axis=0)
+            first = raws[0][:m]
+            on = MainWindow._hold_edge_onset(avg, dt)
+            ref = on if on >= 0 else 0
+            t_rel = (np.arange(avg.size) - ref) * dt
+            edge_scope = float(t_axis[on]) if on >= 0 else pre_hold
+
+        n5 = max(10, avg.size // 20)
+        pre_mask = t_rel < -0.01
+        initial = (float(np.median(avg[pre_mask])) if pre_mask.any()
+                   else float(np.median(avg[:n5])))
+        final = float(np.median(avg[t_rel > t_rel[-1] - 0.1]))
+        step = final - initial
+        resid = (float(np.std(avg[pre_mask])) if pre_mask.sum() > 1
+                 else float(np.std(avg[:n5])))
+        # settle-to-2% on a lightly smoothed trace so the metric is not limited by
+        # the averaged residual noise (2% of a small step can sit below the noise)
+        win = max(1, int(0.002 / dt))          # ~2 ms boxcar
+        if win > 1:
+            pad = win // 2
+            kern = np.ones(win) / win
+            sm = np.convolve(np.pad(avg, pad, mode="edge"), kern, mode="valid")[:avg.size]
+        else:
+            sm = avg
+        band = 0.02 * abs(step)
+        post_mask = t_rel >= 0.0
+        outside = np.where(post_mask & (np.abs(sm - final) > band))[0]
+        settle = float(t_rel[outside[-1]]) if outside.size else 0.0
+        # the clock offset the old command-referenced marker suffered from:
+        # scope-time of the real edge minus PC-time of the issued switch
+        pc_switch = float(np.median(switch_rels)) if switch_rels else pre_hold
+        offset = edge_scope - pc_switch
+        return {"status": "ok", "t": t_rel, "avg": avg, "first": first,
+                "initial": initial, "final": final, "step": step, "resid": resid,
+                "settle": settle, "cmd_rel": -offset, "offset": offset,
+                "n": used, "n_req": n_req}
 
     def _hold_stop(self) -> None:
         if self.hold_stop_event is not None:
@@ -1337,11 +1452,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._hold_draw(payload)
         sig = abs(payload["step"]) / max(payload["resid"], 1e-9)
-        self.hold_status.setText(f"Done · {payload['n']} averages")
+        self.hold_status.setText(
+            f"Done · {payload['n']}/{payload['n_req']} repeats edge-aligned"
+        )
         self._hold_result.setText(
-            f"Settle to 2%: {payload['settle']*1000:.0f} ms after command  ·  "
+            f"Settle to 2%: {payload['settle']*1000:.0f} ms after edge  ·  "
             f"step {payload['step']*1000:.2f} mV  ·  residual noise "
-            f"{payload['resid']*1000:.2f} mV  ·  step/noise {sig:.1f}"
+            f"{payload['resid']*1000:.2f} mV  ·  step/noise {sig:.1f}  ·  "
+            f"PC↔scope offset {payload['offset']*1000:+.0f} ms"
             + ("  \N{WARNING SIGN} step not significant (use higher-contrast patterns)"
                if sig < 3 else "")
         )
@@ -1356,12 +1474,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hold_fig.patch.set_facecolor("#101820")
         ax = self.hold_fig.add_subplot(111)
         self._style_dark_axes(ax)
-        ax.set_xlabel("time (ms)"); ax.set_ylabel("CH (mV)")
+        ax.set_xlabel("time after A→B edge (ms)"); ax.set_ylabel("CH (mV)")
         t = p["t"] * 1000.0
         if p.get("first") is not None:
             ax.plot(t, p["first"] * 1000.0, lw=0.5, color="#556", label="single raw")
         ax.plot(t, p["avg"] * 1000.0, lw=1.4, color="#47b8e0", label=f"avg N={p['n']}")
-        ax.axvline(p["tcmd"] * 1000.0, color="#f0a3a3", ls="--", lw=1.2, label="A→B command")
+        ax.axvline(0.0, color="#8fd14f", ls="-", lw=1.0, label="A→B edge (detected)")
+        ax.axvline(p["cmd_rel"] * 1000.0, color="#f0a3a3", ls="--", lw=1.2,
+                   label="PC switch cmd")
+        if p.get("settle"):
+            ax.axvline(p["settle"] * 1000.0, color="#e0a447", ls=":", lw=1.0,
+                       label="settled (2%)")
         ax.axhline(p["final"] * 1000.0, color="#8fd6a0", ls=":", lw=1.0)
         ax.legend(loc="upper right", fontsize=8)
         self.hold_canvas.draw_idle()
@@ -1737,15 +1860,34 @@ class MainWindow(QtWidgets.QMainWindow):
         """Scope-monitor feedback shares the encoder's merged Feedback log."""
         self._enc_log(f"[scope] {message}")
 
+    # calibration results are named calib_step*.json (calib_step3.json,
+    # calib_step33.json, ...); the encoder needs a step-3 intensity result.
+    _CALIB_RE = re.compile(r"^calib_step.*\.json$", re.IGNORECASE)
+
     def _enc_local_calib_path(self) -> Path | None:
-        """Locate the project-local calibration result (calib_step3.json)."""
-        candidates = [
-            Path.cwd() / "calib_step3.json",
-            Path(__file__).resolve().parents[3] / "calib_step3.json",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+        """Locate the newest usable project-local calibration result.
+
+        Scans the working dir and project root for calib_step*.json files and
+        returns the most recently modified one that loads as a valid intensity
+        (step-3) result. Files without intensity_levels (step-1/step-2 outputs)
+        are skipped so the encoder never auto-loads an unusable calibration.
+        """
+        search_dirs = [Path.cwd(), Path(__file__).resolve().parents[3]]
+        matches: dict[Path, float] = {}
+        for directory in search_dirs:
+            try:
+                for entry in directory.iterdir():
+                    if entry.is_file() and self._CALIB_RE.match(entry.name):
+                        matches.setdefault(entry.resolve(), entry.stat().st_mtime)
+            except OSError:
+                continue
+        for path in sorted(matches, key=matches.get, reverse=True):
+            try:
+                calib = load_calibration_result(str(path))
+            except Exception:
+                continue
+            if calib.intensity_levels is not None:
+                return path
         return None
 
     def _enc_get_calib(self) -> CalibrationResult | None:
@@ -2356,6 +2498,648 @@ class MainWindow(QtWidgets.QMainWindow):
             except OSError as exc:
                 msg += f"  (raw NPZ copy failed: {exc})"
         self.ana_status.setText(msg)
+
+    # ==================================================================
+    # Background scatter calibration (Step 6): dark + per-channel 780 scatter
+    # ==================================================================
+
+    def _build_background_tab(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Background Scatter Calibration")
+        subtitle = QtWidgets.QLabel(
+            "Automated send-pattern → record-scope-mean sweep. First measures the "
+            "dark/baseline with all SLM channels off, then turns on each channel "
+            "in isolation and sweeps its level to build a linear 780-scatter curve "
+            "per channel. Save the result to subtract this background from the 420 "
+            "TPA signal later. Build a channel grid on the TPA Encoding page first."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep settings ---
+        cfg = self._panel("Sweep & Scope Settings")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.bg_channel = QtWidgets.QComboBox()
+        self.bg_channel.addItems(["1", "2", "3", "4"])
+        self.bg_duration = QtWidgets.QDoubleSpinBox()
+        self.bg_duration.setRange(0.001, 10.0); self.bg_duration.setDecimals(3)
+        self.bg_duration.setValue(1.0); self.bg_duration.setSuffix(" s")
+        self.bg_duration.setToolTip("Scope MEAN averaging window per reading")
+        self.bg_hold = QtWidgets.QDoubleSpinBox()
+        self.bg_hold.setRange(0.0, 10000.0); self.bg_hold.setValue(150.0)
+        self.bg_hold.setSuffix(" ms")
+        self.bg_hold.setToolTip("Settle time after each SLM pattern change")
+        self.bg_levels = self._spin(2, 21, 5)
+        self.bg_levels.setToolTip("Number of levels swept 0→1 per channel (incl. 0)")
+        self.bg_dark_samples = self._spin(1, 100, 5)
+        self.bg_dark_samples.setToolTip("Repeated dark/baseline readings to average")
+        self.bg_repeats = self._spin(1, 20, 1)
+        self.bg_repeats.setToolTip("Repeated scope readings averaged per level point")
+        self.bg_stride = self._spin(1, 64, 1)
+        self.bg_stride.setToolTip("Measure only every Nth channel per side (1 = all)")
+        self.bg_decimation = QtWidgets.QComboBox()
+        self.bg_decimation.addItems(["HRESolution", "SAMPle"])
+        pairs = [
+            ("Channel", self.bg_channel), ("Average for", self.bg_duration),
+            ("Hold", self.bg_hold), ("Levels", self.bg_levels),
+            ("Dark samples", self.bg_dark_samples), ("Repeats", self.bg_repeats),
+            ("Stride", self.bg_stride), ("Decimation", self.bg_decimation),
+        ]
+        for i, (label, widget) in enumerate(pairs):
+            r, c = i // 2, (i % 2) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        page.layout().addWidget(cfg)
+
+        self.bg_layout_label = QtWidgets.QLabel(
+            "Grid: (build a layout on the TPA Encoding page)"
+        )
+        self.bg_layout_label.setObjectName("PageSubtitle")
+        self.bg_layout_label.setWordWrap(True)
+        page.layout().addWidget(self.bg_layout_label)
+
+        # --- results: fitted-lines plot (left) + raw scatter plot (right) ---
+        # left: one line per channel, x = normalised intensity, dashed dark line
+        self.bg_fits_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.bg_fits_canvas = FigureCanvas(self.bg_fits_fig)
+        # right: raw scatter (wavelength vs scatter above dark), incl. big jumps
+        self.bg_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.bg_canvas = FigureCanvas(self.bg_fig)
+
+        plot_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        plot_split.addWidget(self._panel_with_widget("Per-channel fits", self.bg_fits_canvas))
+        plot_split.addWidget(self._panel_with_widget("Raw scatter", self.bg_canvas))
+        plot_split.setSizes([560, 520])
+        page.layout().addWidget(plot_split, 1)
+
+        # --- controls ---
+        self.bg_progress_bar = QtWidgets.QProgressBar()
+        self.bg_progress_bar.setValue(0)
+        self.bg_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.bg_run_button = QtWidgets.QPushButton("Run Sweep")
+        self.bg_run_button.clicked.connect(self._bg_run)
+        self.bg_stop_button = QtWidgets.QPushButton("Stop")
+        self.bg_stop_button.setProperty("variant", "danger")
+        self.bg_stop_button.setEnabled(False)
+        self.bg_stop_button.clicked.connect(self._bg_stop)
+        self.bg_save_button = QtWidgets.QPushButton("Save…")
+        self.bg_save_button.setProperty("variant", "ghost")
+        self.bg_save_button.setEnabled(False)
+        self.bg_save_button.clicked.connect(self._bg_save)
+        self.bg_load_button = QtWidgets.QPushButton("Load…")
+        self.bg_load_button.setProperty("variant", "ghost")
+        self.bg_load_button.setToolTip(
+            "Load a saved background NPZ; big jumps are re-eliminated and each "
+            "channel re-fit before plotting."
+        )
+        self.bg_load_button.clicked.connect(self._bg_load)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.bg_status, 1)
+        ctrl.addWidget(self.bg_load_button)
+        ctrl.addWidget(self.bg_save_button)
+        ctrl.addWidget(self.bg_run_button)
+        ctrl.addWidget(self.bg_stop_button)
+        page.layout().addWidget(self.bg_progress_bar)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _bg_monitor_settings(self) -> MonitorSettings:
+        # free-run AUTO software read (same recipe as the encoder auto-read)
+        return MonitorSettings(
+            channel=int(self.bg_channel.currentText()),
+            trigger_mode="AUTO",
+            hold=self.bg_hold.value() / 1000.0,     # ms -> s
+            duration=self.bg_duration.value(),
+            decimation=self.bg_decimation.currentText(),
+        )
+
+    def _bg_set_running(self, running: bool) -> None:
+        self.bg_run_button.setEnabled(not running)
+        self.bg_stop_button.setEnabled(running)
+        self.bg_load_button.setEnabled(not running)
+        self.bg_save_button.setEnabled(
+            not running and self.background_result is not None
+        )
+
+    def _bg_run(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self.bg_status.setText(
+                "No channel grid — open the TPA Encoding page to build one."
+            )
+            return
+        scope = self.scope_controller
+        if scope is None or not scope.is_connected:
+            self.bg_status.setText("Connect the scope on the Scope page first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.bg_status.setText("Open the SLM on the SLM Control page first.")
+            return
+
+        settings = self._bg_monitor_settings()
+        n_levels = self.bg_levels.value()
+        levels = np.linspace(0.0, 1.0, n_levels)
+        dark_samples = self.bg_dark_samples.value()
+        repeats = self.bg_repeats.value()
+        stride = self.bg_stride.value()
+        capture_dir = tempfile.mkdtemp(prefix="bg_scatter_")
+        self._bg_capture_dir = capture_dir
+
+        n_targets = 2 * len(range(0, layout.n_channels, max(1, stride)))
+        self.bg_layout_label.setText(
+            f"Grid: {layout.n_channels} ch/side, width {layout.channel_width_px} px, "
+            f"centre {layout.center_wl:.2f} nm  ·  {n_targets} channels × "
+            f"{n_levels} levels + dark"
+        )
+        self._bg_live = []
+        self.bg_progress_bar.setMaximum(n_targets * n_levels + 1)
+        self.bg_progress_bar.setValue(0)
+        self.bg_status.setText("Starting…")
+        self._bg_set_running(True)
+
+        stop_event = threading.Event()
+        self.background_stop_event = stop_event
+
+        def report(progress: BackgroundProgress) -> None:
+            self.background_progress.emit(progress)
+
+        def work() -> dict[str, Any]:
+            try:
+                result = measure_scatter_background(
+                    scope, controller, layout, settings,
+                    levels=levels, dark_samples=dark_samples, repeats=repeats,
+                    stride=stride, capture_dir=capture_dir,
+                    stop_event=stop_event, progress_callback=report,
+                )
+            except BackgroundAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "result": result}
+
+        self._run_slm_task("Background scatter sweep", work,
+                           self._bg_finished, self._bg_error)
+
+    def _bg_stop(self) -> None:
+        if self.background_stop_event is not None:
+            self.background_stop_event.set()
+            self.bg_status.setText("Stopping…")
+
+    def _on_background_progress(self, progress: BackgroundProgress) -> None:
+        self.bg_progress_bar.setMaximum(max(progress.total, 1))
+        self.bg_progress_bar.setValue(min(progress.step + 1, progress.total))
+        self.bg_status.setText(progress.message)
+        if progress.wl is not None and progress.metric is not None:
+            self._bg_live.append((progress.wl, progress.metric))
+            self._bg_draw_live()
+
+    def _bg_draw_live(self) -> None:
+        self.bg_fig.clear()
+        self.bg_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Scatter above dark (mV)")
+        if self._bg_live:
+            wl = [p[0] for p in self._bg_live]
+            mv = [p[1] * 1000 for p in self._bg_live]
+            ax.scatter(wl, mv, s=12, color="#47b8e0")
+        self.bg_canvas.draw_idle()
+
+    def _bg_finished(self, payload: dict[str, Any]) -> None:
+        self.background_stop_event = None
+        self._bg_set_running(False)
+        if payload.get("status") == "aborted":
+            self.bg_status.setText(
+                f"Sweep stopped · partial captures in {self._bg_capture_dir}"
+            )
+            return
+        result = payload["result"]
+        self.background_result = result
+        self.bg_save_button.setEnabled(True)
+        self._bg_show_result(result)
+        n_out = sum(
+            int(np.size(c.inlier_mask) - np.count_nonzero(c.inlier_mask))
+            for c in result.channels if c.inlier_mask is not None
+        )
+        self.bg_status.setText(
+            f"Done · dark {result.dark_mean_v*1000:.4f} mV "
+            f"(±{result.dark_std_v*1000:.4f}) · {len(result.channels)} channels · "
+            f"{n_out} big-jump point(s) removed · raw NPZ: {result.raw_npz_path or '(none)'}"
+        )
+
+    def _bg_error(self, _error: str) -> None:
+        self.background_stop_event = None
+        self._bg_set_running(False)
+        self.bg_status.setText("Background sweep failed (see Status log)")
+
+    def _bg_show_result(self, result: BackgroundResult) -> None:
+        """Refresh both plots from a finished/loaded result."""
+        self._bg_draw_fits(result)
+        self._bg_draw_raw(result)
+
+    def _bg_draw_fits(self, result: BackgroundResult) -> None:
+        """Left plot: one linear-fit line per channel vs normalised intensity."""
+        self.bg_fits_fig.clear()
+        self.bg_fits_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fits_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Normalised channel intensity")
+        ax.set_ylabel("Scope mean (mV)")
+        xs = np.array([0.0, 1.0])
+        for ch in result.channels:
+            ys = (ch.slope_v * xs + ch.intercept_v) * 1000.0
+            ax.plot(xs, ys, linewidth=0.7)
+        ax.axhline(result.dark_mean_v * 1000, color="#e0a447", ls="--",
+                   linewidth=1.2, label=f"dark {result.dark_mean_v*1000:.3f} mV")
+        ax.legend(loc="upper left", fontsize=7)
+        self.bg_fits_canvas.draw_idle()
+
+    def _bg_draw_raw(self, result: BackgroundResult) -> None:
+        """Right plot: raw scatter (λ vs scatter above dark); big jumps in red."""
+        self.bg_fig.clear()
+        self.bg_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Scatter above dark (mV)")
+        kept_wl, kept_y, out_wl, out_y = [], [], [], []
+        for ch in result.channels:
+            above = (ch.means_v - result.dark_mean_v) * 1000.0
+            mask = ch.inlier_mask
+            for k in range(ch.means_v.size):
+                keep = True if mask is None else bool(mask[k])
+                (kept_wl if keep else out_wl).append(ch.nominal_wl_nm)
+                (kept_y if keep else out_y).append(above[k])
+        ax.scatter(kept_wl, kept_y, s=12, color="#47b8e0", label="kept")
+        if out_wl:
+            ax.scatter(out_wl, out_y, s=28, color="#e05a5a", marker="x",
+                       label="big jump (removed)")
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        ax.legend(loc="upper right", fontsize=7)
+        self.bg_canvas.draw_idle()
+
+    def _bg_load(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Background Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_background_result(path)
+        except Exception as exc:
+            self.bg_status.setText(f"Load failed: {exc}")
+            return
+        self.background_result = result
+        self.bg_save_button.setEnabled(True)
+        self._bg_show_result(result)
+        self.bg_status.setText(
+            f"Loaded {Path(path).name} · dark {result.dark_mean_v*1000:.4f} mV · "
+            f"{len(result.channels)} channels (re-fit with big-jump removal)"
+        )
+
+    def _bg_save(self) -> None:
+        if self.background_result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Background Result", "bg_scatter.npz",
+            "NumPy (*.npz);;JSON (*.json);;CSV (*.csv)"
+        )
+        if not path:
+            return
+        base = Path(path).with_suffix("")
+        npz = save_background_npz(self.background_result, base.with_suffix(".npz"))
+        js = save_background_json(self.background_result, base.with_suffix(".json"))
+        csv_path = write_background_csv(self.background_result, base.with_suffix(".csv"))
+        self.bg_status.setText(f"Saved {npz}  +  {Path(js).name}  +  {Path(csv_path).name}")
+
+    # ===================== TPA efficiency tab ========================
+    def _build_tpa_tab(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Channel TPA Efficiency Calibration")
+        subtitle = QtWidgets.QLabel(
+            "Automated per-channel-pair sweep. For each pair the commanded "
+            "product x·w is swept 0→1 (driving x=w=√u), the 780 scatter + dark "
+            "background is subtracted using the Step 6 result, and the remaining "
+            "420 TPA signal is fit to a_i·(x·w)². Run Step 6 (BG Scatter) first "
+            "or load a saved background NPZ below."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep settings ---
+        cfg = self._panel("Sweep & Scope Settings")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.tpa_channel = QtWidgets.QComboBox()
+        self.tpa_channel.addItems(["1", "2", "3", "4"])
+        self.tpa_duration = QtWidgets.QDoubleSpinBox()
+        self.tpa_duration.setRange(0.001, 10.0); self.tpa_duration.setDecimals(3)
+        self.tpa_duration.setValue(1.0); self.tpa_duration.setSuffix(" s")
+        self.tpa_duration.setToolTip("Scope MEAN averaging window per reading")
+        self.tpa_hold = QtWidgets.QDoubleSpinBox()
+        self.tpa_hold.setRange(0.0, 10000.0); self.tpa_hold.setValue(150.0)
+        self.tpa_hold.setSuffix(" ms")
+        self.tpa_hold.setToolTip("Settle time after each SLM pattern change")
+        self.tpa_levels = self._spin(2, 21, 5)
+        self.tpa_levels.setToolTip("Number of product levels swept 0→1 per pair (incl. 0)")
+        self.tpa_repeats = self._spin(1, 20, 1)
+        self.tpa_repeats.setToolTip("Repeated scope readings averaged per product point")
+        self.tpa_stride = self._spin(1, 64, 1)
+        self.tpa_stride.setToolTip("Measure only every Nth pair (1 = all)")
+        self.tpa_decimation = QtWidgets.QComboBox()
+        self.tpa_decimation.addItems(["HRESolution", "SAMPle"])
+        pairs = [
+            ("Channel", self.tpa_channel), ("Average for", self.tpa_duration),
+            ("Hold", self.tpa_hold), ("Product levels", self.tpa_levels),
+            ("Repeats", self.tpa_repeats), ("Stride", self.tpa_stride),
+            ("Decimation", self.tpa_decimation),
+        ]
+        for i, (label, widget) in enumerate(pairs):
+            r, c = i // 2, (i % 2) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        page.layout().addWidget(cfg)
+
+        self.tpa_bg_label = QtWidgets.QLabel(
+            "Background: (run Step 6 or load a background NPZ)"
+        )
+        self.tpa_bg_label.setObjectName("PageSubtitle")
+        self.tpa_bg_label.setWordWrap(True)
+        page.layout().addWidget(self.tpa_bg_label)
+
+        # --- results: quadratic-fit plot (left) + raw TPA signal plot (right) ---
+        self.tpa_fits_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.tpa_fits_canvas = FigureCanvas(self.tpa_fits_fig)
+        self.tpa_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.tpa_canvas = FigureCanvas(self.tpa_fig)
+
+        plot_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        plot_split.addWidget(self._panel_with_widget("Per-pair fits", self.tpa_fits_canvas))
+        plot_split.addWidget(self._panel_with_widget("Raw TPA signal", self.tpa_canvas))
+        plot_split.setSizes([560, 520])
+        page.layout().addWidget(plot_split, 1)
+
+        # --- controls ---
+        self.tpa_progress_bar = QtWidgets.QProgressBar()
+        self.tpa_progress_bar.setValue(0)
+        self.tpa_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_run_button = QtWidgets.QPushButton("Run Sweep")
+        self.tpa_run_button.clicked.connect(self._tpa_run)
+        self.tpa_stop_button = QtWidgets.QPushButton("Stop")
+        self.tpa_stop_button.setProperty("variant", "danger")
+        self.tpa_stop_button.setEnabled(False)
+        self.tpa_stop_button.clicked.connect(self._tpa_stop)
+        self.tpa_loadbg_button = QtWidgets.QPushButton("Load BG…")
+        self.tpa_loadbg_button.setProperty("variant", "ghost")
+        self.tpa_loadbg_button.setToolTip("Load a saved Step 6 background NPZ to subtract")
+        self.tpa_loadbg_button.clicked.connect(self._tpa_load_bg)
+        self.tpa_save_button = QtWidgets.QPushButton("Save…")
+        self.tpa_save_button.setProperty("variant", "ghost")
+        self.tpa_save_button.setEnabled(False)
+        self.tpa_save_button.clicked.connect(self._tpa_save)
+        self.tpa_load_button = QtWidgets.QPushButton("Load…")
+        self.tpa_load_button.setProperty("variant", "ghost")
+        self.tpa_load_button.setToolTip(
+            "Load a saved TPA NPZ; big jumps are re-eliminated and each pair re-fit."
+        )
+        self.tpa_load_button.clicked.connect(self._tpa_load)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.tpa_status, 1)
+        ctrl.addWidget(self.tpa_loadbg_button)
+        ctrl.addWidget(self.tpa_load_button)
+        ctrl.addWidget(self.tpa_save_button)
+        ctrl.addWidget(self.tpa_run_button)
+        ctrl.addWidget(self.tpa_stop_button)
+        page.layout().addWidget(self.tpa_progress_bar)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _tpa_monitor_settings(self) -> MonitorSettings:
+        return MonitorSettings(
+            channel=int(self.tpa_channel.currentText()),
+            trigger_mode="AUTO",
+            hold=self.tpa_hold.value() / 1000.0,     # ms -> s
+            duration=self.tpa_duration.value(),
+            decimation=self.tpa_decimation.currentText(),
+        )
+
+    def _tpa_set_running(self, running: bool) -> None:
+        self.tpa_run_button.setEnabled(not running)
+        self.tpa_stop_button.setEnabled(running)
+        self.tpa_load_button.setEnabled(not running)
+        self.tpa_loadbg_button.setEnabled(not running)
+        self.tpa_save_button.setEnabled(not running and self.tpa_result is not None)
+
+    def _tpa_run(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self.tpa_status.setText(
+                "No channel grid — open the TPA Encoding page to build one."
+            )
+            return
+        if self.background_result is None:
+            self.tpa_status.setText(
+                "No background — run Step 6 (BG Scatter) or Load BG… first."
+            )
+            return
+        scope = self.scope_controller
+        if scope is None or not scope.is_connected:
+            self.tpa_status.setText("Connect the scope on the Scope page first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.tpa_status.setText("Open the SLM on the SLM Control page first.")
+            return
+
+        settings = self._tpa_monitor_settings()
+        n_levels = self.tpa_levels.value()
+        products = np.linspace(0.0, 1.0, n_levels)
+        repeats = self.tpa_repeats.value()
+        stride = self.tpa_stride.value()
+        background = self.background_result
+        capture_dir = tempfile.mkdtemp(prefix="tpa_eff_")
+        self._tpa_capture_dir = capture_dir
+
+        n_pairs = len(range(0, layout.n_channels, max(1, stride)))
+        self.tpa_bg_label.setText(
+            f"Grid: {layout.n_channels} pairs, centre {layout.center_wl:.2f} nm "
+            f"· background dark {background.dark_mean_v*1000:.3f} mV, "
+            f"{len(background.channels)} scatter channels  ·  {n_pairs} pairs × "
+            f"{n_levels} products"
+        )
+        self._tpa_live = []
+        self.tpa_progress_bar.setMaximum(max(n_pairs * n_levels, 1))
+        self.tpa_progress_bar.setValue(0)
+        self.tpa_status.setText("Starting…")
+        self._tpa_set_running(True)
+
+        stop_event = threading.Event()
+        self.tpa_stop_event = stop_event
+
+        def report(progress: TPAProgress) -> None:
+            self.tpa_progress.emit(progress)
+
+        def work() -> dict[str, Any]:
+            try:
+                result = measure_tpa_efficiency(
+                    scope, controller, layout, settings, background,
+                    products=products, repeats=repeats, stride=stride,
+                    capture_dir=capture_dir,
+                    stop_event=stop_event, progress_callback=report,
+                )
+            except TPAAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "result": result}
+
+        self._run_slm_task("TPA efficiency sweep", work,
+                           self._tpa_finished, self._tpa_error)
+
+    def _tpa_stop(self) -> None:
+        if self.tpa_stop_event is not None:
+            self.tpa_stop_event.set()
+            self.tpa_status.setText("Stopping…")
+
+    def _on_tpa_progress(self, progress: TPAProgress) -> None:
+        self.tpa_progress_bar.setMaximum(max(progress.total, 1))
+        self.tpa_progress_bar.setValue(min(progress.step, progress.total))
+        self.tpa_status.setText(progress.message)
+        if progress.wl is not None and progress.metric is not None:
+            self._tpa_live.append((progress.wl, progress.metric))
+            self._tpa_draw_live()
+
+    def _tpa_draw_live(self) -> None:
+        self.tpa_fig.clear()
+        self.tpa_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("TPA signal above background (mV)")
+        if self._tpa_live:
+            wl = [p[0] for p in self._tpa_live]
+            mv = [p[1] * 1000 for p in self._tpa_live]
+            ax.scatter(wl, mv, s=12, color="#8fd14f")
+        self.tpa_canvas.draw_idle()
+
+    def _tpa_finished(self, payload: dict[str, Any]) -> None:
+        self.tpa_stop_event = None
+        self._tpa_set_running(False)
+        if payload.get("status") == "aborted":
+            self.tpa_status.setText(
+                f"Sweep stopped · partial captures in {self._tpa_capture_dir}"
+            )
+            return
+        result = payload["result"]
+        self.tpa_result = result
+        self.tpa_save_button.setEnabled(True)
+        self._tpa_show_result(result)
+        n_out = sum(
+            int(np.size(c.inlier_mask) - np.count_nonzero(c.inlier_mask))
+            for c in result.channels if c.inlier_mask is not None
+        )
+        self.tpa_status.setText(
+            f"Done · {len(result.channels)} pairs · {n_out} big-jump point(s) "
+            f"removed · raw NPZ: {result.raw_npz_path or '(none)'}"
+        )
+
+    def _tpa_error(self, _error: str) -> None:
+        self.tpa_stop_event = None
+        self._tpa_set_running(False)
+        self.tpa_status.setText("TPA sweep failed (see Status log)")
+
+    def _tpa_show_result(self, result: TPAResult) -> None:
+        """Refresh both plots from a finished/loaded result."""
+        self._tpa_draw_fits(result)
+        self._tpa_draw_raw(result)
+
+    def _tpa_draw_fits(self, result: TPAResult) -> None:
+        """Left plot: one quadratic-fit curve per pair vs commanded product x·w."""
+        self.tpa_fits_fig.clear()
+        self.tpa_fits_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fits_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Commanded product x·w")
+        ax.set_ylabel("TPA signal (mV)")
+        us = np.linspace(0.0, 1.0, 50)
+        for ch in result.channels:
+            ys = ch.coeff_a * us * us * 1000.0
+            ax.plot(us, ys, linewidth=0.7)
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        self.tpa_fits_canvas.draw_idle()
+
+    def _tpa_draw_raw(self, result: TPAResult) -> None:
+        """Right plot: raw background-removed TPA signal (λ vs signal); jumps red."""
+        self.tpa_fig.clear()
+        self.tpa_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("TPA signal above background (mV)")
+        kept_wl, kept_y, out_wl, out_y = [], [], [], []
+        for ch in result.channels:
+            sig = ch.signal_v * 1000.0
+            mask = ch.inlier_mask
+            for k in range(ch.signal_v.size):
+                keep = True if mask is None else bool(mask[k])
+                (kept_wl if keep else out_wl).append(ch.nominal_wl_nm)
+                (kept_y if keep else out_y).append(sig[k])
+        ax.scatter(kept_wl, kept_y, s=12, color="#8fd14f", label="kept")
+        if out_wl:
+            ax.scatter(out_wl, out_y, s=28, color="#e05a5a", marker="x",
+                       label="big jump (removed)")
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        ax.legend(loc="upper right", fontsize=7)
+        self.tpa_canvas.draw_idle()
+
+    def _tpa_load_bg(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Background Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_background_result(path)
+        except Exception as exc:
+            self.tpa_status.setText(f"Background load failed: {exc}")
+            return
+        self.background_result = result
+        self.tpa_bg_label.setText(
+            f"Background: {Path(path).name} · dark {result.dark_mean_v*1000:.4f} mV · "
+            f"{len(result.channels)} scatter channels"
+        )
+        self.tpa_status.setText("Background loaded — ready to run the TPA sweep.")
+
+    def _tpa_load(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load TPA Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_tpa_result(path)
+        except Exception as exc:
+            self.tpa_status.setText(f"Load failed: {exc}")
+            return
+        self.tpa_result = result
+        self.tpa_save_button.setEnabled(True)
+        self._tpa_show_result(result)
+        self.tpa_status.setText(
+            f"Loaded {Path(path).name} · {len(result.channels)} pairs "
+            f"(re-fit with big-jump removal)"
+        )
+
+    def _tpa_save(self) -> None:
+        if self.tpa_result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save TPA Result", "tpa_efficiency.npz",
+            "NumPy (*.npz);;JSON (*.json);;CSV (*.csv)"
+        )
+        if not path:
+            return
+        base = Path(path).with_suffix("")
+        npz = save_tpa_npz(self.tpa_result, base.with_suffix(".npz"))
+        js = save_tpa_json(self.tpa_result, base.with_suffix(".json"))
+        csv_path = write_tpa_csv(self.tpa_result, base.with_suffix(".csv"))
+        self.tpa_status.setText(f"Saved {npz}  +  {Path(js).name}  +  {Path(csv_path).name}")
 
     # ===================== Scope (RTO6) page =========================
     def _connect_scope(self) -> None:
