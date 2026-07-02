@@ -48,6 +48,8 @@ class FakeDriver:
     def set_bandwidth_limit(self, ch, v): self.calls.append(f"bw={ch},{v}")
     def set_digital_filter(self, ch, v): self.calls.append(f"digf={ch},{v}")
     def set_post_trigger_window(self): self.calls.append("posttrig")
+    def set_acquisition_count(self, count=1): self.calls.append(f"acount={count}")
+    def set_trigger_mode(self, mode): self.calls.append(f"trigmode={mode}")
 
     def set_trigger(self, *, source="CHANnel1", level=None, slope="POSitive", mode="NORMal"):
         self.calls.append(f"trig={source},lvl={level},slope={slope},mode={mode}")
@@ -173,8 +175,23 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("bw=1,B20", calls)
         self.assertIn("digf=1,10000.0", calls)
         self.assertIn("posttrig", calls)
+        self.assertIn("acount=1", calls)             # single acquisition per SINGle
         self.assertIn("trange=1.1", calls)          # hold + duration
         self.assertIn("meas=1,g=1,gate=0.1,1.1", calls)  # gate = [hold, hold+dur]
+
+    def test_configure_monitor_auto_mode_no_gate(self):
+        driver = FakeDriver()
+        scope = ScopeController(driver=driver)
+        scope.configure_monitor(MonitorSettings(
+            channel=1, trigger_mode="AUTO", hold=0.1, duration=1.0,
+        ))
+        calls = driver.calls
+        # free-run read: AUTO mode only, no armed edge trigger
+        self.assertIn("trigmode=AUTO", calls)
+        self.assertNotIn("trig=CHANnel1,lvl=1.5,slope=POSitive,mode=AUTO", calls)
+        self.assertIn("acount=1", calls)
+        self.assertIn("trange=1.0", calls)               # duration only (no hold)
+        self.assertIn("meas=1,g=1,gate=None,None", calls)  # whole-record mean
 
     def test_monitor_cycle_returns_scope_mean(self):
         driver = FakeDriver()

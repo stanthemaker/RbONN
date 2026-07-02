@@ -54,7 +54,7 @@ class MonitorSettings:
     """
 
     channel: int = 1
-    trigger_mode: str = "NORMal"           # NORMal (hardware edge) | AUTO (software/immediate)
+    trigger_mode: str = "NORMal"           # NORMal (hardware edge) | FREerun (software/immediate)
     trigger_source: str = "CHANnel1"       # CHANnel1..4 or EXTernanalog (NORMal only)
     trigger_level: float | None = 1.5      # volts; SLM pulse is 0->3 V (NORMal only)
     trigger_slope: str = "POSitive"        # rising edge
@@ -318,18 +318,29 @@ class ScopeController:
             driver.set_bandwidth_limit(ch, settings.bandwidth_limit)
         if settings.digital_filter_cutoff is not None:
             driver.set_digital_filter(ch, settings.digital_filter_cutoff)
-        driver.set_trigger(
-            source=settings.trigger_source,
-            level=settings.trigger_level,
-            slope=settings.trigger_slope,
-            mode="NORMal",
-        )
-        driver.set_time_range(settings.total_window)
+        driver.set_acquisition_count(1)   # exactly one acquisition per SINGle
         driver.set_record_length(settings.record_length)
         driver.set_post_trigger_window()
-        driver.setup_mean_measurement(
-            ch, gate_start=settings.hold, gate_stop=settings.total_window
-        )
+        if settings.trigger_mode.upper().startswith("NORM"):
+            # hardware edge: arm the trigger, capture hold+duration, gate the MEAN
+            # to the settled part
+            driver.set_trigger(
+                source=settings.trigger_source,
+                level=settings.trigger_level,
+                slope=settings.trigger_slope,
+                mode="NORMal",
+            )
+            driver.set_time_range(settings.total_window)
+            driver.setup_mean_measurement(
+                ch, gate_start=settings.hold, gate_stop=settings.total_window
+            )
+        else:
+            # immediate (software) read: AUTO free-run with NO armed edge, so the
+            # SINGle self-triggers and completes. Caller sleeps the hold before
+            # arming, so the whole `duration` record is the settled window.
+            driver.set_trigger_mode("AUTO")
+            driver.set_time_range(settings.duration)
+            driver.setup_mean_measurement(ch)
         self._monitor_settings = settings
 
     def monitor_cycle(

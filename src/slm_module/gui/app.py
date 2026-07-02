@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from typing import Any, Callable
 import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
+import matplotlib
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from osa_module.controller import MeasurementSettings, OSAController
@@ -71,6 +74,27 @@ from ..optimization import (
     amplitudes_to_intensity_commands,
     load_optimization_result,
 )
+from ..scope_background import (
+    BackgroundAborted,
+    BackgroundProgress,
+    BackgroundResult,
+    load_background_result,
+    measure_scatter_background,
+    save_background_json,
+    save_background_npz,
+    write_background_csv,
+)
+from ..scope_tpa import (
+    TPAAborted,
+    TPAProgress,
+    TPAResult,
+    load_tpa_result,
+    measure_tpa_efficiency,
+    save_tpa_json,
+    save_tpa_npz,
+    write_tpa_csv,
+)
+from ..encoding import ChannelLayout, build_channel_layout, encode_to_pattern
 from ..keepalive import SLMKeepAlive
 from .style import DARK_STYLESHEET
 
@@ -91,6 +115,29 @@ def _pattern_to_qimage(data: np.ndarray) -> QtGui.QImage:
     height, width = preview.shape
     image = QtGui.QImage(
         preview.data, width, height, width, QtGui.QImage.Format_Grayscale8
+    )
+    return image.copy()
+
+
+_CMAP_LUT = None
+
+
+def _cmap_lut() -> np.ndarray:
+    """Lazy 0..MAX_LEVEL -> RGB lookup table for the viridis colormap."""
+    global _CMAP_LUT
+    if _CMAP_LUT is None:
+        colours = matplotlib.colormaps["viridis"](np.linspace(0.0, 1.0, MAX_LEVEL + 1))
+        _CMAP_LUT = (colours[:, :3] * 255.0).astype(np.uint8)
+    return _CMAP_LUT
+
+
+def _pattern_to_qimage_color(data: np.ndarray) -> QtGui.QImage:
+    """Render a 0..1023 level grid as a colour (viridis) QImage."""
+    idx = np.clip(np.asarray(data), 0, MAX_LEVEL).astype(np.int32)
+    rgb = np.ascontiguousarray(_cmap_lut()[idx])          # H x W x 3, uint8
+    height, width = idx.shape
+    image = QtGui.QImage(
+        rgb.data, width, height, 3 * width, QtGui.QImage.Format_RGB888
     )
     return image.copy()
 
@@ -341,11 +388,17 @@ class SLMMonitorView(QtWidgets.QWidget):
         get_pattern: Callable[[], np.ndarray | None],
         describe: Callable[[], str | None],
         parent: QtWidgets.QWidget | None = None,
+        *,
+        image_min_height: int = 300,
+        profile_height: int = 200,
+        show_profile: bool = True,
     ):
         super().__init__(parent)
         self._get_pattern = get_pattern
         self._describe = describe
         self._last_shape: tuple[int, int] | None = None
+        self._show_profile = show_profile
+        self._preview = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -380,17 +433,22 @@ class SLMMonitorView(QtWidgets.QWidget):
         layout.addWidget(self.info_label)
 
         self.image_label = QtWidgets.QLabel()
-        self.image_label.setMinimumHeight(300)
+        self.image_label.setMinimumHeight(image_min_height)
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.image_label.setObjectName("Preview")
         layout.addWidget(self.image_label, 1)
 
-        self.figure = Figure(figsize=(6, 2.2), tight_layout=True)
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMaximumHeight(200)
-        self.axes = self.figure.add_subplot(111)
-        self._style_axes()
-        layout.addWidget(self.canvas)
+        if show_profile:
+            self.figure = Figure(figsize=(6, 2.2), tight_layout=True)
+            self.canvas = FigureCanvas(self.figure)
+            self.canvas.setMaximumHeight(profile_height)
+            self.axes = self.figure.add_subplot(111)
+            self._style_axes()
+            layout.addWidget(self.canvas)
+        else:
+            self.figure = None
+            self.canvas = None
+            self.axes = None
 
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -421,6 +479,11 @@ class SLMMonitorView(QtWidgets.QWidget):
         if self.live_check.isChecked():
             self._timer.start(int(value * 1000))
 
+    def set_preview(self, on: bool) -> None:
+        """Dim the view to signal an un-sent preview (vs. what's on the SLM)."""
+        self._preview = bool(on)
+        self.refresh()
+
     def refresh(self) -> None:
         pattern = None
         try:
@@ -443,20 +506,33 @@ class SLMMonitorView(QtWidgets.QWidget):
         height, width = pattern.shape
         unique = int(np.unique(pattern).size)
         prefix = f"{source}  ·  " if source else ""
+        preview_tag = "  ·  PREVIEW (not sent)" if self._preview else ""
         self.info_label.setText(
             f"{prefix}{width} x {height} px  ·  level "
-            f"{int(pattern.min())}–{int(pattern.max())}  ·  {unique} distinct"
+            f"{int(pattern.min())}–{int(pattern.max())}  ·  {unique} distinct{preview_tag}"
         )
 
-        image = _pattern_to_qimage(pattern)
+        image = _pattern_to_qimage_color(pattern)
         pixmap = QtGui.QPixmap.fromImage(image).scaled(
             self.image_label.size().expandedTo(QtCore.QSize(760, 280)),
             QtCore.Qt.KeepAspectRatio,
             QtCore.Qt.SmoothTransformation,
         )
+        if self._preview:
+            pixmap = self._dim_pixmap(pixmap)
         self.image_label.setPixmap(pixmap)
-        self._draw_profile(pattern)
+        if self._show_profile:
+            self._draw_profile(pattern)
         self._last_shape = (width, height)
+
+    @staticmethod
+    def _dim_pixmap(pixmap: QtGui.QPixmap) -> QtGui.QPixmap:
+        """Overlay a translucent dark veil to mark an un-sent preview."""
+        out = QtGui.QPixmap(pixmap)
+        painter = QtGui.QPainter(out)
+        painter.fillRect(out.rect(), QtGui.QColor(15, 20, 25, 150))
+        painter.end()
+        return out
 
     def _draw_profile(self, pattern: np.ndarray) -> None:
         profile = pattern.astype(np.float32).mean(axis=0)
@@ -486,7 +562,7 @@ class SLMMonitorView(QtWidgets.QWidget):
         )
         if not path:
             return
-        _pattern_to_qimage(pattern).save(path, "PNG")
+        _pattern_to_qimage_color(pattern).save(path, "PNG")
 
     def stop(self) -> None:
         self._timer.stop()
@@ -503,6 +579,8 @@ class MainWindow(QtWidgets.QMainWindow):
     keepalive_status = QtCore.pyqtSignal(bool, str)
     calibration_progress = QtCore.pyqtSignal(object)
     analysis_progress = QtCore.pyqtSignal(object)
+    background_progress = QtCore.pyqtSignal(object)
+    tpa_progress = QtCore.pyqtSignal(object)
     edge_gain_progress = QtCore.pyqtSignal(int, int, str)
     edge_optimization_progress = QtCore.pyqtSignal(object)
     monitor_sample = QtCore.pyqtSignal(object)
@@ -544,6 +622,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_result: ModulationErrorResult | None = None
         self.analysis_stop_event: threading.Event | None = None
         self._ana_capture_dir: str | None = None
+        self.background_result: BackgroundResult | None = None
+        self.background_stop_event: threading.Event | None = None
+        self._bg_capture_dir: str | None = None
+        self._bg_live: list[tuple[float, float]] = []
+        self.tpa_result: TPAResult | None = None
+        self.tpa_stop_event: threading.Event | None = None
+        self._tpa_capture_dir: str | None = None
+        self._tpa_live: list[tuple[float, float]] = []
         self.scope_controller: ScopeController | None = None
         self.scope_stop_event: threading.Event | None = None
         self.monitor_stop_event: threading.Event | None = None
@@ -560,6 +646,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.keepalive_status.connect(self._on_keepalive_status)
         self.calibration_progress.connect(self._on_calibration_progress)
         self.analysis_progress.connect(self._on_analysis_progress)
+        self.background_progress.connect(self._on_background_progress)
+        self.tpa_progress.connect(self._on_tpa_progress)
         self.edge_gain_progress.connect(self._edge_gain_progress)
         self.edge_optimization_progress.connect(self._edge_optimization_progress)
         self.monitor_sample.connect(self._on_monitor_sample)
@@ -594,6 +682,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("\N{CHART WITH UPWARDS TREND}  Calibration", "Intensity, mod error, scope holding"),
             ("\N{LEFT RIGHT ARROW}  Center Scan", "Sweep a window across x"),
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
+            ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding + scope readout"),
             ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding"),
             ("\N{DOWNWARDS ARROW WITH TIP RIGHTWARDS}  Edge Ratio",
              "Per-column edge-taper ratio + OSA optimisation hook"),
@@ -801,6 +890,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(self._build_step3_page(), "Step 3 · Intensity")
         tabs.addTab(self._build_analysis_page(), "Step 4 · Mod Error")
         tabs.addTab(self._build_scope_holding_tab(), "Step 5 · Holding")
+        tabs.addTab(self._build_background_tab(), "Step 6 · BG Scatter")
+        tabs.addTab(self._build_tpa_tab(), "Step 7 · TPA Efficiency")
         lay.addWidget(tabs)
 
         # every Run button, toggled together by _set_calibration_running
@@ -1170,9 +1261,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_scope_holding_tab(self) -> QtWidgets.QWidget:
         page = self._page_shell("Scope Holding Time")
         subtitle = QtWidgets.QLabel(
-            "Measure the SLM settling (hold) time: switch a full-screen grayscale "
-            "A→B, capture the CH transient, and average many repeats so the "
-            "deterministic settling emerges above the signal fluctuation."
+            "Measure the SLM settling (hold) time on a single PC-scripted timeline: "
+            "record → hold A (pre-switch) → switch A→B → hold B (post-switch) → stop. "
+            "Each repeat is aligned on the A→B edge detected in its own trace, so the "
+            "settle time is referenced to the real optical transition and is immune "
+            "to the scope-vs-PC clock offset (reported separately)."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
@@ -1193,15 +1286,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hold_gray_b = self._spin(0, 1023, 420)
         self.hold_averages = self._spin(1, 1000, 60)
         self.hold_window = self._double_spin(0.05, 5.0, 0.8, " s", 2)
+        self.hold_window.setToolTip("Time B is held/captured after the A→B switch")
         self.hold_settle = self._double_spin(0.1, 5.0, 0.6, " s", 2)
-        self.hold_baseline = self._double_spin(0.02, 2.0, 0.15, " s", 2)
+        self.hold_settle.setToolTip("Settle at A before recording starts (not measured)")
+        self.hold_baseline = self._double_spin(0.02, 2.0, 0.30, " s", 2)
+        self.hold_baseline.setToolTip("Time A is held after recording starts, before the switch")
         grid.addWidget(QtWidgets.QLabel("Channel"), 0, 0); grid.addWidget(self.hold_channel, 0, 1)
         grid.addWidget(QtWidgets.QLabel("Gray A (start)"), 0, 2); grid.addWidget(self.hold_gray_a, 0, 3)
         grid.addWidget(QtWidgets.QLabel("Gray B (switch to)"), 0, 4); grid.addWidget(self.hold_gray_b, 0, 5)
         grid.addWidget(QtWidgets.QLabel("Averages"), 1, 0); grid.addWidget(self.hold_averages, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("Capture window"), 1, 2); grid.addWidget(self.hold_window, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Post-switch hold (B)"), 1, 2); grid.addWidget(self.hold_window, 1, 3)
         grid.addWidget(QtWidgets.QLabel("Pre-settle"), 1, 4); grid.addWidget(self.hold_settle, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("Baseline"), 2, 0); grid.addWidget(self.hold_baseline, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Pre-switch hold (A)"), 2, 0); grid.addWidget(self.hold_baseline, 2, 1)
         self.hold_status = QtWidgets.QLabel("\N{EN DASH}")
         self.hold_start_button = QtWidgets.QPushButton("Run")
         self.hold_start_button.clicked.connect(self._hold_start)
@@ -1230,10 +1326,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ch = int(self.hold_channel.currentText())
         ga, gb = self.hold_gray_a.value(), self.hold_gray_b.value()
         n = self.hold_averages.value()
-        window = self.hold_window.value()
-        settle = self.hold_settle.value()
-        baseline = self.hold_baseline.value()
-        rl = max(1000, int(window * 100_000))          # ~100 kSa/s
+        pre_hold = self.hold_baseline.value()      # A held after record start, before switch
+        post_hold = self.hold_window.value()       # captured after the switch
+        settle = self.hold_settle.value()          # pre-settle at A before recording
+        total = pre_hold + post_hold + 0.1         # scope record span (+ margin)
+        rl = max(1000, int(total * 100_000))       # ~100 kSa/s
+        align_pre = min(0.1, pre_hold * 0.5)       # kept before the edge in the aligned avg
         stop_event = threading.Event()
         self.hold_stop_event = stop_event
         self.hold_progress.emit(0, n)
@@ -1243,13 +1341,13 @@ class MainWindow(QtWidgets.QMainWindow):
             drv = scope.driver
             drv.configure_channel(ch, state=True, scale="0.02", offset="0", coupling="DCLimit")
             drv.set_decimation(ch, "HRESolution")
-            drv.set_time_range(str(window)); drv.set_record_length(rl)
+            drv.set_time_range(str(total)); drv.set_record_length(rl)
             drv.set_post_trigger_window(); drv.write("TRIGger1:MODE AUTO")
 
             # center the vertical range on the gray-A level
             controller.display_grayscale(ga, interval=0.0); time.sleep(settle)
             drv.single_acquisition()
-            dl = time.monotonic() + 4
+            dl = time.monotonic() + total + 4
             while time.monotonic() < dl and not drv.is_acquisition_complete():
                 time.sleep(0.02)
             y0 = drv.read_waveform(ch)
@@ -1258,43 +1356,116 @@ class MainWindow(QtWidgets.QMainWindow):
             drv.configure_channel(ch, state=True, scale=f"{scale:.4f}",
                                   offset=f"{mid:.4f}", coupling="DCLimit")
 
-            acc = None; t = None; cmds = []; first = None
+            raws: list[np.ndarray] = []; onsets: list[int] = []
+            switch_rels: list[float] = []; t_axis = None; dt = None
             for i in range(n):
                 if stop_event.is_set():
                     return {"status": "aborted"}
+                # ---- one PC-scripted timeline (a single clock drives the sequence) ----
                 controller.display_grayscale(ga, interval=0.0); time.sleep(settle)
-                drv.single_acquisition(); t0 = time.monotonic()
-                time.sleep(baseline)
-                controller.display_grayscale(gb, interval=0.0)     # A -> B transition
-                cmds.append(time.monotonic() - t0)
-                dl = time.monotonic() + 4
+                drv.single_acquisition(); t0 = time.monotonic()   # start recording
+                time.sleep(pre_hold)                              # hold A (pre-switch)
+                controller.display_grayscale(gb, interval=0.0)    # A -> B switch
+                switch_rels.append(time.monotonic() - t0)         # PC time of the switch
+                dl = time.monotonic() + total + 4
                 while time.monotonic() < dl and not drv.is_acquisition_complete():
                     if stop_event.is_set():
                         return {"status": "aborted"}
                     time.sleep(0.02)
                 xs, xe, npts, vps = drv.read_waveform_header(ch)
-                y = np.asarray(drv.read_waveform(ch))
-                if acc is None:
-                    acc = np.zeros_like(y); t = np.linspace(xs, xe, y.size); first = y.copy()
-                acc[: y.size] += y[: acc.size]
+                y = np.asarray(drv.read_waveform(ch), dtype=float)
+                if t_axis is None:
+                    t_axis = np.linspace(xs, xe, y.size)
+                    dt = (xe - xs) / max(y.size - 1, 1)
+                raws.append(y)
+                onsets.append(self._hold_edge_onset(y, dt))
                 self.hold_progress.emit(i + 1, n)
 
-            avg = acc / n
-            tcmd = float(np.mean(cmds))
-            base = avg[t < (tcmd - 0.01)]
-            initial = float(base.mean()) if base.size else float(avg[:100].mean())
-            final = float(avg[t > t[-1] - 0.1].mean())
-            step = final - initial
-            resid = float(base.std()) if base.size else 0.0
-            post = np.where(t > tcmd)[0]
-            band = 0.02 * abs(step)
-            outside = post[np.abs(avg[post] - final) > band] if post.size else np.array([])
-            tset = float(t[outside[-1]]) if outside.size else tcmd
-            return {"status": "ok", "t": t, "avg": avg, "first": first, "tcmd": tcmd,
-                    "initial": initial, "final": final, "step": step, "resid": resid,
-                    "settle": tset - tcmd, "n": n}
+            return self._hold_reduce(raws, onsets, switch_rels, t_axis, dt,
+                                     align_pre, post_hold, pre_hold, n)
 
         self._run_task("Scope holding", work, self._hold_finished, self._hold_error)
+
+    @staticmethod
+    def _hold_edge_onset(y: np.ndarray, dt: float) -> int:
+        """Index where the trace first leaves its initial baseline (A→B edge onset).
+
+        Referenced to the signal itself, so it is independent of the scope-vs-PC
+        clock offset. Returns -1 if no clear edge is found.
+        """
+        n5 = max(10, y.size // 20)
+        initial = float(np.median(y[:n5]))
+        final = float(np.median(y[-n5:]))
+        noise = float(np.std(y[:n5]))
+        step = final - initial
+        thr = max(0.1 * abs(step), 5.0 * noise, 1e-9)
+        guard = min(y.size - 1, int(0.03 / dt) if dt and dt > 0 else 0)
+        hit = np.where(np.abs(y[guard:] - initial) > thr)[0]
+        return int(hit[0] + guard) if hit.size else -1
+
+    @staticmethod
+    def _hold_reduce(raws, onsets, switch_rels, t_axis, dt, align_pre,
+                     post_hold, pre_hold, n_req) -> dict[str, Any]:
+        """Edge-align the per-repeat traces, average, and derive settle metrics.
+
+        Each repeat is cropped to a common [-align_pre, +post_hold] window around
+        its own detected edge, so averaging sharpens the transition instead of
+        smearing it with the trigger jitter. Time is returned with t=0 at the edge.
+        """
+        pre_n = max(1, int(align_pre / dt))
+        post_n = max(1, int(post_hold / dt))
+        subs: list[np.ndarray] = []; onset_times: list[float] = []
+        for y, on in zip(raws, onsets):
+            if on < 0 or on - pre_n < 0 or on + post_n > y.size:
+                continue
+            subs.append(y[on - pre_n: on + post_n])
+            onset_times.append(float(t_axis[on]))
+
+        used = len(subs)
+        if used:
+            avg = np.mean(np.vstack(subs), axis=0)
+            first = subs[0]
+            t_rel = (np.arange(avg.size) - pre_n) * dt
+            edge_scope = float(np.median(onset_times))
+        else:
+            # fallback: no detectable edge — average unaligned, reference to the mean
+            m = min(y.size for y in raws)
+            avg = np.mean(np.vstack([y[:m] for y in raws]), axis=0)
+            first = raws[0][:m]
+            on = MainWindow._hold_edge_onset(avg, dt)
+            ref = on if on >= 0 else 0
+            t_rel = (np.arange(avg.size) - ref) * dt
+            edge_scope = float(t_axis[on]) if on >= 0 else pre_hold
+
+        n5 = max(10, avg.size // 20)
+        pre_mask = t_rel < -0.01
+        initial = (float(np.median(avg[pre_mask])) if pre_mask.any()
+                   else float(np.median(avg[:n5])))
+        final = float(np.median(avg[t_rel > t_rel[-1] - 0.1]))
+        step = final - initial
+        resid = (float(np.std(avg[pre_mask])) if pre_mask.sum() > 1
+                 else float(np.std(avg[:n5])))
+        # settle-to-2% on a lightly smoothed trace so the metric is not limited by
+        # the averaged residual noise (2% of a small step can sit below the noise)
+        win = max(1, int(0.002 / dt))          # ~2 ms boxcar
+        if win > 1:
+            pad = win // 2
+            kern = np.ones(win) / win
+            sm = np.convolve(np.pad(avg, pad, mode="edge"), kern, mode="valid")[:avg.size]
+        else:
+            sm = avg
+        band = 0.02 * abs(step)
+        post_mask = t_rel >= 0.0
+        outside = np.where(post_mask & (np.abs(sm - final) > band))[0]
+        settle = float(t_rel[outside[-1]]) if outside.size else 0.0
+        # the clock offset the old command-referenced marker suffered from:
+        # scope-time of the real edge minus PC-time of the issued switch
+        pc_switch = float(np.median(switch_rels)) if switch_rels else pre_hold
+        offset = edge_scope - pc_switch
+        return {"status": "ok", "t": t_rel, "avg": avg, "first": first,
+                "initial": initial, "final": final, "step": step, "resid": resid,
+                "settle": settle, "cmd_rel": -offset, "offset": offset,
+                "n": used, "n_req": n_req}
 
     def _hold_stop(self) -> None:
         if self.hold_stop_event is not None:
@@ -1312,11 +1483,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._hold_draw(payload)
         sig = abs(payload["step"]) / max(payload["resid"], 1e-9)
-        self.hold_status.setText(f"Done · {payload['n']} averages")
+        self.hold_status.setText(
+            f"Done · {payload['n']}/{payload['n_req']} repeats edge-aligned"
+        )
         self._hold_result.setText(
-            f"Settle to 2%: {payload['settle']*1000:.0f} ms after command  ·  "
+            f"Settle to 2%: {payload['settle']*1000:.0f} ms after edge  ·  "
             f"step {payload['step']*1000:.2f} mV  ·  residual noise "
-            f"{payload['resid']*1000:.2f} mV  ·  step/noise {sig:.1f}"
+            f"{payload['resid']*1000:.2f} mV  ·  step/noise {sig:.1f}  ·  "
+            f"PC↔scope offset {payload['offset']*1000:+.0f} ms"
             + ("  \N{WARNING SIGN} step not significant (use higher-contrast patterns)"
                if sig < 3 else "")
         )
@@ -1331,18 +1505,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hold_fig.patch.set_facecolor("#101820")
         ax = self.hold_fig.add_subplot(111)
         self._style_dark_axes(ax)
-        ax.set_xlabel("time (ms)"); ax.set_ylabel("CH (mV)")
+        ax.set_xlabel("time after A→B edge (ms)"); ax.set_ylabel("CH (mV)")
         t = p["t"] * 1000.0
         if p.get("first") is not None:
             ax.plot(t, p["first"] * 1000.0, lw=0.5, color="#556", label="single raw")
         ax.plot(t, p["avg"] * 1000.0, lw=1.4, color="#47b8e0", label=f"avg N={p['n']}")
-        ax.axvline(p["tcmd"] * 1000.0, color="#f0a3a3", ls="--", lw=1.2, label="A→B command")
+        ax.axvline(0.0, color="#8fd14f", ls="-", lw=1.0, label="A→B edge (detected)")
+        ax.axvline(p["cmd_rel"] * 1000.0, color="#f0a3a3", ls="--", lw=1.2,
+                   label="PC switch cmd")
+        if p.get("settle"):
+            ax.axvline(p["settle"] * 1000.0, color="#e0a447", ls=":", lw=1.0,
+                       label="settled (2%)")
         ax.axhline(p["final"] * 1000.0, color="#8fd6a0", ls=":", lw=1.0)
         ax.legend(loc="upper right", fontsize=8)
         self.hold_canvas.draw_idle()
-
-    def _build_scan_page(self) -> QtWidgets.QWidget:
-        page = self._page_shell("Center Scan")
 
     def _build_scan_page(self) -> QtWidgets.QWidget:
         page = self._page_shell("Center Scan")
@@ -1593,6 +1769,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
         self.enc_val_table.verticalHeader().setVisible(False)
         self.enc_val_table.setAlternatingRowColors(True)
+        # keep at least ~3 data rows (plus header) visible even when the splitter
+        # is dragged small
+        self.enc_val_table.setMinimumHeight(170)
 
         val_buttons = QtWidgets.QHBoxLayout()
         enc_zeros = QtWidgets.QPushButton("All Zeros")
@@ -1648,28 +1827,49 @@ class MainWindow(QtWidgets.QMainWindow):
         ctrl_row.addWidget(self.enc_generate_button)
         ctrl_row.addWidget(self.enc_send_button)
 
-        # --- Colormap preview (matplotlib) ---
-        self.enc_figure = Figure(figsize=(10, 2.0), tight_layout=True)
-        self.enc_canvas = FigureCanvas(self.enc_figure)
-        self.enc_canvas.setMinimumHeight(150)
-        preview_panel = self._panel_with_widget("Pattern Preview", self.enc_canvas)
+        # --- live SLM pattern monitor (colour) replaces the static preview ---
+        # short-and-wide monitor: the pattern is already wide (1920x1200), so a
+        # low image band + a compact profile keeps most of the height for the
+        # channel-value table below
+        self.enc_monitor_view = SLMMonitorView(
+            get_pattern=lambda: self._encoding_pattern,
+            describe=lambda: "generated encoding pattern",
+            image_min_height=110,
+            show_profile=False,
+        )
+        monitor_panel = self._panel_with_widget("Pattern Monitor", self.enc_monitor_view)
 
-        # --- Feedback / hints log ---
+        left_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        left_split.addWidget(val_panel)
+        left_split.addWidget(monitor_panel)
+        left_split.setStretchFactor(0, 3)   # value table gets the bulk of the height
+        left_split.setStretchFactor(1, 1)
+        left_split.setSizes([460, 230])
+
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(left_split, 1)
+        left_layout.addLayout(ctrl_row)
+
+        # scope readout merged in at ~1/3 of the width
+        main_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        main_split.addWidget(left)
+        main_split.addWidget(self._build_scope_monitor_widget())
+        main_split.setStretchFactor(0, 2)
+        main_split.setStretchFactor(1, 1)
+        main_split.setSizes([840, 420])
+
+        # --- single Feedback log for both SLM and scope, spanning full width ---
         self.enc_log = QtWidgets.QPlainTextEdit()
         self.enc_log.setReadOnly(True)
         self.enc_log.setObjectName("LogBox")
         self.enc_log.setMaximumHeight(120)
         log_panel = self._panel_with_widget("Feedback", self.enc_log)
 
-        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        split.addWidget(val_panel)
-        split.addWidget(preview_panel)
-        split.addWidget(log_panel)
-        split.setSizes([300, 180, 110])
-
         page.layout().addWidget(cfg_panel)
-        page.layout().addWidget(split, 1)
-        page.layout().addLayout(ctrl_row)
+        page.layout().addWidget(main_split, 1)
+        page.layout().addWidget(log_panel)
 
         # auto-load the local calibration and build a default layout so the
         # value table is populated and ready for manual input immediately
@@ -1696,15 +1896,38 @@ class MainWindow(QtWidgets.QMainWindow):
         stamp = time.strftime("%H:%M:%S")
         self.enc_log.appendPlainText(f"[{stamp}] {message}")
 
+    def _mon_status(self, message: str) -> None:
+        """Scope-monitor feedback shares the encoder's merged Feedback log."""
+        self._enc_log(f"[scope] {message}")
+
+    # calibration results are named calib_step*.json (calib_step3.json,
+    # calib_step33.json, ...); the encoder needs a step-3 intensity result.
+    _CALIB_RE = re.compile(r"^calib_step.*\.json$", re.IGNORECASE)
+
     def _enc_local_calib_path(self) -> Path | None:
-        """Locate the project-local calibration result (calib_step3.json)."""
-        candidates = [
-            Path.cwd() / "calib_step3.json",
-            Path(__file__).resolve().parents[3] / "calib_step3.json",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+        """Locate the newest usable project-local calibration result.
+
+        Scans the working dir and project root for calib_step*.json files and
+        returns the most recently modified one that loads as a valid intensity
+        (step-3) result. Files without intensity_levels (step-1/step-2 outputs)
+        are skipped so the encoder never auto-loads an unusable calibration.
+        """
+        search_dirs = [Path.cwd(), Path(__file__).resolve().parents[3]]
+        matches: dict[Path, float] = {}
+        for directory in search_dirs:
+            try:
+                for entry in directory.iterdir():
+                    if entry.is_file() and self._CALIB_RE.match(entry.name):
+                        matches.setdefault(entry.resolve(), entry.stat().st_mtime)
+            except OSError:
+                continue
+        for path in sorted(matches, key=matches.get, reverse=True):
+            try:
+                calib = load_calibration_result(str(path))
+            except Exception:
+                continue
+            if calib.intensity_levels is not None:
+                return path
         return None
 
     def _enc_get_calib(self) -> CalibrationResult | None:
@@ -1936,59 +2159,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{int(pattern.min())}–{int(pattern.max())}). Open the SLM and click "
             "Send to SLM to display it."
         )
-        self._enc_draw_preview(pattern, layout)
-
-    def _enc_draw_preview(self, pattern: np.ndarray, layout: ChannelLayout) -> None:
-        self.enc_figure.clear()
-        ax = self.enc_figure.add_subplot(111)
-
-        # crop to active channel region + margin
-        x0 = max(0, min(ch.x_start for ch in layout.all_channels) - 30)
-        x1 = min(pattern.shape[1], max(ch.x_end for ch in layout.all_channels) + 30)
-        # show a thin horizontal slice so column structure is clear
-        mid = pattern.shape[0] // 2
-        crop = pattern[mid - 25 : mid + 25, x0:x1].astype(float)
-
-        im = ax.imshow(
-            crop,
-            aspect="auto",
-            cmap="viridis",
-            vmin=0,
-            vmax=1023,
-            extent=[x0, x1, 0, crop.shape[0]],
-            interpolation="nearest",
-        )
-
-        # centre dividing line
-        ax.axvline(layout.center_x, color="white", linewidth=1.0, linestyle="--", alpha=0.6)
-
-        # side labels
-        x_mid = (x0 + layout.center_x) / 2
-        w_mid = (layout.center_x + x1) / 2
-        ax.text(x_mid, crop.shape[0] * 0.85, "x channels (>778 nm)", color="white",
-                ha="center", fontsize=8, alpha=0.85)
-        ax.text(w_mid, crop.shape[0] * 0.85, "w channels (<778 nm)", color="white",
-                ha="center", fontsize=8, alpha=0.85)
-
-        # horizontal flip so the preview matches the OSA / physical orientation
-        # (wavelength increases left-to-right); data and labels stay correct
-        ax.invert_xaxis()
-
-        ax.set_xlabel("SLM x (px)", color="#d8dee9", fontsize=8)
-        ax.set_yticks([])
-        ax.tick_params(colors="#d8dee9", labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color("#41515c")
-
-        self.enc_figure.patch.set_facecolor("#101820")
-        ax.set_facecolor("#101820")
-
-        cbar = self.enc_figure.colorbar(im, ax=ax, orientation="vertical",
-                                        fraction=0.015, pad=0.01)
-        cbar.set_label("SLM level", color="#d8dee9", fontsize=8)
-        cbar.ax.tick_params(colors="#d8dee9", labelsize=7)
-
-        self.enc_canvas.draw_idle()
+        # dimmed preview: what's shown is generated but not yet on the SLM
+        self.enc_monitor_view.set_preview(True)
 
     def _enc_send(self) -> None:
         pattern = self._encoding_pattern
@@ -2016,8 +2188,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def done(_result: Any) -> None:
             self._enc_log("\N{CHECK MARK} Pattern received and displayed on the SLM.")
-            self.enc_send_button.setEnabled(True)
+            # pattern is now live on the SLM: clear the dim preview veil
+            self.enc_monitor_view.set_preview(False)
             _cleanup()
+            if self._enc_should_read_scope():
+                self._enc_read_scope_after_send()   # keeps Send disabled until read done
+            else:
+                self.enc_send_button.setEnabled(True)
 
         def failed(_error: str) -> None:
             self._enc_log("\N{CROSS MARK} Send failed (see the Status log on the Connections page).")
@@ -2029,6 +2206,46 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: controller.display_csv(tmp.name),
             done, failed,
         )
+
+    def _enc_should_read_scope(self) -> bool:
+        """Take a scope reading after a send only if it's safe/enabled."""
+        scope = self.scope_controller
+        return (
+            scope is not None and scope.is_connected
+            and self.mon_read_on_send.isChecked()
+            and self.monitor_stop_event is None   # not already running the trigger loop
+        )
+
+    def _enc_read_scope_after_send(self) -> None:
+        """Path C: after the pattern is displayed, wait the hold then read one
+        software-triggered averaged value and append it to the scope monitor."""
+        scope = self.scope_controller
+        # AUTO free-run with no armed edge: the SINGle self-triggers and completes
+        # right away (the earlier timeout was a stale ACQuire:COUNt, now forced to
+        # 1 in configure_monitor). This is the Path-C software read.
+        settings = self._monitor_settings(trigger_mode="AUTO")
+        self._mon_status("Reading scope after send…")
+
+        def work() -> MonitorSample | None:
+            scope.configure_monitor(settings)
+            time.sleep(settings.hold)             # settle after the SLM pattern change
+            return scope.monitor_cycle(
+                index=len(self._monitor_values),
+                timeout=max(30.0, settings.duration * 3.0 + 10.0),
+            )
+
+        def ok(sample: MonitorSample | None) -> None:
+            if sample is not None:
+                self._on_monitor_sample(sample)
+            else:
+                self._mon_status("Scope read returned nothing.")
+            self.enc_send_button.setEnabled(True)
+
+        def err(_error: str) -> None:
+            self._mon_status("Scope read failed (see Status log).")
+            self.enc_send_button.setEnabled(True)
+
+        self._run_task("Scope read on send", work, ok, err)
 
     # ==================================================================
     # Edge Ratio page: per-column edge-taper ratio + OSA optimisation hook
@@ -2933,6 +3150,648 @@ class MainWindow(QtWidgets.QMainWindow):
                 msg += f"  (raw NPZ copy failed: {exc})"
         self.ana_status.setText(msg)
 
+    # ==================================================================
+    # Background scatter calibration (Step 6): dark + per-channel 780 scatter
+    # ==================================================================
+
+    def _build_background_tab(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Background Scatter Calibration")
+        subtitle = QtWidgets.QLabel(
+            "Automated send-pattern → record-scope-mean sweep. First measures the "
+            "dark/baseline with all SLM channels off, then turns on each channel "
+            "in isolation and sweeps its level to build a linear 780-scatter curve "
+            "per channel. Save the result to subtract this background from the 420 "
+            "TPA signal later. Build a channel grid on the TPA Encoding page first."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep settings ---
+        cfg = self._panel("Sweep & Scope Settings")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.bg_channel = QtWidgets.QComboBox()
+        self.bg_channel.addItems(["1", "2", "3", "4"])
+        self.bg_duration = QtWidgets.QDoubleSpinBox()
+        self.bg_duration.setRange(0.001, 10.0); self.bg_duration.setDecimals(3)
+        self.bg_duration.setValue(1.0); self.bg_duration.setSuffix(" s")
+        self.bg_duration.setToolTip("Scope MEAN averaging window per reading")
+        self.bg_hold = QtWidgets.QDoubleSpinBox()
+        self.bg_hold.setRange(0.0, 10000.0); self.bg_hold.setValue(150.0)
+        self.bg_hold.setSuffix(" ms")
+        self.bg_hold.setToolTip("Settle time after each SLM pattern change")
+        self.bg_levels = self._spin(2, 21, 5)
+        self.bg_levels.setToolTip("Number of levels swept 0→1 per channel (incl. 0)")
+        self.bg_dark_samples = self._spin(1, 100, 5)
+        self.bg_dark_samples.setToolTip("Repeated dark/baseline readings to average")
+        self.bg_repeats = self._spin(1, 20, 1)
+        self.bg_repeats.setToolTip("Repeated scope readings averaged per level point")
+        self.bg_stride = self._spin(1, 64, 1)
+        self.bg_stride.setToolTip("Measure only every Nth channel per side (1 = all)")
+        self.bg_decimation = QtWidgets.QComboBox()
+        self.bg_decimation.addItems(["HRESolution", "SAMPle"])
+        pairs = [
+            ("Channel", self.bg_channel), ("Average for", self.bg_duration),
+            ("Hold", self.bg_hold), ("Levels", self.bg_levels),
+            ("Dark samples", self.bg_dark_samples), ("Repeats", self.bg_repeats),
+            ("Stride", self.bg_stride), ("Decimation", self.bg_decimation),
+        ]
+        for i, (label, widget) in enumerate(pairs):
+            r, c = i // 2, (i % 2) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        page.layout().addWidget(cfg)
+
+        self.bg_layout_label = QtWidgets.QLabel(
+            "Grid: (build a layout on the TPA Encoding page)"
+        )
+        self.bg_layout_label.setObjectName("PageSubtitle")
+        self.bg_layout_label.setWordWrap(True)
+        page.layout().addWidget(self.bg_layout_label)
+
+        # --- results: fitted-lines plot (left) + raw scatter plot (right) ---
+        # left: one line per channel, x = normalised intensity, dashed dark line
+        self.bg_fits_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.bg_fits_canvas = FigureCanvas(self.bg_fits_fig)
+        # right: raw scatter (wavelength vs scatter above dark), incl. big jumps
+        self.bg_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.bg_canvas = FigureCanvas(self.bg_fig)
+
+        plot_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        plot_split.addWidget(self._panel_with_widget("Per-channel fits", self.bg_fits_canvas))
+        plot_split.addWidget(self._panel_with_widget("Raw scatter", self.bg_canvas))
+        plot_split.setSizes([560, 520])
+        page.layout().addWidget(plot_split, 1)
+
+        # --- controls ---
+        self.bg_progress_bar = QtWidgets.QProgressBar()
+        self.bg_progress_bar.setValue(0)
+        self.bg_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.bg_run_button = QtWidgets.QPushButton("Run Sweep")
+        self.bg_run_button.clicked.connect(self._bg_run)
+        self.bg_stop_button = QtWidgets.QPushButton("Stop")
+        self.bg_stop_button.setProperty("variant", "danger")
+        self.bg_stop_button.setEnabled(False)
+        self.bg_stop_button.clicked.connect(self._bg_stop)
+        self.bg_save_button = QtWidgets.QPushButton("Save…")
+        self.bg_save_button.setProperty("variant", "ghost")
+        self.bg_save_button.setEnabled(False)
+        self.bg_save_button.clicked.connect(self._bg_save)
+        self.bg_load_button = QtWidgets.QPushButton("Load…")
+        self.bg_load_button.setProperty("variant", "ghost")
+        self.bg_load_button.setToolTip(
+            "Load a saved background NPZ; big jumps are re-eliminated and each "
+            "channel re-fit before plotting."
+        )
+        self.bg_load_button.clicked.connect(self._bg_load)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.bg_status, 1)
+        ctrl.addWidget(self.bg_load_button)
+        ctrl.addWidget(self.bg_save_button)
+        ctrl.addWidget(self.bg_run_button)
+        ctrl.addWidget(self.bg_stop_button)
+        page.layout().addWidget(self.bg_progress_bar)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _bg_monitor_settings(self) -> MonitorSettings:
+        # free-run AUTO software read (same recipe as the encoder auto-read)
+        return MonitorSettings(
+            channel=int(self.bg_channel.currentText()),
+            trigger_mode="AUTO",
+            hold=self.bg_hold.value() / 1000.0,     # ms -> s
+            duration=self.bg_duration.value(),
+            decimation=self.bg_decimation.currentText(),
+        )
+
+    def _bg_set_running(self, running: bool) -> None:
+        self.bg_run_button.setEnabled(not running)
+        self.bg_stop_button.setEnabled(running)
+        self.bg_load_button.setEnabled(not running)
+        self.bg_save_button.setEnabled(
+            not running and self.background_result is not None
+        )
+
+    def _bg_run(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self.bg_status.setText(
+                "No channel grid — open the TPA Encoding page to build one."
+            )
+            return
+        scope = self.scope_controller
+        if scope is None or not scope.is_connected:
+            self.bg_status.setText("Connect the scope on the Scope page first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.bg_status.setText("Open the SLM on the SLM Control page first.")
+            return
+
+        settings = self._bg_monitor_settings()
+        n_levels = self.bg_levels.value()
+        levels = np.linspace(0.0, 1.0, n_levels)
+        dark_samples = self.bg_dark_samples.value()
+        repeats = self.bg_repeats.value()
+        stride = self.bg_stride.value()
+        capture_dir = tempfile.mkdtemp(prefix="bg_scatter_")
+        self._bg_capture_dir = capture_dir
+
+        n_targets = 2 * len(range(0, layout.n_channels, max(1, stride)))
+        self.bg_layout_label.setText(
+            f"Grid: {layout.n_channels} ch/side, width {layout.channel_width_px} px, "
+            f"centre {layout.center_wl:.2f} nm  ·  {n_targets} channels × "
+            f"{n_levels} levels + dark"
+        )
+        self._bg_live = []
+        self.bg_progress_bar.setMaximum(n_targets * n_levels + 1)
+        self.bg_progress_bar.setValue(0)
+        self.bg_status.setText("Starting…")
+        self._bg_set_running(True)
+
+        stop_event = threading.Event()
+        self.background_stop_event = stop_event
+
+        def report(progress: BackgroundProgress) -> None:
+            self.background_progress.emit(progress)
+
+        def work() -> dict[str, Any]:
+            try:
+                result = measure_scatter_background(
+                    scope, controller, layout, settings,
+                    levels=levels, dark_samples=dark_samples, repeats=repeats,
+                    stride=stride, capture_dir=capture_dir,
+                    stop_event=stop_event, progress_callback=report,
+                )
+            except BackgroundAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "result": result}
+
+        self._run_slm_task("Background scatter sweep", work,
+                           self._bg_finished, self._bg_error)
+
+    def _bg_stop(self) -> None:
+        if self.background_stop_event is not None:
+            self.background_stop_event.set()
+            self.bg_status.setText("Stopping…")
+
+    def _on_background_progress(self, progress: BackgroundProgress) -> None:
+        self.bg_progress_bar.setMaximum(max(progress.total, 1))
+        self.bg_progress_bar.setValue(min(progress.step + 1, progress.total))
+        self.bg_status.setText(progress.message)
+        if progress.wl is not None and progress.metric is not None:
+            self._bg_live.append((progress.wl, progress.metric))
+            self._bg_draw_live()
+
+    def _bg_draw_live(self) -> None:
+        self.bg_fig.clear()
+        self.bg_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Scatter above dark (mV)")
+        if self._bg_live:
+            wl = [p[0] for p in self._bg_live]
+            mv = [p[1] * 1000 for p in self._bg_live]
+            ax.scatter(wl, mv, s=12, color="#47b8e0")
+        self.bg_canvas.draw_idle()
+
+    def _bg_finished(self, payload: dict[str, Any]) -> None:
+        self.background_stop_event = None
+        self._bg_set_running(False)
+        if payload.get("status") == "aborted":
+            self.bg_status.setText(
+                f"Sweep stopped · partial captures in {self._bg_capture_dir}"
+            )
+            return
+        result = payload["result"]
+        self.background_result = result
+        self.bg_save_button.setEnabled(True)
+        self._bg_show_result(result)
+        n_out = sum(
+            int(np.size(c.inlier_mask) - np.count_nonzero(c.inlier_mask))
+            for c in result.channels if c.inlier_mask is not None
+        )
+        self.bg_status.setText(
+            f"Done · dark {result.dark_mean_v*1000:.4f} mV "
+            f"(±{result.dark_std_v*1000:.4f}) · {len(result.channels)} channels · "
+            f"{n_out} big-jump point(s) removed · raw NPZ: {result.raw_npz_path or '(none)'}"
+        )
+
+    def _bg_error(self, _error: str) -> None:
+        self.background_stop_event = None
+        self._bg_set_running(False)
+        self.bg_status.setText("Background sweep failed (see Status log)")
+
+    def _bg_show_result(self, result: BackgroundResult) -> None:
+        """Refresh both plots from a finished/loaded result."""
+        self._bg_draw_fits(result)
+        self._bg_draw_raw(result)
+
+    def _bg_draw_fits(self, result: BackgroundResult) -> None:
+        """Left plot: one linear-fit line per channel vs normalised intensity."""
+        self.bg_fits_fig.clear()
+        self.bg_fits_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fits_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Normalised channel intensity")
+        ax.set_ylabel("Scope mean (mV)")
+        xs = np.array([0.0, 1.0])
+        for ch in result.channels:
+            ys = (ch.slope_v * xs + ch.intercept_v) * 1000.0
+            ax.plot(xs, ys, linewidth=0.7)
+        ax.axhline(result.dark_mean_v * 1000, color="#e0a447", ls="--",
+                   linewidth=1.2, label=f"dark {result.dark_mean_v*1000:.3f} mV")
+        ax.legend(loc="upper left", fontsize=7)
+        self.bg_fits_canvas.draw_idle()
+
+    def _bg_draw_raw(self, result: BackgroundResult) -> None:
+        """Right plot: raw scatter (λ vs scatter above dark); big jumps in red."""
+        self.bg_fig.clear()
+        self.bg_fig.patch.set_facecolor("#101820")
+        ax = self.bg_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Scatter above dark (mV)")
+        kept_wl, kept_y, out_wl, out_y = [], [], [], []
+        for ch in result.channels:
+            above = (ch.means_v - result.dark_mean_v) * 1000.0
+            mask = ch.inlier_mask
+            for k in range(ch.means_v.size):
+                keep = True if mask is None else bool(mask[k])
+                (kept_wl if keep else out_wl).append(ch.nominal_wl_nm)
+                (kept_y if keep else out_y).append(above[k])
+        ax.scatter(kept_wl, kept_y, s=12, color="#47b8e0", label="kept")
+        if out_wl:
+            ax.scatter(out_wl, out_y, s=28, color="#e05a5a", marker="x",
+                       label="big jump (removed)")
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        ax.legend(loc="upper right", fontsize=7)
+        self.bg_canvas.draw_idle()
+
+    def _bg_load(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Background Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_background_result(path)
+        except Exception as exc:
+            self.bg_status.setText(f"Load failed: {exc}")
+            return
+        self.background_result = result
+        self.bg_save_button.setEnabled(True)
+        self._bg_show_result(result)
+        self.bg_status.setText(
+            f"Loaded {Path(path).name} · dark {result.dark_mean_v*1000:.4f} mV · "
+            f"{len(result.channels)} channels (re-fit with big-jump removal)"
+        )
+
+    def _bg_save(self) -> None:
+        if self.background_result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Background Result", "bg_scatter.npz",
+            "NumPy (*.npz);;JSON (*.json);;CSV (*.csv)"
+        )
+        if not path:
+            return
+        base = Path(path).with_suffix("")
+        npz = save_background_npz(self.background_result, base.with_suffix(".npz"))
+        js = save_background_json(self.background_result, base.with_suffix(".json"))
+        csv_path = write_background_csv(self.background_result, base.with_suffix(".csv"))
+        self.bg_status.setText(f"Saved {npz}  +  {Path(js).name}  +  {Path(csv_path).name}")
+
+    # ===================== TPA efficiency tab ========================
+    def _build_tpa_tab(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Channel TPA Efficiency Calibration")
+        subtitle = QtWidgets.QLabel(
+            "Automated per-channel-pair sweep. For each pair the commanded "
+            "product x·w is swept 0→1 (driving x=w=√u), the 780 scatter + dark "
+            "background is subtracted using the Step 6 result, and the remaining "
+            "420 TPA signal is fit to a_i·(x·w)². Run Step 6 (BG Scatter) first "
+            "or load a saved background NPZ below."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep settings ---
+        cfg = self._panel("Sweep & Scope Settings")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.tpa_channel = QtWidgets.QComboBox()
+        self.tpa_channel.addItems(["1", "2", "3", "4"])
+        self.tpa_duration = QtWidgets.QDoubleSpinBox()
+        self.tpa_duration.setRange(0.001, 10.0); self.tpa_duration.setDecimals(3)
+        self.tpa_duration.setValue(1.0); self.tpa_duration.setSuffix(" s")
+        self.tpa_duration.setToolTip("Scope MEAN averaging window per reading")
+        self.tpa_hold = QtWidgets.QDoubleSpinBox()
+        self.tpa_hold.setRange(0.0, 10000.0); self.tpa_hold.setValue(150.0)
+        self.tpa_hold.setSuffix(" ms")
+        self.tpa_hold.setToolTip("Settle time after each SLM pattern change")
+        self.tpa_levels = self._spin(2, 21, 5)
+        self.tpa_levels.setToolTip("Number of product levels swept 0→1 per pair (incl. 0)")
+        self.tpa_repeats = self._spin(1, 20, 1)
+        self.tpa_repeats.setToolTip("Repeated scope readings averaged per product point")
+        self.tpa_stride = self._spin(1, 64, 1)
+        self.tpa_stride.setToolTip("Measure only every Nth pair (1 = all)")
+        self.tpa_decimation = QtWidgets.QComboBox()
+        self.tpa_decimation.addItems(["HRESolution", "SAMPle"])
+        pairs = [
+            ("Channel", self.tpa_channel), ("Average for", self.tpa_duration),
+            ("Hold", self.tpa_hold), ("Product levels", self.tpa_levels),
+            ("Repeats", self.tpa_repeats), ("Stride", self.tpa_stride),
+            ("Decimation", self.tpa_decimation),
+        ]
+        for i, (label, widget) in enumerate(pairs):
+            r, c = i // 2, (i % 2) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        page.layout().addWidget(cfg)
+
+        self.tpa_bg_label = QtWidgets.QLabel(
+            "Background: (run Step 6 or load a background NPZ)"
+        )
+        self.tpa_bg_label.setObjectName("PageSubtitle")
+        self.tpa_bg_label.setWordWrap(True)
+        page.layout().addWidget(self.tpa_bg_label)
+
+        # --- results: quadratic-fit plot (left) + raw TPA signal plot (right) ---
+        self.tpa_fits_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.tpa_fits_canvas = FigureCanvas(self.tpa_fits_fig)
+        self.tpa_fig = Figure(figsize=(5, 3.4), tight_layout=True)
+        self.tpa_canvas = FigureCanvas(self.tpa_fig)
+
+        plot_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        plot_split.addWidget(self._panel_with_widget("Per-pair fits", self.tpa_fits_canvas))
+        plot_split.addWidget(self._panel_with_widget("Raw TPA signal", self.tpa_canvas))
+        plot_split.setSizes([560, 520])
+        page.layout().addWidget(plot_split, 1)
+
+        # --- controls ---
+        self.tpa_progress_bar = QtWidgets.QProgressBar()
+        self.tpa_progress_bar.setValue(0)
+        self.tpa_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_run_button = QtWidgets.QPushButton("Run Sweep")
+        self.tpa_run_button.clicked.connect(self._tpa_run)
+        self.tpa_stop_button = QtWidgets.QPushButton("Stop")
+        self.tpa_stop_button.setProperty("variant", "danger")
+        self.tpa_stop_button.setEnabled(False)
+        self.tpa_stop_button.clicked.connect(self._tpa_stop)
+        self.tpa_loadbg_button = QtWidgets.QPushButton("Load BG…")
+        self.tpa_loadbg_button.setProperty("variant", "ghost")
+        self.tpa_loadbg_button.setToolTip("Load a saved Step 6 background NPZ to subtract")
+        self.tpa_loadbg_button.clicked.connect(self._tpa_load_bg)
+        self.tpa_save_button = QtWidgets.QPushButton("Save…")
+        self.tpa_save_button.setProperty("variant", "ghost")
+        self.tpa_save_button.setEnabled(False)
+        self.tpa_save_button.clicked.connect(self._tpa_save)
+        self.tpa_load_button = QtWidgets.QPushButton("Load…")
+        self.tpa_load_button.setProperty("variant", "ghost")
+        self.tpa_load_button.setToolTip(
+            "Load a saved TPA NPZ; big jumps are re-eliminated and each pair re-fit."
+        )
+        self.tpa_load_button.clicked.connect(self._tpa_load)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.tpa_status, 1)
+        ctrl.addWidget(self.tpa_loadbg_button)
+        ctrl.addWidget(self.tpa_load_button)
+        ctrl.addWidget(self.tpa_save_button)
+        ctrl.addWidget(self.tpa_run_button)
+        ctrl.addWidget(self.tpa_stop_button)
+        page.layout().addWidget(self.tpa_progress_bar)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _tpa_monitor_settings(self) -> MonitorSettings:
+        return MonitorSettings(
+            channel=int(self.tpa_channel.currentText()),
+            trigger_mode="AUTO",
+            hold=self.tpa_hold.value() / 1000.0,     # ms -> s
+            duration=self.tpa_duration.value(),
+            decimation=self.tpa_decimation.currentText(),
+        )
+
+    def _tpa_set_running(self, running: bool) -> None:
+        self.tpa_run_button.setEnabled(not running)
+        self.tpa_stop_button.setEnabled(running)
+        self.tpa_load_button.setEnabled(not running)
+        self.tpa_loadbg_button.setEnabled(not running)
+        self.tpa_save_button.setEnabled(not running and self.tpa_result is not None)
+
+    def _tpa_run(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self.tpa_status.setText(
+                "No channel grid — open the TPA Encoding page to build one."
+            )
+            return
+        if self.background_result is None:
+            self.tpa_status.setText(
+                "No background — run Step 6 (BG Scatter) or Load BG… first."
+            )
+            return
+        scope = self.scope_controller
+        if scope is None or not scope.is_connected:
+            self.tpa_status.setText("Connect the scope on the Scope page first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.tpa_status.setText("Open the SLM on the SLM Control page first.")
+            return
+
+        settings = self._tpa_monitor_settings()
+        n_levels = self.tpa_levels.value()
+        products = np.linspace(0.0, 1.0, n_levels)
+        repeats = self.tpa_repeats.value()
+        stride = self.tpa_stride.value()
+        background = self.background_result
+        capture_dir = tempfile.mkdtemp(prefix="tpa_eff_")
+        self._tpa_capture_dir = capture_dir
+
+        n_pairs = len(range(0, layout.n_channels, max(1, stride)))
+        self.tpa_bg_label.setText(
+            f"Grid: {layout.n_channels} pairs, centre {layout.center_wl:.2f} nm "
+            f"· background dark {background.dark_mean_v*1000:.3f} mV, "
+            f"{len(background.channels)} scatter channels  ·  {n_pairs} pairs × "
+            f"{n_levels} products"
+        )
+        self._tpa_live = []
+        self.tpa_progress_bar.setMaximum(max(n_pairs * n_levels, 1))
+        self.tpa_progress_bar.setValue(0)
+        self.tpa_status.setText("Starting…")
+        self._tpa_set_running(True)
+
+        stop_event = threading.Event()
+        self.tpa_stop_event = stop_event
+
+        def report(progress: TPAProgress) -> None:
+            self.tpa_progress.emit(progress)
+
+        def work() -> dict[str, Any]:
+            try:
+                result = measure_tpa_efficiency(
+                    scope, controller, layout, settings, background,
+                    products=products, repeats=repeats, stride=stride,
+                    capture_dir=capture_dir,
+                    stop_event=stop_event, progress_callback=report,
+                )
+            except TPAAborted:
+                return {"status": "aborted"}
+            return {"status": "ok", "result": result}
+
+        self._run_slm_task("TPA efficiency sweep", work,
+                           self._tpa_finished, self._tpa_error)
+
+    def _tpa_stop(self) -> None:
+        if self.tpa_stop_event is not None:
+            self.tpa_stop_event.set()
+            self.tpa_status.setText("Stopping…")
+
+    def _on_tpa_progress(self, progress: TPAProgress) -> None:
+        self.tpa_progress_bar.setMaximum(max(progress.total, 1))
+        self.tpa_progress_bar.setValue(min(progress.step, progress.total))
+        self.tpa_status.setText(progress.message)
+        if progress.wl is not None and progress.metric is not None:
+            self._tpa_live.append((progress.wl, progress.metric))
+            self._tpa_draw_live()
+
+    def _tpa_draw_live(self) -> None:
+        self.tpa_fig.clear()
+        self.tpa_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("TPA signal above background (mV)")
+        if self._tpa_live:
+            wl = [p[0] for p in self._tpa_live]
+            mv = [p[1] * 1000 for p in self._tpa_live]
+            ax.scatter(wl, mv, s=12, color="#8fd14f")
+        self.tpa_canvas.draw_idle()
+
+    def _tpa_finished(self, payload: dict[str, Any]) -> None:
+        self.tpa_stop_event = None
+        self._tpa_set_running(False)
+        if payload.get("status") == "aborted":
+            self.tpa_status.setText(
+                f"Sweep stopped · partial captures in {self._tpa_capture_dir}"
+            )
+            return
+        result = payload["result"]
+        self.tpa_result = result
+        self.tpa_save_button.setEnabled(True)
+        self._tpa_show_result(result)
+        n_out = sum(
+            int(np.size(c.inlier_mask) - np.count_nonzero(c.inlier_mask))
+            for c in result.channels if c.inlier_mask is not None
+        )
+        self.tpa_status.setText(
+            f"Done · {len(result.channels)} pairs · {n_out} big-jump point(s) "
+            f"removed · raw NPZ: {result.raw_npz_path or '(none)'}"
+        )
+
+    def _tpa_error(self, _error: str) -> None:
+        self.tpa_stop_event = None
+        self._tpa_set_running(False)
+        self.tpa_status.setText("TPA sweep failed (see Status log)")
+
+    def _tpa_show_result(self, result: TPAResult) -> None:
+        """Refresh both plots from a finished/loaded result."""
+        self._tpa_draw_fits(result)
+        self._tpa_draw_raw(result)
+
+    def _tpa_draw_fits(self, result: TPAResult) -> None:
+        """Left plot: one quadratic-fit curve per pair vs commanded product x·w."""
+        self.tpa_fits_fig.clear()
+        self.tpa_fits_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fits_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Commanded product x·w")
+        ax.set_ylabel("TPA signal (mV)")
+        us = np.linspace(0.0, 1.0, 50)
+        for ch in result.channels:
+            ys = ch.coeff_a * us * us * 1000.0
+            ax.plot(us, ys, linewidth=0.7)
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        self.tpa_fits_canvas.draw_idle()
+
+    def _tpa_draw_raw(self, result: TPAResult) -> None:
+        """Right plot: raw background-removed TPA signal (λ vs signal); jumps red."""
+        self.tpa_fig.clear()
+        self.tpa_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_fig.add_subplot(111)
+        self._style_dark_axes(ax)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("TPA signal above background (mV)")
+        kept_wl, kept_y, out_wl, out_y = [], [], [], []
+        for ch in result.channels:
+            sig = ch.signal_v * 1000.0
+            mask = ch.inlier_mask
+            for k in range(ch.signal_v.size):
+                keep = True if mask is None else bool(mask[k])
+                (kept_wl if keep else out_wl).append(ch.nominal_wl_nm)
+                (kept_y if keep else out_y).append(sig[k])
+        ax.scatter(kept_wl, kept_y, s=12, color="#8fd14f", label="kept")
+        if out_wl:
+            ax.scatter(out_wl, out_y, s=28, color="#e05a5a", marker="x",
+                       label="big jump (removed)")
+        ax.axhline(0.0, color="#e0a447", ls="--", linewidth=1.0)
+        ax.legend(loc="upper right", fontsize=7)
+        self.tpa_canvas.draw_idle()
+
+    def _tpa_load_bg(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Background Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_background_result(path)
+        except Exception as exc:
+            self.tpa_status.setText(f"Background load failed: {exc}")
+            return
+        self.background_result = result
+        self.tpa_bg_label.setText(
+            f"Background: {Path(path).name} · dark {result.dark_mean_v*1000:.4f} mV · "
+            f"{len(result.channels)} scatter channels"
+        )
+        self.tpa_status.setText("Background loaded — ready to run the TPA sweep.")
+
+    def _tpa_load(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load TPA Result", "", "NumPy (*.npz)"
+        )
+        if not path:
+            return
+        try:
+            result = load_tpa_result(path)
+        except Exception as exc:
+            self.tpa_status.setText(f"Load failed: {exc}")
+            return
+        self.tpa_result = result
+        self.tpa_save_button.setEnabled(True)
+        self._tpa_show_result(result)
+        self.tpa_status.setText(
+            f"Loaded {Path(path).name} · {len(result.channels)} pairs "
+            f"(re-fit with big-jump removal)"
+        )
+
+    def _tpa_save(self) -> None:
+        if self.tpa_result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save TPA Result", "tpa_efficiency.npz",
+            "NumPy (*.npz);;JSON (*.json);;CSV (*.csv)"
+        )
+        if not path:
+            return
+        base = Path(path).with_suffix("")
+        npz = save_tpa_npz(self.tpa_result, base.with_suffix(".npz"))
+        js = save_tpa_json(self.tpa_result, base.with_suffix(".json"))
+        csv_path = write_tpa_csv(self.tpa_result, base.with_suffix(".csv"))
+        self.tpa_status.setText(f"Saved {npz}  +  {Path(js).name}  +  {Path(csv_path).name}")
+
     # ===================== Scope (RTO6) page =========================
     def _connect_scope(self) -> None:
         host = self.scope_host_edit.text().strip()
@@ -2973,107 +3832,69 @@ class MainWindow(QtWidgets.QMainWindow):
     _TRIG_SOURCES = [("CH1", "CHANnel1"), ("CH2", "CHANnel2"), ("CH3", "CHANnel3"),
                      ("CH4", "CHANnel4"), ("EXT", "EXTernanalog")]
 
-    def _build_scope_monitor_page(self) -> QtWidgets.QWidget:
-        page = self._page_shell("Scope Monitor · Triggered Readout")
-        subtitle = QtWidgets.QLabel(
-            "For each SLM trigger (rising edge): wait the hold time, then have "
-            "the scope average ch over the window and return one value. Connect "
-            "the scope on the Scope page first. The mean is computed on-scope, so "
-            "no waveform is transferred per trigger."
-        )
-        subtitle.setObjectName("PageSubtitle")
-        subtitle.setWordWrap(True)
-        page.layout().addWidget(subtitle)
+    def _build_scope_monitor_widget(self) -> QtWidgets.QWidget:
+        """Embeddable triggered scope readout (lives inside the TPA encoder page)."""
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
 
-        cfg = self._panel("Trigger & averaging")
+        cfg = self._panel("Scope Monitor · trigger & averaging")
         grid = QtWidgets.QGridLayout(cfg)
-        self.mon_channel = QtWidgets.QComboBox()
-        self.mon_channel.addItems(["1", "2", "3", "4"])
+        self.mon_channel = QtWidgets.QComboBox(); self.mon_channel.addItems(["1", "2", "3", "4"])
         self.mon_trig_source = QtWidgets.QComboBox()
         for label, _tok in self._TRIG_SOURCES:
             self.mon_trig_source.addItem(label)
-        self.mon_trig_source.setCurrentIndex(2)  # CH3 as a sensible default
+        self.mon_trig_source.setCurrentIndex(2)
         self.mon_trig_level = QtWidgets.QDoubleSpinBox()
-        self.mon_trig_level.setRange(-5.0, 5.0)
-        self.mon_trig_level.setSingleStep(0.1)
-        self.mon_trig_level.setValue(1.5)
-        self.mon_trig_level.setSuffix(" V")
-        self.mon_trig_level.setToolTip("Mid-level of the 0–3 V SLM pulse; rising edge")
+        self.mon_trig_level.setRange(-5.0, 5.0); self.mon_trig_level.setSingleStep(0.1)
+        self.mon_trig_level.setValue(1.5); self.mon_trig_level.setSuffix(" V")
         self.mon_hold = QtWidgets.QDoubleSpinBox()
-        self.mon_hold.setRange(0.0, 10000.0)
-        self.mon_hold.setValue(100.0)
-        self.mon_hold.setSuffix(" ms")
-        self.mon_hold.setToolTip("Settle time after the trigger before averaging")
+        self.mon_hold.setRange(0.0, 10000.0); self.mon_hold.setValue(100.0); self.mon_hold.setSuffix(" ms")
         self.mon_duration = QtWidgets.QDoubleSpinBox()
-        self.mon_duration.setRange(0.001, 10.0)
-        self.mon_duration.setDecimals(3)
-        self.mon_duration.setValue(1.0)
-        self.mon_duration.setSuffix(" s")
-        self.mon_duration.setToolTip("Averaging window length (MEAN gate)")
-        self.mon_decimation = QtWidgets.QComboBox()
-        self.mon_decimation.addItems(["HRESolution", "SAMPle"])
-        self.mon_bandwidth = QtWidgets.QComboBox()
-        self.mon_bandwidth.addItems(["(keep)", "FULL", "B800", "B200", "B20"])
-        self.mon_digfilter = QtWidgets.QLineEdit("")
-        self.mon_digfilter.setPlaceholderText("off")
-        self.mon_digfilter.setToolTip("Digital low-pass cutoff in Hz (blank = off)")
-        grid.addWidget(QtWidgets.QLabel("Channel"), 0, 0)
-        grid.addWidget(self.mon_channel, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("Trigger src"), 0, 2)
-        grid.addWidget(self.mon_trig_source, 0, 3)
-        grid.addWidget(QtWidgets.QLabel("Trigger level"), 0, 4)
-        grid.addWidget(self.mon_trig_level, 0, 5)
-        grid.addWidget(QtWidgets.QLabel("Hold"), 1, 0)
-        grid.addWidget(self.mon_hold, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("Average for"), 1, 2)
-        grid.addWidget(self.mon_duration, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Decimation"), 1, 4)
-        grid.addWidget(self.mon_decimation, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("BW limit"), 2, 0)
-        grid.addWidget(self.mon_bandwidth, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("Digital LP (Hz)"), 2, 2)
-        grid.addWidget(self.mon_digfilter, 2, 3)
-        page.layout().addWidget(cfg)
+        self.mon_duration.setRange(0.001, 10.0); self.mon_duration.setDecimals(3)
+        self.mon_duration.setValue(1.0); self.mon_duration.setSuffix(" s")
+        self.mon_decimation = QtWidgets.QComboBox(); self.mon_decimation.addItems(["HRESolution", "SAMPle"])
+        self.mon_bandwidth = QtWidgets.QComboBox(); self.mon_bandwidth.addItems(["(keep)", "FULL", "B800", "B200", "B20"])
+        self.mon_digfilter = QtWidgets.QLineEdit(""); self.mon_digfilter.setPlaceholderText("off")
+        pairs = [("Channel", self.mon_channel), ("Trigger src", self.mon_trig_source),
+                 ("Level", self.mon_trig_level), ("Hold", self.mon_hold),
+                 ("Average for", self.mon_duration), ("Decimation", self.mon_decimation),
+                 ("BW limit", self.mon_bandwidth), ("Digital LP", self.mon_digfilter)]
+        for i, (label, widget) in enumerate(pairs):
+            r, c = i // 2, (i % 2) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        v.addWidget(cfg)
 
-        # live value readout
-        self.mon_value_label = QtWidgets.QLabel("—")
-        self.mon_value_label.setObjectName("PageTitle")
-        self.mon_value_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.mon_count_label = QtWidgets.QLabel("0 readings")
+        self.mon_count_label = QtWidgets.QLabel("0 patterns")
         self.mon_count_label.setObjectName("PageSubtitle")
         self.mon_count_label.setAlignment(QtCore.Qt.AlignCenter)
-        readout = QtWidgets.QVBoxLayout()
-        readout.addWidget(self.mon_value_label)
-        readout.addWidget(self.mon_count_label)
-        page.layout().addLayout(readout)
+        v.addWidget(self.mon_count_label)
 
-        self.mon_fig = Figure(figsize=(7, 3.0), tight_layout=True)
+        self.mon_fig = Figure(figsize=(4, 2.4), tight_layout=True)
         self.mon_canvas = FigureCanvas(self.mon_fig)
-        page.layout().addWidget(self._panel_with_widget("Value per trigger", self.mon_canvas), 1)
+        v.addWidget(self._panel_with_widget("Average per pattern", self.mon_canvas), 1)
 
-        self.mon_status = QtWidgets.QLabel("\N{EN DASH}")
-        self.mon_start_button = QtWidgets.QPushButton("Start Monitor")
-        self.mon_start_button.clicked.connect(self._monitor_start)
-        self.mon_stop_button = QtWidgets.QPushButton("Stop")
-        self.mon_stop_button.setProperty("variant", "danger")
-        self.mon_stop_button.setEnabled(False)
-        self.mon_stop_button.clicked.connect(self._monitor_stop)
+        # This readout is a behaviour recorder, not a live monitor: each pattern
+        # you send appends one (pattern #, average) point via auto-read-on-send.
         self.mon_clear_button = QtWidgets.QPushButton("Clear")
         self.mon_clear_button.setProperty("variant", "ghost")
         self.mon_clear_button.clicked.connect(self._monitor_clear)
         self.mon_save_button = QtWidgets.QPushButton("Save CSV…")
         self.mon_save_button.setProperty("variant", "ghost")
         self.mon_save_button.clicked.connect(self._monitor_save)
-        ctrl = QtWidgets.QHBoxLayout()
-        ctrl.addWidget(self.mon_status, 1)
-        ctrl.addWidget(self.mon_clear_button)
-        ctrl.addWidget(self.mon_save_button)
-        ctrl.addWidget(self.mon_start_button)
-        ctrl.addWidget(self.mon_stop_button)
-        page.layout().addLayout(ctrl)
-        return page
+        self.mon_read_on_send = QtWidgets.QCheckBox("Auto-read on SLM send")
+        self.mon_read_on_send.setChecked(True)
+        self.mon_read_on_send.setToolTip(
+            "After a pattern is sent from this page, take one free-run averaged "
+            "scope reading and append it to the record."
+        )
+        v.addWidget(self.mon_read_on_send)
+        row = QtWidgets.QHBoxLayout(); row.addWidget(self.mon_clear_button); row.addWidget(self.mon_save_button)
+        v.addLayout(row)
+        return w
 
-    def _monitor_settings(self) -> MonitorSettings:
+    def _monitor_settings(self, trigger_mode: str = "NORMal") -> MonitorSettings:
         cutoff_text = self.mon_digfilter.text().strip()
         try:
             cutoff = float(cutoff_text) if cutoff_text else None
@@ -3082,6 +3903,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bw = self.mon_bandwidth.currentText()
         return MonitorSettings(
             channel=int(self.mon_channel.currentText()),
+            trigger_mode=trigger_mode,
             trigger_source=self._TRIG_SOURCES[self.mon_trig_source.currentIndex()][1],
             trigger_level=self.mon_trig_level.value(),
             trigger_slope="POSitive",
@@ -3092,47 +3914,10 @@ class MainWindow(QtWidgets.QMainWindow):
             digital_filter_cutoff=cutoff,
         )
 
-    def _monitor_set_running(self, running: bool) -> None:
-        self.mon_start_button.setEnabled(not running)
-        self.mon_stop_button.setEnabled(running)
-        self.mon_clear_button.setEnabled(not running)
-
-    def _monitor_start(self) -> None:
-        scope = self.scope_controller
-        if scope is None or not scope.is_connected:
-            self.mon_status.setText("Connect the scope on the Scope page first.")
-            return
-        settings = self._monitor_settings()
-        stop_event = threading.Event()
-        self.monitor_stop_event = stop_event
-        self.mon_status.setText("Waiting for trigger…")
-        self._monitor_set_running(True)
-
-        def work() -> dict[str, Any]:
-            scope.configure_monitor(settings)
-            n = 0
-            while not stop_event.is_set():
-                sample = scope.monitor_cycle(
-                    index=n, timeout=600.0, poll_interval=0.05, stop_event=stop_event
-                )
-                if sample is None:
-                    break
-                self.monitor_sample.emit(sample)
-                n += 1
-            return {"count": n}
-
-        self._run_task("Scope monitor", work, self._monitor_finished, self._monitor_error)
-
-    def _monitor_stop(self) -> None:
-        if self.monitor_stop_event is not None:
-            self.monitor_stop_event.set()
-            self.mon_status.setText("Stopping…")
-
     def _on_monitor_sample(self, sample: MonitorSample) -> None:
         self._monitor_values.append(sample.value)
-        self.mon_value_label.setText(f"{sample.value*1000:.4f} mV")
-        self.mon_count_label.setText(f"{len(self._monitor_values)} readings")
-        self.mon_status.setText(f"#{sample.index + 1} · waiting for next trigger…")
+        self.mon_count_label.setText(f"{len(self._monitor_values)} patterns")
+        self._mon_status(f"pattern #{len(self._monitor_values)}: {sample.value*1000:.4f} mV")
         self._monitor_draw()
 
     def _monitor_draw(self) -> None:
@@ -3140,45 +3925,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mon_fig.patch.set_facecolor("#101820")
         ax = self.mon_fig.add_subplot(111)
         self._style_dark_axes(ax)
-        ax.set_xlabel("Trigger #")
-        ax.set_ylabel("Mean (V)")
+        ax.set_xlabel("Pattern # (send order)")
+        ax.set_ylabel("Average (mV)")
         if self._monitor_values:
-            ax.plot(range(1, len(self._monitor_values) + 1), self._monitor_values,
+            n = len(self._monitor_values)
+            xs = range(1, n + 1)
+            ax.plot(xs, [v * 1000 for v in self._monitor_values],
                     marker="o", ms=3, color="#47b8e0", linewidth=0.8)
+            # integer-only ticks on the pattern axis (1, 2, 3, …)
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.set_xlim(0.5, n + 0.5)
         self.mon_canvas.draw_idle()
-
-    def _monitor_finished(self, payload: dict[str, Any]) -> None:
-        self.monitor_stop_event = None
-        self._monitor_set_running(False)
-        self.mon_status.setText(f"Stopped · {payload.get('count', 0)} readings")
-
-    def _monitor_error(self, _error: str) -> None:
-        self.monitor_stop_event = None
-        self._monitor_set_running(False)
-        self.mon_status.setText("Monitor failed (see Status log) — check trigger/connection")
 
     def _monitor_clear(self) -> None:
         self._monitor_values = []
-        self.mon_value_label.setText("—")
-        self.mon_count_label.setText("0 readings")
+        self.mon_count_label.setText("0 patterns")
         self._monitor_draw()
 
     def _monitor_save(self) -> None:
         if not self._monitor_values:
-            self.mon_status.setText("No readings to save.")
+            self._mon_status("No readings to save.")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save monitor readings", "scope_monitor.csv", "CSV (*.csv)")
+            self, "Save pattern readings", "scope_readings.csv", "CSV (*.csv)")
         if not path:
             return
         import csv as _csv
 
         with open(path, "w", encoding="utf-8", newline="") as f:
             writer = _csv.writer(f)
-            writer.writerow(["trigger", "mean_V"])
+            writer.writerow(["pattern", "mean_V"])
             for i, v in enumerate(self._monitor_values, start=1):
                 writer.writerow([i, v])
-        self._log(f"Monitor readings saved: {path}")
+        self._log(f"Pattern readings saved: {path}")
 
     def _page_shell(self, title: str) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -4511,6 +5290,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if hasattr(self, "slm_monitor_view"):
             self.slm_monitor_view.stop()
+        if hasattr(self, "enc_monitor_view"):
+            self.enc_monitor_view.stop()
         if self.keepalive is not None:
             self.keepalive.stop()
             self.keepalive = None

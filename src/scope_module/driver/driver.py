@@ -241,6 +241,14 @@ class RTO6_Driver(BaseScope):
         "EXTERNANALOG": 5, "EXT": 5,
     }
 
+    def set_trigger_mode(self, mode: str) -> None:
+        """Set only the trigger mode (AUTO free-runs, NORMal waits for an edge).
+
+        Used for the software/immediate read: MODE AUTO with no armed edge lets
+        SINGle self-trigger and complete, matching the proven free-run capture.
+        """
+        self.write(f"TRIGger1:MODE {mode}")
+
     def set_trigger(
         self,
         *,
@@ -267,6 +275,15 @@ class RTO6_Driver(BaseScope):
     def set_time_range(self, seconds: str | float) -> None:
         """Set the full acquisition time window (TIMebase:RANGe, in seconds)."""
         self.write(f"TIMebase:RANGe {seconds}")
+
+    def set_acquisition_count(self, count: int = 1) -> None:
+        """Set how many acquisitions one SINGle runs (ACQuire:COUNt).
+
+        Must be 1 for a single-shot capture: a stale count (left high by a prior
+        averaging run) makes SINGle acquire many records, so the OPC-complete bit
+        never latches within the poll timeout and the read wrongly times out.
+        """
+        self.write(f"ACQuire:COUNt {int(count)}")
 
     def set_record_length(self, points: int | None) -> None:
         """Fix the record length, or let the scope keep resolution constant.
