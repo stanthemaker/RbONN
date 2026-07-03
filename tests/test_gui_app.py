@@ -111,15 +111,40 @@ class MainWindowStartupTests(unittest.TestCase):
         try:
             self.assertFalse(window.pipeline_checks[4].isChecked())
             self.assertFalse(window.pipeline_profile_edit.isEnabled())
+            self.assertFalse(window.pipeline_profile_values_edit.isEnabled())
 
             window.pipeline_checks[4].setChecked(True)
-            self.assertTrue(window.pipeline_profile_edit.isEnabled())
+            self.assertTrue(window.pipeline_profile_values_edit.isEnabled())
+            self.assertFalse(window.pipeline_profile_edit.isEnabled())
             self.assertFalse(window.pipeline_input_edits[4].isEnabled())
             self.assertIn("Step 3 output JSON", window.pipeline_source_labels[4].text())
+
+            window.pipeline_profile_source_combo.setCurrentIndex(1)
+            self.assertFalse(window.pipeline_profile_values_edit.isEnabled())
+            self.assertTrue(window.pipeline_profile_edit.isEnabled())
 
             window.pipeline_checks[3].setChecked(False)
             self.assertTrue(window.pipeline_input_edits[4].isEnabled())
             self.assertIn("external Step 3 JSON", window.pipeline_source_labels[4].text())
+        finally:
+            window.close()
+
+    def test_pipeline_parses_direct_initial_profile(self) -> None:
+        from slm_module.gui.app import MainWindow
+
+        window = MainWindow()
+        try:
+            expected = np.linspace(0.2, 0.9, 8)
+            parsed = window._parse_pipeline_initial_profile(
+                ", ".join(f"{value:g}" for value in expected)
+            )
+            np.testing.assert_allclose(parsed, expected)
+
+            full = np.concatenate([expected, expected[-2::-1]])
+            parsed_full = window._parse_pipeline_initial_profile(
+                json.dumps(full.tolist())
+            )
+            np.testing.assert_allclose(parsed_full, expected)
         finally:
             window.close()
 
@@ -205,7 +230,7 @@ class MainWindowStartupTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_pipeline_runs_encoding_optimization_from_files(self) -> None:
+    def test_pipeline_runs_encoding_optimization_from_direct_input(self) -> None:
         from slm_module.calibration.calibration_new import (
             CalibrationResult,
             load_calibration_result as real_load_calibration_result,
@@ -236,7 +261,6 @@ class MainWindowStartupTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 calibration_path = root / "calibration.json"
-                profile_path = root / "profile.json"
                 output_root = root / "optimization"
                 levels = np.asarray([0, 1023])
                 calibration = CalibrationResult(
@@ -253,15 +277,13 @@ class MainWindowStartupTests(unittest.TestCase):
                     ),
                 )
                 save_calibration_result(calibration, calibration_path)
-                profile_path.write_text(
-                    json.dumps({"l_init": [1.0] * 8}), encoding="utf-8"
-                )
+                expected_initial = np.linspace(0.2, 0.9, 8)
                 window.pipeline_input_edits[4].setText(str(calibration_path))
-                window.pipeline_profile_edit.setText(str(profile_path))
+                window.pipeline_profile_values_edit.setText(
+                    ", ".join(str(value) for value in expected_initial)
+                )
                 window.pipeline_optimization_root_edit.setText(str(output_root))
                 window.pipeline_optimization_name_edit.setText("pipeline_test")
-
-                expected_initial = np.linspace(0.2, 0.9, 8)
 
                 def fake_optimize(layout, **kwargs):
                     np.testing.assert_allclose(kwargs["initial_l"], expected_initial)
@@ -296,12 +318,6 @@ class MainWindowStartupTests(unittest.TestCase):
                     ) as load_result,
                 ):
                     window._run_pipeline()
-                    # Change the file after preflight validation. The worker must
-                    # reload it at the optimization boundary instead of using memory.
-                    profile_path.write_text(
-                        json.dumps({"l_init": expected_initial.tolist()}),
-                        encoding="utf-8",
-                    )
                     payload = launched["work"](
                         lambda _progress: None, threading.Event()
                     )

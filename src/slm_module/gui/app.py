@@ -1050,6 +1050,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_source_labels[4].setObjectName("PageSubtitle")
         opt_grid.addWidget(self.pipeline_source_labels[4], 2, 1, 1, 2)
 
+        self.pipeline_profile_source_combo = QtWidgets.QComboBox()
+        self.pipeline_profile_source_combo.addItems(["Direct values", "From file"])
+        self.pipeline_profile_source_combo.currentIndexChanged.connect(
+            self._refresh_pipeline_ui
+        )
+        opt_grid.addWidget(QtWidgets.QLabel("Initial profile source"), 3, 0)
+        opt_grid.addWidget(self.pipeline_profile_source_combo, 3, 1, 1, 2)
+
+        self.pipeline_profile_values_edit = QtWidgets.QLineEdit(
+            "1, 1, 1, 1, 1, 1, 1, 1"
+        )
+        self.pipeline_profile_values_edit.setPlaceholderText(
+            "8 values, or a symmetric 15-value profile"
+        )
+        self.pipeline_profile_values_edit.setToolTip(
+            "Normalised intensity ratios in [0, 1], separated by commas or spaces."
+        )
+        opt_grid.addWidget(QtWidgets.QLabel("Initial profile values"), 4, 0)
+        opt_grid.addWidget(self.pipeline_profile_values_edit, 4, 1, 1, 2)
+
         self.pipeline_profile_edit = QtWidgets.QLineEdit()
         self.pipeline_profile_edit.setPlaceholderText(
             "8-value l_init or symmetric 15-value profile"
@@ -1067,9 +1087,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Profile Files (*.json *.csv *.txt)",
             )
         )
-        opt_grid.addWidget(QtWidgets.QLabel("Initial profile file"), 3, 0)
-        opt_grid.addWidget(self.pipeline_profile_edit, 3, 1)
-        opt_grid.addWidget(self.pipeline_profile_button, 3, 2)
+        opt_grid.addWidget(QtWidgets.QLabel("Initial profile file"), 5, 0)
+        opt_grid.addWidget(self.pipeline_profile_edit, 5, 1)
+        opt_grid.addWidget(self.pipeline_profile_button, 5, 2)
 
         self.pipeline_optimization_root_edit = QtWidgets.QLineEdit(
             "data/osa_optimization"
@@ -1078,24 +1098,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_optimization_root_button.clicked.connect(
             self._browse_pipeline_optimization_root
         )
-        opt_grid.addWidget(QtWidgets.QLabel("Output root"), 4, 0)
-        opt_grid.addWidget(self.pipeline_optimization_root_edit, 4, 1)
-        opt_grid.addWidget(self.pipeline_optimization_root_button, 4, 2)
+        opt_grid.addWidget(QtWidgets.QLabel("Output root"), 6, 0)
+        opt_grid.addWidget(self.pipeline_optimization_root_edit, 6, 1)
+        opt_grid.addWidget(self.pipeline_optimization_root_button, 6, 2)
 
         self.pipeline_optimization_name_edit = QtWidgets.QLineEdit()
         self.pipeline_optimization_name_edit.setPlaceholderText(
             "Optional; blank uses a timestamped run directory"
         )
-        opt_grid.addWidget(QtWidgets.QLabel("Run name"), 5, 0)
-        opt_grid.addWidget(self.pipeline_optimization_name_edit, 5, 1, 1, 2)
+        opt_grid.addWidget(QtWidgets.QLabel("Run name"), 7, 0)
+        opt_grid.addWidget(self.pipeline_optimization_name_edit, 7, 1, 1, 2)
         opt_grid.setColumnStretch(1, 1)
         layout.addWidget(optimization)
 
         layout.addWidget(
             self._caption(
                 "A selected prerequisite supplies its output file. A skipped "
-                "prerequisite must be supplied as an external file. Encoding "
-                "Optimization always requires its initial profile from a file."
+                "prerequisite must be supplied as an external file. The Encoding "
+                "Optimization initial profile may be entered directly or loaded "
+                "from a file."
             )
         )
 
@@ -1168,9 +1189,14 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             optimization_source = "Encoding Optimization: not selected"
         self.pipeline_source_labels[4].setText(optimization_source)
+        profile_from_file = self.pipeline_profile_source_combo.currentIndex() == 1
+        self.pipeline_profile_source_combo.setEnabled(optimize_selected)
+        self.pipeline_profile_values_edit.setEnabled(
+            optimize_selected and not profile_from_file
+        )
+        self.pipeline_profile_edit.setEnabled(optimize_selected and profile_from_file)
+        self.pipeline_profile_button.setEnabled(optimize_selected and profile_from_file)
         for widget in (
-            self.pipeline_profile_edit,
-            self.pipeline_profile_button,
             self.pipeline_optimization_root_edit,
             self.pipeline_optimization_root_button,
             self.pipeline_optimization_name_edit,
@@ -5028,6 +5054,41 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError(f"{label} must be a directory: {path}")
         return path
 
+    def _validate_pipeline_initial_profile(
+        self, values: Any, *, source: str
+    ) -> np.ndarray:
+        values = np.asarray(values, dtype=float).reshape(-1)
+        if values.size == 15:
+            return independent_intensity_profile(values)
+        if values.size == 8:
+            return validate_independent_profile(values, width=15)
+        raise ValueError(
+            f"{source} must contain 8 values or a symmetric 15-value profile; "
+            f"found {values.size}"
+        )
+
+    def _parse_pipeline_initial_profile(self, text: str) -> np.ndarray:
+        """Parse direct comma/space-separated profile values from the UI."""
+        value_text = text.strip()
+        if not value_text:
+            raise ValueError("Encoding Optimization initial profile values are required")
+        if value_text.startswith("["):
+            try:
+                values = json.loads(value_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid initial profile JSON: {exc.msg}") from exc
+        else:
+            parts = [part for part in re.split(r"[\s,;]+", value_text) if part]
+            try:
+                values = [float(part) for part in parts]
+            except ValueError as exc:
+                raise ValueError(
+                    "initial profile values must be numbers separated by commas or spaces"
+                ) from exc
+        return self._validate_pipeline_initial_profile(
+            values, source="initial profile input"
+        )
+
     def _load_pipeline_initial_profile(self, path: Path) -> np.ndarray:
         """Load an 8-value initial profile or a symmetric 15-value profile."""
         if path.suffix.lower() == ".json":
@@ -5048,21 +5109,15 @@ class MainWindow(QtWidgets.QMainWindow):
                         "profile JSON must contain l_init, initial_l, final_l, "
                         "final_profile, or profile"
                     )
-            values = np.asarray(payload, dtype=float).reshape(-1)
+            values = payload
         else:
             delimiter = "," if path.suffix.lower() == ".csv" else None
             values = np.asarray(
                 np.genfromtxt(path, delimiter=delimiter, dtype=float), dtype=float
             ).reshape(-1)
             values = values[np.isfinite(values)]
-
-        if values.size == 15:
-            return independent_intensity_profile(values)
-        if values.size == 8:
-            return validate_independent_profile(values, width=15)
-        raise ValueError(
-            f"initial profile file must contain 8 values or a symmetric 15-value "
-            f"profile; found {values.size}"
+        return self._validate_pipeline_initial_profile(
+            values, source="initial profile file"
         )
 
     def _load_pipeline_optimization_calibration(
@@ -5151,6 +5206,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             optimization_calibration_input = None
             profile_path = None
+            direct_initial_profile = None
             optimization_root = None
             optimization_run_name = None
             if 4 in selected:
@@ -5160,11 +5216,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Encoding Optimization calibration input",
                         must_exist=True,
                     )
-                profile_path = self._pipeline_file_path(
-                    self.pipeline_profile_edit,
-                    "Encoding Optimization initial profile",
-                    must_exist=True,
-                )
+                if self.pipeline_profile_source_combo.currentIndex() == 1:
+                    profile_path = self._pipeline_file_path(
+                        self.pipeline_profile_edit,
+                        "Encoding Optimization initial profile",
+                        must_exist=True,
+                    )
+                else:
+                    direct_initial_profile = self._parse_pipeline_initial_profile(
+                        self.pipeline_profile_values_edit.text()
+                    )
                 optimization_root = self._pipeline_directory_path(
                     self.pipeline_optimization_root_edit,
                     "Encoding Optimization output root",
@@ -5211,8 +5272,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
             if 4 in selected:
-                assert profile_path is not None
-                self._load_pipeline_initial_profile(profile_path)
+                if profile_path is not None:
+                    self._load_pipeline_initial_profile(profile_path)
                 if optimization_calibration_input is not None:
                     self._load_pipeline_optimization_calibration(
                         optimization_calibration_input
@@ -5382,7 +5443,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     else optimization_calibration_input
                 )
                 assert calibration_path is not None
-                assert profile_path is not None
                 assert center_wl is not None
                 assert channel_width is not None
                 assert gap_px is not None
@@ -5396,7 +5456,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     channel_width_px=channel_width,
                     gap_px=gap_px,
                 )
-                initial_l = self._load_pipeline_initial_profile(profile_path)
+                if profile_path is not None:
+                    initial_l = self._load_pipeline_initial_profile(profile_path)
+                else:
+                    assert direct_initial_profile is not None
+                    initial_l = direct_initial_profile.copy()
 
                 def report_optimization(progress: OptimizationProgress) -> None:
                     self.edge_optimization_progress.emit(progress)
