@@ -266,6 +266,7 @@ def measure_pair_grids(
     repeats: int = 1,
     settle: float = 0.15,
     read_timeout: float = 30.0,
+    col_ratio: np.ndarray | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> TPAPairResult:
@@ -276,7 +277,10 @@ def measure_pair_grids(
     full outer-product grid of ``sweep`` x ``sweep`` is measured ``n_trials``
     times (all other channels held off), then the pair's grid is fit to the TPA
     model.  ``settle`` seconds are waited after every pattern change before
-    reading.  Raises :class:`TPAPairAborted` if ``stop_event`` is set.
+    reading.  ``col_ratio`` is the per-column encoding shape forwarded to
+    :func:`encode_to_pattern` so the calibration is measured with the same
+    channel taper that will be deployed (``None`` = flat band).  Raises
+    :class:`TPAPairAborted` if ``stop_event`` is set.
     """
     sweep_arr = np.asarray(list(sweep), dtype=float)
     grid_pts = [(float(x), float(w)) for x in sweep_arr for w in sweep_arr]
@@ -311,7 +315,8 @@ def measure_pair_grids(
                 w_vals = zeros.copy()
                 x_vals[i] = x_val
                 w_vals[i] = w_val
-                pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height)
+                pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width,
+                                            slm_height, col_ratio=col_ratio)
                 slm.display_array(pattern)
                 if settle:
                     time.sleep(settle)

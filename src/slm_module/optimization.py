@@ -81,6 +81,41 @@ def independent_intensity_profile(values: Sequence[float]) -> np.ndarray:
     return half
 
 
+def round_encoding_profile(values: Sequence[float], threshold: float = 0.99) -> np.ndarray:
+    """Snap intensity ratios above ``threshold`` up to exactly 1.0.
+
+    The live OSA optimiser leaves near-flat columns at values such as 0.998; the
+    difference quantises to the same SLM level as 1.0 anyway, so rounding gives a
+    clean flat top and a profile that is easy to read and to reason about.
+    """
+    profile = np.asarray(values, dtype=float).copy()
+    profile[profile > float(threshold)] = 1.0
+    return profile
+
+
+# Learned encoding shape from encoding/2026-07-03_run162902/best_so_far.json
+# (stage3_rerank: the crosstalk + modulation-fidelity optimum), with every value
+# > 0.99 rounded up to 1.0. These are the eight independent intensity ratios for
+# the 15-pixel channel; ``mirror_intensity_profile`` expands them to the full,
+# symmetric per-column profile used by ``encode_to_pattern(col_ratio=...)``.
+OPTIMIZED_ENCODING_SHAPE = round_encoding_profile(
+    (
+        0.3847935183091822,
+        0.6138519649340355,
+        0.7910183260349569,
+        1.0,
+        0.9981799670282598,
+        1.0,
+        0.9968928821893347,
+        1.0,
+    )
+)
+
+# The trivial rectangular ("flat band") encoding: the A/B baseline the optimised
+# shape is compared against.
+FLAT_ENCODING_SHAPE = np.ones(OPTIMIZED_ENCODING_SHAPE.shape[0], dtype=float)
+
+
 def amplitudes_to_intensity_commands(
     x_amplitudes: Sequence[float],
     w_amplitudes: Sequence[float],

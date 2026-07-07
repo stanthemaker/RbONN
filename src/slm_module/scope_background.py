@@ -168,6 +168,7 @@ def measure_scatter_background(
     sides: Sequence[str] = ("x", "w"),
     settle: float | None = None,
     capture_dir: str | Path | None = None,
+    col_ratio: np.ndarray | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> BackgroundResult:
@@ -229,7 +230,8 @@ def measure_scatter_background(
 
     # ---- dark / baseline: all channels off --------------------------------
     _check_stop()
-    bg_pattern = encode_to_pattern(zeros, zeros, layout, slm_width, slm_height)
+    bg_pattern = encode_to_pattern(zeros, zeros, layout, slm_width, slm_height,
+                                   col_ratio=col_ratio)
     slm.display_array(bg_pattern)
     time.sleep(settle_s)
     dark_vals = np.array([_read_mean() for _ in range(max(1, dark_samples))])
@@ -266,7 +268,8 @@ def measure_scatter_background(
                 x_vals[i] = float(level)
             else:
                 w_vals[i] = float(level)
-            pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height)
+            pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width,
+                                        slm_height, col_ratio=col_ratio)
             means[k], stds[k] = _display_and_read(pattern)
             if progress_callback is not None:
                 progress_callback(

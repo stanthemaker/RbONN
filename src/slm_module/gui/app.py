@@ -20,6 +20,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from daq_module.controller import DAQController, DAQMonitorSettings
 from osa_module.controller import MeasurementSettings, OSAController
+from osa_module.driver import OSAError
 from scope_module.controller import (
     MonitorSample,
     MonitorSettings,
@@ -56,10 +57,12 @@ from ..generator import (
 from ..analysis import (
     AnalysisAborted,
     AnalysisProgress,
+    ChannelSpectrum,
     EncodingGain,
     ModulationErrorResult,
     encoding_gain,
     measure_channel_spectra,
+    measure_one_channel,
     write_analysis_csv,
     write_gain_csv,
 )
@@ -72,6 +75,7 @@ from ..encoding import (
     optimize_from_osa,
 )
 from ..optimization import (
+    OPTIMIZED_ENCODING_SHAPE,
     OSAOptimizationConfig,
     OptimizationAborted,
     OptimizationProgress,
@@ -79,6 +83,7 @@ from ..optimization import (
     independent_intensity_profile,
     amplitudes_to_intensity_commands,
     load_optimization_result,
+    mirror_intensity_profile,
     validate_independent_profile,
 )
 from ..tpa_pair import (
@@ -578,6 +583,8 @@ class MainWindow(QtWidgets.QMainWindow):
     tpa_progress = QtCore.pyqtSignal(object)
     edge_gain_progress = QtCore.pyqtSignal(int, int, str)
     edge_optimization_progress = QtCore.pyqtSignal(object)
+    qt_test_progress = QtCore.pyqtSignal(int, int, str)
+    osa_trace_ready = QtCore.pyqtSignal(object)
     monitor_sample = QtCore.pyqtSignal(object)
     hold_progress = QtCore.pyqtSignal(int, int)
 
@@ -615,6 +622,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edge_optimization_result: OptimizationResult | None = None
         self._pipeline_optimization_active = False
         self.edge_gain_stop_event: threading.Event | None = None
+        self._qt_test: dict[str, ChannelSpectrum] | None = None  # quick-test A/B result
+        self.qt_test_stop_event: threading.Event | None = None
+        self.osa_view_trace = None                # last OSA viewer trace (for save)
+        self.osa_view_stop_event: threading.Event | None = None
         self._enc_wheel_step = 0.2   # scroll sensitivity for channel value cells
         self._enc_calib_override: CalibrationResult | None = None
         self.analysis_result: ModulationErrorResult | None = None
@@ -643,6 +654,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpa_progress.connect(self._on_tpa_progress)
         self.edge_gain_progress.connect(self._edge_gain_progress)
         self.edge_optimization_progress.connect(self._edge_optimization_progress)
+        self.qt_test_progress.connect(self._qt_test_progress)
+        self.osa_trace_ready.connect(self._osa_view_on_trace)
         self.monitor_sample.connect(self._on_monitor_sample)
         self.hold_progress.connect(self._on_hold_progress)
 
@@ -676,8 +689,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ("\N{LEFT RIGHT ARROW}  Center Scan", "Sweep a window across x"),
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
             ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding + scope/DAQ readout"),
-            ("\N{DOWNWARDS ARROW WITH TIP RIGHTWARDS}  Edge Ratio",
-             "Per-column edge-taper ratio + OSA optimisation hook"),
+            ("\N{DOWNWARDS ARROW WITH TIP RIGHTWARDS}  Shape",
+             "Global per-column encoding shape (applied to all encoding "
+             "+ calibration) + OSA optimisation hook"),
+            ("\N{WHITE HEAVY CHECK MARK}  Quick Test",
+             "A/B crosstalk test: flat vs optimised encoding shape from OSA data"),
+            ("\N{SATELLITE ANTENNA}  OSA Viewer",
+             "Live OSA spectrum viewer: single / continuous sweeps with settings"),
         )
         for label, tooltip in nav_items:
             item = QtWidgets.QListWidgetItem(label)
@@ -694,6 +712,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack.addWidget(self._build_segments_page())
         self.stack.addWidget(self._build_tpa_page())
         self.stack.addWidget(self._build_edge_ratio_page())
+        self.stack.addWidget(self._build_quick_test_page())
+        self.stack.addWidget(self._build_osa_viewer_page())
 
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
@@ -2833,7 +2853,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             pattern = encode_to_pattern(
                 x_vals, w_vals, layout, slm_w, slm_h,
-                col_ratio=self._edge_get_ratio(),
+                col_ratio=self._active_col_ratio(),
             )
         except Exception as exc:
             self.enc_status_label.setText(f"Encoding error: {exc}")
@@ -2999,22 +3019,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._enc_acquire_sample(label="manual", on_finish=self._sync_monitor_source)
 
     # ==================================================================
-    # Edge Ratio page: per-column edge-taper ratio + OSA optimisation hook
+    # Shape page: global per-column encoding shape + OSA optimisation hook
     # ==================================================================
 
     def _build_edge_ratio_page(self) -> QtWidgets.QWidget:
-        page = self._page_shell("Edge Ratio")
+        page = self._page_shell("Encoding Shape")
 
         subtitle = QtWidgets.QLabel(
-            "Shape the profile inside each channel with a per-column intensity ratio. "
-            "Column j encodes level_for(intensity command × ratio[j]), i.e. "
-            "edge = ratio × (max − min) + min, where min is the channel's measured "
-            "background. All-1.0 reproduces the flat band. Build a layout on the "
-            "TPA Encoding page first (channel width sets the number of columns)."
+            "Global per-column encoding shape, applied to every encoding step — "
+            "data encoding, the Modulation Error and TPA calibrations, and the "
+            "Quick Test all use it, so calibration is done with the same channel "
+            "shape that is deployed. Column j encodes level_for(intensity command "
+            "× ratio[j]), i.e. edge = ratio × (max − min) + min, where min is the "
+            "channel's measured background. A 15 px channel defaults to the learned "
+            "optimised shape (tapered edges); “All 1.0” reproduces the flat band. "
+            "Build a layout on the TPA Encoding page first (channel width sets the "
+            "number of columns)."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
         page.layout().addWidget(subtitle)
+
+        # --- master on/off: shape vs flat band -----------------------------
+        self.shape_enabled_check = QtWidgets.QCheckBox(
+            "Use encoding shape  (uncheck → flat band everywhere)"
+        )
+        self.shape_enabled_check.setChecked(True)
+        self.shape_enabled_check.setToolTip(
+            "Global switch. On: every encoding step uses the per-column shape "
+            "below. Off: every step uses the flat band (col_ratio = None), as if "
+            "the shape were all 1.0 — the table is kept but ignored."
+        )
+        self.shape_enabled_check.toggled.connect(self._edge_on_toggle)
+        page.layout().addWidget(self.shape_enabled_check)
 
         # --- per-column ratio table (1 row, channel_width_px columns) ---
         self._edge_spins: list[WheelSpinBox] = []
@@ -3023,15 +3060,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.edge_table = QtWidgets.QTableWidget(1, 0)
         self.edge_table.verticalHeader().setVisible(False)
-        self.edge_table.setMaximumHeight(90)
+        # one data row of spin editors: pin the row height and give the widget a
+        # fixed overall height (header + row + horizontal scrollbar) so a squeezed
+        # splitter can never clip the single row.
+        self.edge_table.verticalHeader().setDefaultSectionSize(34)
+        self.edge_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.edge_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.edge_table.setFixedHeight(104)
         self.edge_table.setToolTip(
             "Ratio per column across the channel width (left→right). 1.0 = full "
             "value, 0.0 = channel's measured background."
         )
 
         edge_buttons = QtWidgets.QHBoxLayout()
+        edge_opt = QtWidgets.QPushButton("Optimized shape")
+        edge_opt.setProperty("variant", "ghost")
+        edge_opt.setToolTip(
+            "Load the learned optimised encoding shape (from best_so_far.json, "
+            ">0.99 rounded to 1.0). Defined for a 15 px channel."
+        )
+        edge_opt.clicked.connect(self._edge_set_optimized)
         edge_all1 = QtWidgets.QPushButton("All 1.0")
         edge_all1.setProperty("variant", "ghost")
+        edge_all1.setToolTip("Flat band (the trivial rectangular encoding)")
         edge_all1.clicked.connect(lambda: self._edge_set_all(1.0))
         edge_cos = QtWidgets.QPushButton("Cosine taper…")
         edge_cos.setProperty("variant", "ghost")
@@ -3042,6 +3093,7 @@ class MainWindow(QtWidgets.QMainWindow):
         edge_mirror.setToolTip("Copy the left half onto the right half (symmetric profile)")
         edge_mirror.clicked.connect(self._edge_mirror)
         edge_buttons.addWidget(self.edge_width_label, 1)
+        edge_buttons.addWidget(edge_opt)
         edge_buttons.addWidget(edge_all1)
         edge_buttons.addWidget(edge_cos)
         edge_buttons.addWidget(edge_mirror)
@@ -3072,7 +3124,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edge_gain_button = QtWidgets.QPushButton("Measure encoding gain")
         self.edge_gain_button.setToolTip(
             "Run the Modulation Error sweep twice — flat baseline then the current "
-            "edge-ratio profile — and report the per-channel change in neighbour "
+            "encoding shape — and report the per-channel change in neighbour "
             "leakage and in-band fraction. Needs OSA + SLM connected and a layout "
             "built. Uses the sweep settings on Calibration ▸ Step 4."
         )
@@ -3148,7 +3200,10 @@ class MainWindow(QtWidgets.QMainWindow):
         split.addWidget(ratio_panel)
         split.addWidget(preview_panel)
         split.addWidget(gain_panel)
-        split.setSizes([150, 220, 320])
+        # the ratio panel holds a fixed-height table + buttons; keep it from being
+        # collapsed so the single spin row is always fully visible
+        split.setCollapsible(0, False)
+        split.setSizes([200, 220, 320])
         page.layout().addWidget(split, 1)
 
         self._edge_draw_preview()
@@ -3158,14 +3213,29 @@ class MainWindow(QtWidgets.QMainWindow):
         stamp = time.strftime("%H:%M:%S")
         self.edge_log.appendPlainText(f"[{stamp}] {message}")
 
-    def _edge_sync_layout(self, layout: ChannelLayout) -> None:
-        """Rebuild the ratio table to the layout's channel width (default 1.0).
+    def _default_col_ratio(self, width: int) -> np.ndarray:
+        """Default per-column profile for a channel ``width`` px wide.
 
-        Overlapping columns keep their previous values so tweaking the layout
-        does not silently discard a tuned profile.
+        Returns the learned :data:`OPTIMIZED_ENCODING_SHAPE` mirrored to the full
+        channel width when the width matches the 15-px channel the shape was
+        trained on; any other width falls back to the flat band (all 1.0).
+        """
+        expected = OPTIMIZED_ENCODING_SHAPE.size * 2 - 1
+        if int(width) == expected:
+            return mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, int(width))
+        return np.ones(int(width), dtype=float)
+
+    def _edge_sync_layout(self, layout: ChannelLayout) -> None:
+        """Rebuild the ratio table to the layout's channel width.
+
+        Fresh columns start at the learned optimised encoding shape (the flat
+        band for widths other than 15 px). Overlapping columns keep their
+        previous values so tweaking the layout does not silently discard a tuned
+        profile.
         """
         width = int(layout.channel_width_px)
         prev = self._edge_get_ratio()
+        default = self._default_col_ratio(width)
         self.edge_table.clear()
         self.edge_table.setColumnCount(width)
         self.edge_table.setHorizontalHeaderLabels([str(j) for j in range(width)])
@@ -3175,7 +3245,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spin.setRange(0.0, 1.0)
             spin.setSingleStep(0.01)
             spin.setDecimals(3)
-            value = float(prev[j]) if prev is not None and j < len(prev) else 1.0
+            value = float(prev[j]) if prev is not None and j < len(prev) else float(default[j])
             spin.setValue(value)
             spin.setFrame(False)
             spin.valueChanged.connect(lambda _=None: self._edge_draw_preview())
@@ -3186,6 +3256,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Channel width: {width} px  ({layout.n_channels} channels/side)"
         )
         self._edge_draw_preview()
+        self._qt_sync_layout(layout)
 
     def _edge_get_ratio(self) -> np.ndarray | None:
         """Current per-column ratio profile, or None when no layout is built."""
@@ -3194,9 +3265,51 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return np.array([s.value() for s in spins], dtype=float)
 
+    def _active_col_ratio(self) -> np.ndarray | None:
+        """The global encoding shape applied to every encoding step.
+
+        Single source of truth taken from the Shape page: data encoding, the
+        Modulation Error and TPA calibrations, and the Quick Test all read it, so
+        calibration is performed with the same channel shape that is deployed.
+        Returns ``None`` (the flat band) when the shape toggle is off or no
+        layout/profile has been built.
+        """
+        toggle = getattr(self, "shape_enabled_check", None)
+        if toggle is not None and not toggle.isChecked():
+            return None
+        return self._edge_get_ratio()
+
+    def _edge_on_toggle(self, checked: bool) -> None:
+        """Master shape switch: grey the table when off and redraw the preview."""
+        if hasattr(self, "edge_table"):
+            self.edge_table.setEnabled(checked)
+        self._edge_draw_preview()
+        self._edge_log(
+            "Encoding shape ON — applied to every encoding step."
+            if checked else
+            "Encoding shape OFF — flat band used everywhere (table kept, ignored)."
+        )
+
     def _edge_set_all(self, value: float) -> None:
         for spin in getattr(self, "_edge_spins", []):
             spin.setValue(float(value))
+
+    def _edge_set_optimized(self) -> None:
+        """Fill the ratio table with the learned optimised encoding shape."""
+        spins = getattr(self, "_edge_spins", [])
+        width = len(spins)
+        if width == 0:
+            self._edge_log("Build a layout on the TPA Encoding page first.")
+            return
+        ratio = self._default_col_ratio(width)
+        if width != OPTIMIZED_ENCODING_SHAPE.size * 2 - 1:
+            self._edge_log(
+                f"Optimised shape is defined for a 15 px channel; width {width} "
+                "px falls back to the flat band."
+            )
+        for spin, r in zip(spins, ratio):
+            spin.setValue(float(r))
+        self._edge_log("Loaded optimised encoding shape into the per-column ratio.")
 
     def _edge_apply_cosine(self) -> None:
         spins = getattr(self, "_edge_spins", [])
@@ -3255,6 +3368,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ax.tick_params(colors="#d8dee9", labelsize=7)
             for spine in ax.spines.values():
                 spine.set_color("#41515c")
+        toggle = getattr(self, "shape_enabled_check", None)
+        if toggle is not None and not toggle.isChecked():
+            ax.set_title("SHAPE OFF — flat band in use", color="#bf616a", fontsize=9)
         self.edge_figure.patch.set_facecolor("#101820")
         ax.set_facecolor("#101820")
         self.edge_canvas.draw_idle()
@@ -3576,6 +3692,588 @@ class MainWindow(QtWidgets.QMainWindow):
             self._edge_log(f"Save failed: {exc}")
 
     # ==================================================================
+    # Quick Test page: A/B crosstalk (flat vs optimised encoding shape)
+    # ==================================================================
+
+    def _build_quick_test_page(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Quick Test · Encoding-shape crosstalk")
+        subtitle = QtWidgets.QLabel(
+            "Turn on a single channel and sweep the OSA once with the flat band and "
+            "once with the optimised encoding shape, then compute the crosstalk into "
+            "the neighbour bands from each trace. Build a 15 px layout on the TPA "
+            "Encoding page first. OSA sweep settings (span, sensitivity, Y-unit) are "
+            "taken from the Modulation Error page."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- test target controls ---
+        cfg = self._panel("Test Target")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.qt_side_combo = QtWidgets.QComboBox()
+        self.qt_side_combo.addItems(["x", "w"])
+        self.qt_side_combo.setToolTip("Which side of the grid to probe (x or w)")
+        self.qt_index_spin = self._spin(0, 63, 0)
+        self.qt_index_spin.setToolTip("Channel index on that side (0 = nearest centre)")
+        self.qt_averages = self._spin(1, 20, 1)
+        self.qt_bg_check = QtWidgets.QCheckBox("Subtract background")
+        self.qt_bg_check.setChecked(True)
+        self.qt_bg_check.setToolTip(
+            "Take an all-off trace at the channel centre and subtract it for a "
+            "cleaner low-level crosstalk floor"
+        )
+        grid.addWidget(QtWidgets.QLabel("Side"), 0, 0)
+        grid.addWidget(self.qt_side_combo, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Channel index"), 0, 2)
+        grid.addWidget(self.qt_index_spin, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Averages"), 0, 4)
+        grid.addWidget(self.qt_averages, 0, 5)
+        grid.addWidget(self.qt_bg_check, 1, 0, 1, 3)
+        page.layout().addWidget(cfg)
+
+        self.qt_layout_label = QtWidgets.QLabel(
+            "Grid: (build a layout on the TPA Encoding page)"
+        )
+        self.qt_layout_label.setObjectName("PageSubtitle")
+        self.qt_layout_label.setWordWrap(True)
+        page.layout().addWidget(self.qt_layout_label)
+
+        # --- run controls ---
+        run_row = QtWidgets.QHBoxLayout()
+        self.qt_run_button = QtWidgets.QPushButton("Run A/B crosstalk test")
+        self.qt_run_button.clicked.connect(self._qt_run)
+        self.qt_stop_button = QtWidgets.QPushButton("Stop")
+        self.qt_stop_button.setProperty("variant", "danger")
+        self.qt_stop_button.setEnabled(False)
+        self.qt_stop_button.clicked.connect(self._qt_stop)
+        self.qt_save_button = QtWidgets.QPushButton("Save test CSV…")
+        self.qt_save_button.setProperty("variant", "ghost")
+        self.qt_save_button.setEnabled(False)
+        self.qt_save_button.clicked.connect(self._qt_save)
+        run_row.addWidget(self.qt_run_button)
+        run_row.addWidget(self.qt_stop_button)
+        run_row.addWidget(self.qt_save_button)
+        run_row.addStretch(1)
+
+        self.qt_bar = QtWidgets.QProgressBar()
+        self.qt_bar.setValue(0)
+        self.qt_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.qt_status.setWordWrap(True)
+
+        # --- results table (metric | flat | optimised | Δ) ---
+        self.qt_table = QtWidgets.QTableWidget(0, 4)
+        self.qt_table.setHorizontalHeaderLabels(["Metric", "Flat", "Optimized", "Δ"])
+        self.qt_table.verticalHeader().setVisible(False)
+        self.qt_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.qt_table.setAlternatingRowColors(True)
+        self.qt_table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.Stretch
+        )
+
+        # --- overlaid spectra plot ---
+        self.qt_figure = Figure(figsize=(10, 2.8), tight_layout=True)
+        self.qt_canvas = FigureCanvas(self.qt_figure)
+        self.qt_canvas.setMinimumHeight(200)
+
+        results = self._panel("A/B crosstalk from OSA data")
+        results_layout = QtWidgets.QVBoxLayout(results)
+        results_layout.addLayout(run_row)
+        results_layout.addWidget(self.qt_bar)
+        results_layout.addWidget(self.qt_status)
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        split.addWidget(self.qt_table)
+        split.addWidget(self.qt_canvas)
+        split.setSizes([260, 240])
+        results_layout.addWidget(split, 1)
+        page.layout().addWidget(results, 1)
+
+        self._qt_draw(None, None)
+        return page
+
+    def _qt_sync_layout(self, layout: ChannelLayout) -> None:
+        """Refresh the quick-test target range/label when a layout is built."""
+        spin = getattr(self, "qt_index_spin", None)
+        if spin is None:
+            return
+        spin.setMaximum(max(0, layout.n_channels - 1))
+        note = "" if layout.channel_width_px == 15 else "  (not 15 px — shape is flat)"
+        self.qt_layout_label.setText(
+            f"Grid: {layout.n_channels} channels/side · {layout.channel_width_px} px "
+            f"wide · center {layout.center_wl:.3f} nm{note}"
+        )
+
+    def _qt_set_running(self, running: bool) -> None:
+        self.qt_run_button.setEnabled(not running)
+        self.qt_stop_button.setEnabled(running)
+        self.qt_save_button.setEnabled(not running and self._qt_test is not None)
+
+    def _qt_run(self) -> None:
+        layout = self.encoding_layout
+        if layout is None:
+            self.qt_status.setText("No channel grid — build one on the TPA Encoding page.")
+            return
+        osa = self._osa_ready()
+        if osa is None:
+            self.qt_status.setText("Connect the OSA (Connections page) first.")
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.qt_status.setText("Open the SLM (Connections page) first.")
+            return
+        side = self.qt_side_combo.currentText()
+        index = self.qt_index_spin.value()
+        if index >= layout.n_channels:
+            self.qt_status.setText(
+                f"Channel index {index} is out of range (0–{layout.n_channels - 1})."
+            )
+            return
+        opt_ratio = self._default_col_ratio(layout.channel_width_px)
+        if layout.channel_width_px != 15:
+            self.qt_status.setText(
+                "Layout is not 15 px wide — the optimised shape is unavailable, so "
+                "both arms would be flat. Build a 15 px layout first."
+            )
+            return
+
+        settings = self._ana_settings()
+        averages = self.qt_averages.value()
+        subtract_bg = self.qt_bg_check.isChecked()
+        stop_event = threading.Event()
+        self.qt_test_stop_event = stop_event
+        self._qt_set_running(True)
+        self.qt_bar.setRange(0, 2)
+        self.qt_bar.setValue(0)
+        self.qt_status.setText(f"Measuring {side}[{index}] — flat baseline…")
+
+        def measure(col_ratio):
+            return measure_one_channel(
+                osa, controller, layout, settings,
+                side=side, index=index, averages=averages,
+                subtract_background=subtract_bg, col_ratio=col_ratio,
+                stop_event=stop_event,
+            )
+
+        def work() -> dict[str, Any]:
+            self.qt_test_progress.emit(0, 2, f"{side}[{index}] flat baseline…")
+            flat = measure(None)
+            if stop_event.is_set():
+                return {"status": "aborted"}
+            self.qt_test_progress.emit(1, 2, f"{side}[{index}] optimised shape…")
+            optimized = measure(opt_ratio)
+            if stop_event.is_set():
+                return {"status": "aborted"}
+            self.qt_test_progress.emit(2, 2, "computing crosstalk…")
+            return {"status": "ok", "flat": flat, "optimized": optimized}
+
+        self._run_slm_task(
+            "Quick crosstalk A/B test", work, self._qt_finished, self._qt_error
+        )
+
+    def _qt_stop(self) -> None:
+        if self.qt_test_stop_event is not None:
+            self.qt_test_stop_event.set()
+            self.qt_status.setText("Stopping…")
+
+    def _qt_test_progress(self, done: int, total: int, message: str) -> None:
+        self.qt_bar.setMaximum(total)
+        self.qt_bar.setValue(done)
+        self.qt_status.setText(f"[{done}/{total}] {message}")
+
+    def _qt_finished(self, payload: dict[str, Any]) -> None:
+        self.qt_test_stop_event = None
+        self._qt_set_running(False)
+        if payload.get("status") == "aborted":
+            self.qt_bar.setValue(0)
+            self.qt_status.setText("Stopped — partial test discarded.")
+            return
+        flat = payload["flat"]
+        optimized = payload["optimized"]
+        self._qt_test = {"flat": flat, "optimized": optimized}
+        self.qt_bar.setValue(self.qt_bar.maximum())
+        self._qt_populate(flat, optimized)
+        self._qt_draw(flat, optimized)
+        self.qt_save_button.setEnabled(True)
+
+    def _qt_error(self, _error: str) -> None:
+        self.qt_test_stop_event = None
+        self._qt_set_running(False)
+        self.qt_bar.setValue(0)
+        self.qt_status.setText("Quick test failed (see Status log).")
+
+    @staticmethod
+    def _qt_metric_rows(
+        flat: ChannelSpectrum, optimized: ChannelSpectrum
+    ) -> list[tuple[str, str, str, str]]:
+        """Comparison rows: (metric label, flat, optimised, Δ). Δ in pp for %."""
+        def pp(a: float, b: float) -> str:
+            return f"{(b - a) * 100:+.3f}"
+
+        return [
+            ("Peak λ (nm)", f"{flat.peak_wl_nm:.4f}", f"{optimized.peak_wl_nm:.4f}",
+             f"{optimized.peak_wl_nm - flat.peak_wl_nm:+.4f}"),
+            ("FWHM (nm)", f"{flat.fwhm_nm:.4f}", f"{optimized.fwhm_nm:.4f}",
+             f"{optimized.fwhm_nm - flat.fwhm_nm:+.4f}"),
+            ("In-band %", f"{flat.in_band_fraction * 100:.2f}",
+             f"{optimized.in_band_fraction * 100:.2f}",
+             pp(flat.in_band_fraction, optimized.in_band_fraction)),
+            ("Neighbour leak ±1 %", f"{flat.neighbor_leakage * 100:.3f}",
+             f"{optimized.neighbor_leakage * 100:.3f}",
+             pp(flat.neighbor_leakage, optimized.neighbor_leakage)),
+            ("Total crosstalk %", f"{flat.total_crosstalk * 100:.3f}",
+             f"{optimized.total_crosstalk * 100:.3f}",
+             pp(flat.total_crosstalk, optimized.total_crosstalk)),
+            ("xtalk −1 %", f"{flat.crosstalk.get(-1, 0.0) * 100:.3f}",
+             f"{optimized.crosstalk.get(-1, 0.0) * 100:.3f}",
+             pp(flat.crosstalk.get(-1, 0.0), optimized.crosstalk.get(-1, 0.0))),
+            ("xtalk +1 %", f"{flat.crosstalk.get(1, 0.0) * 100:.3f}",
+             f"{optimized.crosstalk.get(1, 0.0) * 100:.3f}",
+             pp(flat.crosstalk.get(1, 0.0), optimized.crosstalk.get(1, 0.0))),
+            ("xtalk −2 %", f"{flat.crosstalk.get(-2, 0.0) * 100:.3f}",
+             f"{optimized.crosstalk.get(-2, 0.0) * 100:.3f}",
+             pp(flat.crosstalk.get(-2, 0.0), optimized.crosstalk.get(-2, 0.0))),
+            ("xtalk +2 %", f"{flat.crosstalk.get(2, 0.0) * 100:.3f}",
+             f"{optimized.crosstalk.get(2, 0.0) * 100:.3f}",
+             pp(flat.crosstalk.get(2, 0.0), optimized.crosstalk.get(2, 0.0))),
+        ]
+
+    def _qt_populate(self, flat: ChannelSpectrum, optimized: ChannelSpectrum) -> None:
+        rows = self._qt_metric_rows(flat, optimized)
+        self.qt_table.setRowCount(len(rows))
+        for r, cells in enumerate(rows):
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c > 0:
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.qt_table.setItem(r, c, item)
+        d_total = optimized.total_crosstalk - flat.total_crosstalk
+        verdict = "reduces" if d_total < 0 else "does not reduce"
+        summary = (
+            f"{optimized.side}[{optimized.index}] @ {flat.nominal_wl_nm:.3f} nm  ·  "
+            f"total crosstalk {flat.total_crosstalk * 100:.3f}% → "
+            f"{optimized.total_crosstalk * 100:.3f}% (Δ {d_total * 100:+.3f} pp)  ·  "
+            f"in-band {flat.in_band_fraction * 100:.1f}% → "
+            f"{optimized.in_band_fraction * 100:.1f}%"
+        )
+        self.qt_status.setText(f"Optimised shape {verdict} crosstalk — {summary}")
+
+    def _qt_draw(
+        self, flat: ChannelSpectrum | None, optimized: ChannelSpectrum | None
+    ) -> None:
+        self.qt_figure.clear()
+        ax = self.qt_figure.add_subplot(111)
+        if flat is None or optimized is None:
+            ax.text(0.5, 0.5, "Run a test to compare spectra",
+                    ha="center", va="center", color="#d8dee9", fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+        else:
+            ax.plot(flat.wavelengths_nm, flat.signal_w * 1e6,
+                    color="#88c0d0", linewidth=1.4, label="flat")
+            ax.plot(optimized.wavelengths_nm, optimized.signal_w * 1e6,
+                    color="#ebcb8b", linewidth=1.4, label="optimized")
+            pitch_nm = self.encoding_layout.pitch_px * self.encoding_layout.nm_per_px \
+                if self.encoding_layout is not None else 0.0
+            for offset in (-2, -1, 1, 2):
+                ax.axvline(flat.peak_wl_nm + offset * pitch_nm,
+                           color="#4c566a", linewidth=0.8, linestyle=":")
+            ax.set_xlabel("wavelength (nm)", color="#d8dee9", fontsize=8)
+            ax.set_ylabel("power (µW)", color="#d8dee9", fontsize=8)
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.2)
+            ax.tick_params(colors="#d8dee9", labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color("#41515c")
+        self.qt_figure.patch.set_facecolor("#101820")
+        ax.set_facecolor("#101820")
+        self.qt_canvas.draw_idle()
+
+    def _qt_save(self) -> None:
+        if self._qt_test is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save quick test", "quick_crosstalk_test.csv", "CSV (*.csv)")
+        if not path:
+            return
+        flat = self._qt_test["flat"]
+        optimized = self._qt_test["optimized"]
+        try:
+            import csv as _csv
+
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                writer = _csv.writer(handle)
+                writer.writerow(
+                    ["channel", f"{optimized.side}{optimized.index}",
+                     "nominal_wl_nm", f"{flat.nominal_wl_nm:.5f}"]
+                )
+                writer.writerow(["metric", "flat", "optimized", "delta"])
+                for cells in self._qt_metric_rows(flat, optimized):
+                    writer.writerow(cells)
+            self._log(f"Saved quick test → {path}")
+        except Exception as exc:
+            self._log(f"Save failed: {exc}")
+
+    # ==================================================================
+    # OSA Viewer page: live spectrum viewer (single / continuous sweeps)
+    # ==================================================================
+
+    def _build_osa_viewer_page(self) -> QtWidgets.QWidget:
+        page = self._page_shell("OSA Viewer")
+        subtitle = QtWidgets.QLabel(
+            "Live optical-spectrum viewer. Set the sweep parameters, then take a "
+            "single sweep or run continuously. Connect the OSA on the Connections "
+            "page first. Values use the instrument's unit-suffixed format "
+            "(e.g. 778nm, 8nm, 10uW)."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep parameters ---
+        cfg = self._panel("Sweep Parameters")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.osv_center = QtWidgets.QLineEdit("778nm")
+        self.osv_center.setToolTip("Center wavelength (e.g. 778nm)")
+        self.osv_span = QtWidgets.QLineEdit("8nm")
+        self.osv_span.setToolTip("Span (e.g. 8nm, 0.8nm)")
+        self.osv_sensitivity = QtWidgets.QComboBox()
+        self.osv_sensitivity.addItems(["NORM", "MID", "HIGH1", "HIGH2", "HIGH3"])
+        self.osv_sensitivity.setCurrentText("HIGH2")
+        self.osv_points = QtWidgets.QLineEdit("1001")
+        self.osv_points.setToolTip("Sampling points: AUTO or a count like 1001")
+        self.osv_ref_level = QtWidgets.QLineEdit("10uW")
+        self.osv_yunit = QtWidgets.QComboBox()
+        self.osv_yunit.addItems(["LIN (W)", "LOG (dBm)"])
+        self.osv_averages = self._spin(1, 50, 1)
+        grid.addWidget(QtWidgets.QLabel("Center"), 0, 0)
+        grid.addWidget(self.osv_center, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Span"), 0, 2)
+        grid.addWidget(self.osv_span, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Sensitivity"), 0, 4)
+        grid.addWidget(self.osv_sensitivity, 0, 5)
+        grid.addWidget(QtWidgets.QLabel("Points"), 1, 0)
+        grid.addWidget(self.osv_points, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Ref level"), 1, 2)
+        grid.addWidget(self.osv_ref_level, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Y unit"), 1, 4)
+        grid.addWidget(self.osv_yunit, 1, 5)
+        grid.addWidget(QtWidgets.QLabel("Averages"), 2, 0)
+        grid.addWidget(self.osv_averages, 2, 1)
+        page.layout().addWidget(cfg)
+
+        # --- controls ---
+        ctrl = QtWidgets.QHBoxLayout()
+        self.osv_single_button = QtWidgets.QPushButton("Single sweep")
+        self.osv_single_button.clicked.connect(self._osa_view_single)
+        self.osv_cont_button = QtWidgets.QPushButton("Continuous")
+        self.osv_cont_button.setCheckable(True)
+        self.osv_cont_button.setToolTip("Sweep repeatedly until stopped")
+        self.osv_cont_button.clicked.connect(self._osa_view_continuous)
+        self.osv_stop_button = QtWidgets.QPushButton("Stop")
+        self.osv_stop_button.setProperty("variant", "danger")
+        self.osv_stop_button.setEnabled(False)
+        self.osv_stop_button.clicked.connect(self._osa_view_stop)
+        self.osv_save_button = QtWidgets.QPushButton("Save trace…")
+        self.osv_save_button.setProperty("variant", "ghost")
+        self.osv_save_button.setEnabled(False)
+        self.osv_save_button.clicked.connect(self._osa_view_save)
+        self.osv_logy_check = QtWidgets.QCheckBox("Log Y axis")
+        self.osv_logy_check.setToolTip("Plot power on a log axis (LIN data only)")
+        self.osv_logy_check.toggled.connect(
+            lambda _=None: self._osa_view_plot(self.osa_view_trace)
+        )
+        ctrl.addWidget(self.osv_single_button)
+        ctrl.addWidget(self.osv_cont_button)
+        ctrl.addWidget(self.osv_stop_button)
+        ctrl.addWidget(self.osv_save_button)
+        ctrl.addWidget(self.osv_logy_check)
+        ctrl.addStretch(1)
+        page.layout().addLayout(ctrl)
+
+        self.osv_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.osv_status.setWordWrap(True)
+        page.layout().addWidget(self.osv_status)
+
+        # --- spectrum plot ---
+        self.osv_figure = Figure(figsize=(10, 4.2), tight_layout=True)
+        self.osv_canvas = FigureCanvas(self.osv_figure)
+        self.osv_canvas.setMinimumHeight(280)
+        plot_panel = self._panel("Spectrum")
+        plot_layout = QtWidgets.QVBoxLayout(plot_panel)
+        plot_layout.addWidget(self.osv_canvas, 1)
+        page.layout().addWidget(plot_panel, 1)
+
+        self._osa_view_plot(None)
+        return page
+
+    def _osa_view_settings(self) -> MeasurementSettings:
+        y_unit = "LOGarithmic" if self.osv_yunit.currentText().startswith("LOG") else "LINear"
+        return MeasurementSettings(
+            center_wl=self.osv_center.text().strip() or "778nm",
+            span=self.osv_span.text().strip() or "8nm",
+            sensitivity=self.osv_sensitivity.currentText(),
+            sampling_points=self.osv_points.text().strip() or "AUTO",
+            y_unit=y_unit,
+            reference_level=self.osv_ref_level.text().strip() or "10uW",
+        )
+
+    def _osa_view_set_running(self, running: bool, *, continuous: bool = False) -> None:
+        self.osv_single_button.setEnabled(not running)
+        self.osv_cont_button.setChecked(running and continuous)
+        self.osv_cont_button.setEnabled(not running or continuous)
+        self.osv_stop_button.setEnabled(running)
+        self.osv_save_button.setEnabled(not running and self.osa_view_trace is not None)
+
+    def _osa_view_single(self) -> None:
+        osa = self._osa_ready()
+        if osa is None:
+            self.osv_status.setText("Connect the OSA on the Connections page first.")
+            return
+        settings = self._osa_view_settings()
+        averages = self.osv_averages.value()
+        stop_event = threading.Event()
+        self.osa_view_stop_event = stop_event
+        self._osa_view_set_running(True)
+        self.osv_status.setText("Sweeping…")
+
+        def work() -> dict[str, Any]:
+            try:
+                trace = osa.measure(settings, averages=averages, stop_event=stop_event)
+            except OSAError as exc:
+                if stop_event.is_set():
+                    return {"status": "aborted"}
+                return {"status": "error", "message": str(exc)}
+            return {"status": "ok", "trace": trace}
+
+        self._run_task(
+            "OSA single sweep", work, self._osa_view_single_done, self._osa_view_error
+        )
+
+    def _osa_view_single_done(self, payload: dict[str, Any]) -> None:
+        self.osa_view_stop_event = None
+        self._osa_view_set_running(False)
+        status = payload.get("status")
+        if status == "aborted":
+            self.osv_status.setText("Stopped.")
+            return
+        if status == "error":
+            self.osv_status.setText(f"Sweep failed: {payload.get('message', '')}")
+            return
+        self._osa_view_on_trace(payload["trace"])
+
+    def _osa_view_continuous(self) -> None:
+        if not self.osv_cont_button.isChecked():
+            # toggled off by the user's click -> treat as stop
+            self._osa_view_stop()
+            return
+        osa = self._osa_ready()
+        if osa is None:
+            self.osv_cont_button.setChecked(False)
+            self.osv_status.setText("Connect the OSA on the Connections page first.")
+            return
+        settings = self._osa_view_settings()
+        averages = self.osv_averages.value()
+        stop_event = threading.Event()
+        self.osa_view_stop_event = stop_event
+        self._osa_view_set_running(True, continuous=True)
+        self.osv_status.setText("Continuous sweeping… press Stop to end.")
+
+        def work() -> dict[str, Any]:
+            try:
+                while not stop_event.is_set():
+                    trace = osa.measure(
+                        settings, averages=averages, stop_event=stop_event
+                    )
+                    if stop_event.is_set():
+                        break
+                    self.osa_trace_ready.emit(trace)
+            except OSAError as exc:
+                if not stop_event.is_set():
+                    return {"status": "error", "message": str(exc)}
+            return {"status": "stopped"}
+
+        self._run_task(
+            "OSA continuous sweep", work,
+            self._osa_view_continuous_done, self._osa_view_error,
+        )
+
+    def _osa_view_continuous_done(self, payload: dict[str, Any]) -> None:
+        self.osa_view_stop_event = None
+        self._osa_view_set_running(False)
+        if payload.get("status") == "error":
+            self.osv_status.setText(f"Sweep failed: {payload.get('message', '')}")
+        else:
+            self.osv_status.setText("Continuous sweep stopped.")
+
+    def _osa_view_error(self, _error: str) -> None:
+        self.osa_view_stop_event = None
+        self._osa_view_set_running(False)
+        self.osv_status.setText("OSA sweep failed (see Status log).")
+
+    def _osa_view_stop(self) -> None:
+        if self.osa_view_stop_event is not None:
+            self.osa_view_stop_event.set()
+            self.osv_status.setText("Stopping…")
+
+    def _osa_view_on_trace(self, trace) -> None:
+        """Store and plot a freshly measured trace (GUI thread via signal)."""
+        self.osa_view_trace = trace
+        self.osv_save_button.setEnabled(self.osa_view_stop_event is None)
+        self._osa_view_plot(trace)
+
+    def _osa_view_plot(self, trace) -> None:
+        self.osv_figure.clear()
+        ax = self.osv_figure.add_subplot(111)
+        if trace is None:
+            ax.text(0.5, 0.5, "Take a sweep to display the spectrum",
+                    ha="center", va="center", color="#d8dee9", fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+        else:
+            wl = np.asarray(trace.wavelengths_nm, dtype=float)
+            is_log = trace.power_label == "power_dBm"
+            if is_log:
+                y = np.asarray(trace.powers, dtype=float)
+                ylabel = "power (dBm)"
+            else:
+                y = np.asarray(trace.powers, dtype=float) * 1e6
+                ylabel = "power (µW)"
+            ax.plot(wl, y, color="#88c0d0", linewidth=1.2)
+            if wl.size and np.any(np.isfinite(y)):
+                peak = int(np.nanargmax(y))
+                ax.plot(wl[peak], y[peak], "o", color="#ebcb8b", markersize=5)
+                unit = "dBm" if is_log else "µW"
+                ax.annotate(f"{wl[peak]:.4f} nm\n{y[peak]:.3g} {unit}",
+                            (wl[peak], y[peak]), color="#ebcb8b", fontsize=8,
+                            xytext=(6, -2), textcoords="offset points")
+                avg = f" · avg {trace.averages}" if trace.averages > 1 else ""
+                self.osv_status.setText(
+                    f"peak {y[peak]:.3g} {unit} @ {wl[peak]:.4f} nm  ·  "
+                    f"{wl.size} pts{avg}"
+                )
+            if not is_log and self.osv_logy_check.isChecked():
+                ax.set_yscale("log")
+            ax.set_xlabel("wavelength (nm)", color="#d8dee9", fontsize=8)
+            ax.set_ylabel(ylabel, color="#d8dee9", fontsize=8)
+            ax.grid(True, color="#2a3540", linewidth=0.5)
+            ax.tick_params(colors="#d8dee9", labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color("#41515c")
+        self.osv_figure.patch.set_facecolor("#101820")
+        ax.set_facecolor("#101820")
+        self.osv_canvas.draw_idle()
+
+    def _osa_view_save(self) -> None:
+        if self.osa_view_trace is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save OSA trace", "osa_trace.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            self.osa_view_trace.to_csv(path)
+            self._log(f"Saved OSA trace → {path}")
+        except Exception as exc:
+            self._log(f"Save failed: {exc}")
+
+    # ==================================================================
     # Modulation Error Analysis page (B1: single-channel spectral shape)
     # ==================================================================
 
@@ -3751,6 +4449,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     averages=averages, stride=stride,
                     subtract_background=subtract_bg, capture_dir=capture_dir,
                     stop_event=stop_event, progress_callback=report,
+                    col_ratio=self._active_col_ratio(),
                 )
             except AnalysisAborted:
                 return {"status": "aborted"}
@@ -4089,7 +4788,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     monitor, controller, layout,
                     pair_indices=indices, sweep=sweep,
                     n_trials=n_trials, repeats=repeats, settle=settle,
-                    read_timeout=read_timeout,
+                    read_timeout=read_timeout, col_ratio=self._active_col_ratio(),
                     stop_event=stop_event, progress_callback=report,
                 )
             except TPAPairAborted:
@@ -6500,7 +7199,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if optimization_result.accepted:
                     message = (
                         "Accepted encoding profile and LUT applied to the Encoding "
-                        "and Edge Ratio pages."
+                        "and Shape pages."
                     )
                 else:
                     message = (

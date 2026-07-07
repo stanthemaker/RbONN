@@ -165,6 +165,7 @@ def measure_tpa_efficiency(
     stride: int = 1,
     settle: float | None = None,
     capture_dir: str | Path | None = None,
+    col_ratio: np.ndarray | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> TPAResult:
@@ -174,8 +175,10 @@ def measure_tpa_efficiency(
     ``products`` by driving both sides equally (``x_i = w_i = √u``). The 780
     scatter + dark background from ``background`` is subtracted from each reading
     and the survivor points are fit to ``a_i·u²``. ``stride`` measures only every
-    Nth pair; ``repeats`` averages several readings per point. When
-    ``capture_dir`` is given each pair's curve is written there incrementally
+    Nth pair; ``repeats`` averages several readings per point. ``col_ratio`` is
+    the per-column encoding shape forwarded to :func:`encode_to_pattern` so the
+    efficiency is measured with the deployed channel taper (``None`` = flat band).
+    When ``capture_dir`` is given each pair's curve is written there incrementally
     (crash-safe) plus a consolidated ``tpa.npz`` once the sweep finishes.
     """
     products_arr = np.asarray(list(products), dtype=float)
@@ -233,7 +236,8 @@ def measure_tpa_efficiency(
             w_vals = zeros.copy()
             x_vals[i] = float(x_lv[k])
             w_vals[i] = float(w_lv[k])
-            pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height)
+            pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width,
+                                        slm_height, col_ratio=col_ratio)
             means[k], stds[k] = _display_and_read(pattern)
             bgs[k] = (
                 predict_background(background, x_vals, w_vals)

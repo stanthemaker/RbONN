@@ -563,6 +563,7 @@ def measure_phase_sweep(
     read_timeout: float = 30.0,
     measure_dark: bool = True,
     dark_per_trial: bool = True,
+    col_ratio: np.ndarray | None = None,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PhaseResult:
@@ -600,7 +601,8 @@ def measure_phase_sweep(
         w_vals = zeros.copy()
         x_vals[tgt_index], w_vals[tgt_index] = x_t, w_t
         x_vals[ref_index], w_vals[ref_index] = x_r, w_r
-        pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height)
+        pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height,
+                                    col_ratio=col_ratio)
         slm.display_array(pattern)
         if settle:
             time.sleep(settle)
