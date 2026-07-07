@@ -22,7 +22,14 @@ from slm_module.analysis import (
     ModulationErrorResult,
     encoding_gain,
     measure_channel_spectra,
+    measure_one_channel,
     write_gain_csv,
+)
+from slm_module.optimization import (
+    FLAT_ENCODING_SHAPE,
+    OPTIMIZED_ENCODING_SHAPE,
+    mirror_intensity_profile,
+    round_encoding_profile,
 )
 from osa_module.controller import MeasurementSettings, TraceData
 
@@ -211,6 +218,146 @@ class MeasureThreadsColRatioTests(unittest.TestCase):
             )
         # every encode call in the sweep received our exact profile
         self.assertTrue(seen)
+        self.assertTrue(all(c is ratio for c in seen))
+
+
+class _GaussianOSA:
+    """Returns a narrow Gaussian centred at 780 nm (wavelengths in metres)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def measure(self, settings, averages=1, stop_event=None):
+        self.calls += 1
+        wl = np.linspace(778.0e-9, 782.0e-9, 401)
+        sig = 1e-6 * np.exp(-((wl * 1e9 - 780.0) ** 2) / (2 * 0.15 ** 2))
+        return TraceData(wavelengths=wl, powers=sig, trace_id="TRA", y_unit="LINear")
+
+
+class EncodingShapeTests(unittest.TestCase):
+    def test_round_snaps_above_threshold(self) -> None:
+        rounded = round_encoding_profile([0.5, 0.99, 0.991, 1.0])
+        self.assertEqual(rounded.tolist(), [0.5, 0.99, 1.0, 1.0])
+
+    def test_optimized_shape_rounded_flat_top(self) -> None:
+        self.assertEqual(OPTIMIZED_ENCODING_SHAPE.shape, (8,))
+        # every column that was > 0.99 is now exactly 1.0 (flat top)
+        self.assertTrue(np.all(OPTIMIZED_ENCODING_SHAPE[3:] == 1.0))
+        self.assertFalse(
+            np.any((OPTIMIZED_ENCODING_SHAPE > 0.99) & (OPTIMIZED_ENCODING_SHAPE < 1.0))
+        )
+        self.assertAlmostEqual(OPTIMIZED_ENCODING_SHAPE[0], 0.38479, places=4)
+
+    def test_flat_shape_all_ones_same_length(self) -> None:
+        self.assertEqual(FLAT_ENCODING_SHAPE.shape, OPTIMIZED_ENCODING_SHAPE.shape)
+        self.assertTrue(np.all(FLAT_ENCODING_SHAPE == 1.0))
+
+    def test_mirror_to_15_is_symmetric_taper(self) -> None:
+        full = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)
+        self.assertEqual(full.shape, (15,))
+        self.assertTrue(np.allclose(full, full[::-1]))     # symmetric
+        self.assertTrue(np.all(full[3:12] == 1.0))         # flat interior
+        self.assertLess(full[0], full[3])                  # tapered edge
+
+
+class TotalCrosstalkTests(unittest.TestCase):
+    def test_sums_neighbour_dict(self) -> None:
+        spec = _spectrum("x", 0, leak=0.05, in_band=0.9)
+        spec.crosstalk = {-2: 0.01, -1: 0.03, 1: 0.02, 2: 0.005}
+        self.assertAlmostEqual(spec.total_crosstalk, 0.065)
+
+    def test_empty_is_zero(self) -> None:
+        self.assertEqual(_spectrum("x", 0, 0.0, 0.0).total_crosstalk, 0.0)
+
+
+class MeasureOneChannelTests(unittest.TestCase):
+    def test_returns_metrics_for_selected_channel(self) -> None:
+        layout = _make_layout(width=15)
+        spec = measure_one_channel(
+            _GaussianOSA(), _FakeSLM(), layout, MeasurementSettings(),
+            side="x", index=0, subtract_background=False,
+        )
+        self.assertEqual((spec.side, spec.index), ("x", 0))
+        self.assertAlmostEqual(spec.peak_wl_nm, 780.0, places=1)
+        self.assertGreater(spec.in_band_fraction, 0.5)
+        self.assertLess(spec.total_crosstalk, 0.05)         # isolated Gaussian
+        self.assertAlmostEqual(spec.total_crosstalk, sum(spec.crosstalk.values()))
+
+    def test_w_side_uses_list_position_not_channel_index(self) -> None:
+        # w_channels[0] carries .index == 1 in this layout; the one-hot must use
+        # the list position (0), so the spectrum reports index 0 and no IndexError.
+        layout = _make_layout(width=15)
+        spec = measure_one_channel(
+            _GaussianOSA(), _FakeSLM(), layout, MeasurementSettings(),
+            side="w", index=0, subtract_background=False,
+        )
+        self.assertEqual((spec.side, spec.index), ("w", 0))
+
+    def test_col_ratio_forwarded_to_encode(self) -> None:
+        layout = _make_layout(width=15)
+        ratio = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)
+        seen: list = []
+        real = analysis.encode_to_pattern
+
+        def recorder(*args, **kwargs):
+            seen.append(kwargs.get("col_ratio"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(analysis, "encode_to_pattern", recorder):
+            measure_one_channel(
+                _GaussianOSA(), _FakeSLM(), layout, MeasurementSettings(),
+                side="x", index=0, subtract_background=True, col_ratio=ratio,
+            )
+        self.assertTrue(seen)                       # background + channel encodes
+        self.assertTrue(all(c is ratio for c in seen))
+
+    def test_out_of_range_index_raises(self) -> None:
+        layout = _make_layout(width=15)
+        with self.assertRaises(ValueError):
+            measure_one_channel(
+                _GaussianOSA(), _FakeSLM(), layout, MeasurementSettings(),
+                side="x", index=5,
+            )
+
+
+class _FakeMonitor:
+    """Minimal scope/DAQ monitor for the pair-grid sweep."""
+
+    last_values = None
+
+    def configure_monitor(self, *args, **kwargs) -> None:
+        pass
+
+    def monitor_cycle(self, timeout=30.0, **kwargs):
+        class _Sample:
+            value = 0.001
+        return _Sample()
+
+
+class MeasurePairGridsColRatioTests(unittest.TestCase):
+    def test_col_ratio_forwarded_to_encode(self) -> None:
+        from slm_module import encoding as encoding_module
+        from slm_module import tpa_pair as tpa_pair_module
+
+        layout = _make_layout(width=15)
+        ratio = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)
+        seen: list = []
+        real = encoding_module.encode_to_pattern
+
+        def recorder(*args, **kwargs):
+            seen.append(kwargs.get("col_ratio"))
+            return real(*args, **kwargs)
+
+        # measure_pair_grids does `from .encoding import encode_to_pattern` at
+        # call time, so patch the module attribute it will re-import. fit_grid is
+        # stubbed because the constant fake readings are a degenerate fit.
+        with mock.patch.object(encoding_module, "encode_to_pattern", recorder), \
+                mock.patch.object(tpa_pair_module, "fit_grid", lambda grid: None):
+            tpa_pair_module.measure_pair_grids(
+                _FakeMonitor(), _FakeSLM(), layout,
+                pair_indices=[0], sweep=[0.0, 1.0], settle=0.0, col_ratio=ratio,
+            )
+        self.assertTrue(seen)                       # every grid point encoded
         self.assertTrue(all(c is ratio for c in seen))
 
 

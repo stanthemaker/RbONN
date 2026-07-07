@@ -70,6 +70,15 @@ class ChannelSpectrum:
     # fraction of this channel's power landing in offset neighbour bands
     crosstalk: dict[int, float] = field(default_factory=dict)
 
+    @property
+    def total_crosstalk(self) -> float:
+        """Fraction of this channel's power in *all* measured neighbour bands.
+
+        Sums the +/-1 and +/-2 pitch neighbour bands (``crosstalk`` values), an
+        upper-bound estimate of the total leakage into other channels.
+        """
+        return float(sum(self.crosstalk.values()))
+
 
 @dataclass
 class ModulationErrorResult:
@@ -180,6 +189,132 @@ def _channel_metrics(
     return peak_wl, fwhm, total, window_power, channel_power, window_power / total, crosstalk
 
 
+def _measure_channel(
+    osa: OSAController,
+    slm: SLMController,
+    layout: ChannelLayout,
+    settings: MeasurementSettings,
+    channel,
+    position: int,
+    side: str,
+    *,
+    slm_width: int,
+    slm_height: int,
+    nominal_bw: float,
+    pitch_nm: float,
+    averages: int,
+    subtract_background: bool,
+    col_ratio: np.ndarray | None,
+    level_trim: Callable[[np.ndarray], np.ndarray] | None,
+    stop_event: threading.Event | None,
+    bg_pattern: np.ndarray | None,
+) -> ChannelSpectrum:
+    """Measure one isolated channel and return its band metrics.
+
+    Shared by :func:`measure_channel_spectra` (looped over the grid, with a
+    pre-built ``bg_pattern``) and :func:`measure_one_channel`. ``position`` is the
+    channel's index within its side's list — used both to drive the one-hot value
+    array and as ``ChannelSpectrum.index``. The OSA is re-centred on ``channel``'s
+    wavelength; when ``subtract_background`` is set an all-off trace at that centre
+    is subtracted.
+    """
+    n = layout.n_channels
+    ch_settings = replace(settings, center_wl=f"{channel.wavelength_nm:.4f}nm")
+
+    bg_power = None
+    if subtract_background:
+        slm.display_array(bg_pattern)
+        bg_trace = osa.measure(ch_settings, averages=averages, stop_event=stop_event)
+        bg_power = _trace_power_w(bg_trace)
+
+    x_vals = np.zeros(n)
+    w_vals = np.zeros(n)
+    if side == "x":
+        x_vals[position] = 1.0
+    else:
+        w_vals[position] = 1.0
+    pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height,
+                                col_ratio=col_ratio, level_trim=level_trim)
+    slm.display_array(pattern)
+
+    trace = osa.measure(ch_settings, averages=averages, stop_event=stop_event)
+    power = _trace_power_w(trace)
+    wl = trace.wavelengths_nm
+    if bg_power is not None:
+        count = min(wl.size, power.size, bg_power.size)
+        signal = np.clip(power[:count] - bg_power[:count], 0.0, None)
+        wl = wl[:count]
+    else:
+        signal = np.clip(power, 0.0, None)
+
+    peak_wl, fwhm, total_p, window_p, channel_p, in_band, crosstalk = _channel_metrics(
+        wl, signal, channel.wavelength_nm, nominal_bw, pitch_nm
+    )
+    leak = crosstalk.get(-1, 0.0) + crosstalk.get(1, 0.0)
+    return ChannelSpectrum(
+        index=position,
+        side=side,
+        x_center=channel.x_center,
+        nominal_wl_nm=channel.wavelength_nm,
+        nominal_bw_nm=nominal_bw,
+        wavelengths_nm=wl,
+        signal_w=signal,
+        peak_wl_nm=peak_wl,
+        fwhm_nm=fwhm,
+        total_power_w=total_p,
+        window_power_w=window_p,
+        channel_power_w=channel_p,
+        in_band_fraction=in_band,
+        neighbor_leakage=leak,
+        crosstalk=crosstalk,
+    )
+
+
+def measure_one_channel(
+    osa: OSAController,
+    slm: SLMController,
+    layout: ChannelLayout,
+    settings: MeasurementSettings,
+    *,
+    side: str = "x",
+    index: int = 0,
+    averages: int = 1,
+    subtract_background: bool = True,
+    col_ratio: np.ndarray | None = None,
+    level_trim: Callable[[np.ndarray], np.ndarray] | None = None,
+    stop_event: threading.Event | None = None,
+) -> ChannelSpectrum:
+    """Measure a single isolated channel's spectrum and crosstalk metrics.
+
+    A lightweight, one-channel version of :func:`measure_channel_spectra` used by
+    the quick crosstalk A/B test: turn on channel ``(side, index)`` alone, sweep
+    the OSA once (centred on that channel), and compute its band metrics —
+    including ``crosstalk`` and ``total_crosstalk`` — from that trace. Pass
+    ``col_ratio=None`` for the flat band and a mirrored encoding shape to test a
+    taper.
+    """
+    channels = layout.x_channels if side == "x" else layout.w_channels
+    if not 0 <= index < len(channels):
+        raise ValueError(f"channel index {index} is out of range for side {side!r}")
+    channel = channels[index]
+    slm_width, slm_height = slm.get_slm_info()
+    nominal_bw = layout.channel_width_px * layout.nm_per_px
+    pitch_nm = layout.pitch_px * layout.nm_per_px
+    bg_pattern = None
+    if subtract_background:
+        zeros = np.zeros(layout.n_channels)
+        bg_pattern = encode_to_pattern(zeros, zeros, layout, slm_width, slm_height,
+                                       col_ratio=col_ratio, level_trim=level_trim)
+    return _measure_channel(
+        osa, slm, layout, settings, channel, index, side,
+        slm_width=slm_width, slm_height=slm_height,
+        nominal_bw=nominal_bw, pitch_nm=pitch_nm,
+        averages=averages, subtract_background=subtract_background,
+        col_ratio=col_ratio, level_trim=level_trim,
+        stop_event=stop_event, bg_pattern=bg_pattern,
+    )
+
+
 def measure_channel_spectra(
     osa: OSAController,
     slm: SLMController,
@@ -242,59 +377,20 @@ def measure_channel_spectra(
     for step, (i, side) in enumerate(targets):
         _check_stop()
         channel = (layout.x_channels if side == "x" else layout.w_channels)[i]
-
-        # re-centre the OSA on this channel; keep the (narrow) span from settings
-        ch_settings = replace(settings, center_wl=f"{channel.wavelength_nm:.4f}nm")
-
-        # per-window background (all channels off) at this OSA centre
-        bg_power = None
-        if subtract_background:
-            slm.display_array(bg_pattern)
-            bg_trace = osa.measure(ch_settings, averages=averages, stop_event=stop_event)
-            bg_power = _trace_power_w(bg_trace)
-
-        x_vals = zeros.copy()
-        w_vals = zeros.copy()
-        if side == "x":
-            x_vals[i] = 1.0
-        else:
-            w_vals[i] = 1.0
-        pattern = encode_to_pattern(x_vals, w_vals, layout, slm_width, slm_height,
-                                    col_ratio=col_ratio, level_trim=level_trim)
-        slm.display_array(pattern)
-
-        trace = osa.measure(ch_settings, averages=averages, stop_event=stop_event)
-        power = _trace_power_w(trace)
-        wl = trace.wavelengths_nm
-        if bg_power is not None:
-            count = min(wl.size, power.size, bg_power.size)
-            signal = np.clip(power[:count] - bg_power[:count], 0.0, None)
-            wl = wl[:count]
-        else:
-            signal = np.clip(power, 0.0, None)
-
-        peak_wl, fwhm, total_p, window_p, channel_p, in_band, crosstalk = _channel_metrics(
-            wl, signal, channel.wavelength_nm, nominal_bw, pitch_nm
-        )
-        leak = crosstalk.get(-1, 0.0) + crosstalk.get(1, 0.0)
-        spectrum = ChannelSpectrum(
-            index=i,
-            side=side,
-            x_center=channel.x_center,
-            nominal_wl_nm=channel.wavelength_nm,
-            nominal_bw_nm=nominal_bw,
-            wavelengths_nm=wl,
-            signal_w=signal,
-            peak_wl_nm=peak_wl,
-            fwhm_nm=fwhm,
-            total_power_w=total_p,
-            window_power_w=window_p,
-            channel_power_w=channel_p,
-            in_band_fraction=in_band,
-            neighbor_leakage=leak,
-            crosstalk=crosstalk,
+        spectrum = _measure_channel(
+            osa, slm, layout, settings, channel, i, side,
+            slm_width=slm_width, slm_height=slm_height,
+            nominal_bw=nominal_bw, pitch_nm=pitch_nm,
+            averages=averages, subtract_background=subtract_background,
+            col_ratio=col_ratio, level_trim=level_trim,
+            stop_event=stop_event, bg_pattern=bg_pattern,
         )
         spectra.append(spectrum)
+        fwhm = spectrum.fwhm_nm
+        in_band = spectrum.in_band_fraction
+        leak = spectrum.neighbor_leakage
+        wl = spectrum.wavelengths_nm
+        signal = spectrum.signal_w
 
         # crash-safe incremental save of this capture's raw spectrum
         if capture_path is not None:
