@@ -6,12 +6,15 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from osa_module.controller import MeasurementSettings, OSAController, TraceData
 from slm_module.controller import SLMController
+
+if TYPE_CHECKING:  # avoid importing daq_module at runtime
+    from daq_module.controller import DAQController
 
 
 """
@@ -553,6 +556,140 @@ def intensity_calibration(
         intensity_levels=intensity_levels,
         raw_intensity_levels=raw_intensity_levels,
         wavelength_fit_coefficients=fit_coefficients,
+    )
+
+
+def _read_daq_value(
+    daq: "DAQController",
+    index: int,
+    read_timeout: float,
+    stop_event: threading.Event | None,
+) -> float:
+    """One averaged DAQ reading (volts); aborts cleanly on a stop request.
+
+    ``monitor_cycle`` sleeps the DAQ's own configured settle (hold) before it
+    reads, so the SLM frame has time to latch, and returns None when
+    ``stop_event`` is already set.
+    """
+    sample = daq.monitor_cycle(
+        index=index, timeout=read_timeout, stop_event=stop_event
+    )
+    if sample is None:
+        raise CalibrationAborted("calibration stopped by request")
+    return float(sample.value)
+
+
+def intensity_calibration_daq(
+    daq: "DAQController",
+    slm: SLMController,
+    levels: Iterable[int],
+    calibration_results: CalibrationResult,
+    window_size: int,
+    *,
+    coordinate_stride: int = 1,
+    region: tuple[int, int] | None = None,
+    read_timeout: float = 30.0,
+    stop_event: threading.Event | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> CalibrationResult:
+    """Step-3 intensity calibration read from a DAQ bucket detector.
+
+    This is the OSA ``intensity_calibration`` with the spectrometer swapped for a
+    single-photodiode DAQ: it walks the same calibrated coordinates, lights the
+    same one window at a time (rest of the panel at ``min_level``), and produces
+    the same ``CalibrationResult`` (``intensity_levels`` /
+    ``raw_intensity_levels`` shaped ``(n_coordinates, n_levels)``) so Step 3's
+    fit/plots and the downstream encoder are unchanged.
+
+    Because a bucket detector has no spectral resolution, intensity is a plain
+    dark-frame subtraction rather than a per-wavelength reduction: an all-``min``
+    frame is read once as the DC background, then every window reading is
+    ``reading - dark`` (in volts, clamped at 0). No all-``max`` bright reference
+    is taken: the downstream sin^2 model ``I0 * sin(theta/2)^2`` fits ``I0`` as a
+    free amplitude, so absolute scale is irrelevant to the fit, and lighting the
+    whole panel at ``max_level`` could saturate or damage the photodiode. The
+    OSA-only knobs (wavelength averaging, narrow sweep span, wavelength refine)
+    have no analogue here and are intentionally absent.
+
+    ``daq`` must already be connected and ``configure_monitor``-ed with the
+    channel / rate / averaging / range / hold for this sweep; each reading uses
+    that config (the hold provides the per-frame settle).
+    """
+
+    level_values = _validate_levels(levels)
+    coordinates, wavelengths = _calibrated_mapping(calibration_results)
+    coordinates, wavelengths = _select_region_mapping(coordinates, wavelengths, region)
+
+    coordinate_stride = int(coordinate_stride)
+    if coordinate_stride < 1:
+        raise ValueError("coordinate_stride must be >= 1")
+    if coordinate_stride > 1:
+        coordinates = coordinates[::coordinate_stride]
+        wavelengths = wavelengths[::coordinate_stride]
+
+    slm_width, slm_height = slm.get_slm_info()
+    window_size = _validate_window_size(window_size, slm_width)
+    min_level = _level_value(calibration_results.min_level, "min_level")
+    max_level = _level_value(calibration_results.max_level, "max_level")
+
+    read_index = 0
+
+    # Dark reference: whole panel at min_level. Its reading is the DC background
+    # (detector dark current + stray light) that the offset-free downstream sin^2
+    # model cannot absorb, so it is subtracted from every window reading. No
+    # all-bright reference is taken (see the docstring): the fit's amplitude I0 is
+    # free, so scale does not matter, and a full-bright panel could harm the APD.
+    dark_pattern = np.full(slm_width, min_level, dtype=int)
+    _display_1d_pattern(slm, dark_pattern, slm_height)
+    dark_value = _read_daq_value(daq, read_index, read_timeout, stop_event)
+    read_index += 1
+
+    intensity_levels = np.zeros((coordinates.size, level_values.size), dtype=float)
+    raw_intensity_levels = np.zeros((coordinates.size, level_values.size), dtype=float)
+    total = int(coordinates.size * level_values.size)
+    step = 0
+
+    for coordinate_index, (coordinate, wavelength_nm) in enumerate(
+        zip(coordinates, wavelengths)
+    ):
+        x_start = _window_start_from_coordinate(coordinate, window_size, slm_width)
+        for level_index, level in enumerate(level_values):
+            _check_stop(stop_event)
+            pattern = dark_pattern.copy()
+            pattern[x_start : x_start + window_size] = int(level)
+            _display_1d_pattern(slm, pattern, slm_height)
+
+            reading = _read_daq_value(daq, read_index, read_timeout, stop_event)
+            read_index += 1
+            # Dark-frame subtraction only; no bright normalization. The sin^2 fit
+            # absorbs the absolute scale in its free amplitude, so raw
+            # background-subtracted volts feed both arrays directly.
+            value = max(0.0, reading - dark_value)
+
+            raw_intensity_levels[coordinate_index, level_index] = value
+            intensity_levels[coordinate_index, level_index] = value
+            _report(
+                progress_callback,
+                "intensity",
+                step,
+                total,
+                f"λ {wavelength_nm:.2f} nm "
+                f"({coordinate_index + 1}/{coordinates.size}), "
+                f"level {int(level)} -> {value * 1e3:.3f} mV",
+                x=float(level),
+                y=float(value),
+            )
+            step += 1
+
+    return CalibrationResult(
+        wavelength=np.asarray(wavelengths, dtype=float),
+        coordinates=coordinates,
+        max_level=max_level,
+        min_level=min_level,
+        level_range=level_values,
+        intensity_levels=intensity_levels,
+        raw_intensity_levels=raw_intensity_levels,
+        wavelength_fit_coefficients=calibration_results.wavelength_fit_coefficients,
     )
 
 

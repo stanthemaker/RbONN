@@ -35,6 +35,7 @@ from ..calibration.calibration_new import (
     CalibrationResult,
     find_min_max_intensity_levels,
     intensity_calibration,
+    intensity_calibration_daq,
     load_calibration_result,
     load_wavelength_map_csv,
     restrict_to_measured_intensity_range,
@@ -1229,6 +1230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         reopt_grid.addWidget(QtWidgets.QLabel("Rerank averages"), 5, 0)
         reopt_grid.addWidget(self.pipeline_reopt_rerank_averages_spin, 5, 1)
         reopt_grid.setColumnStretch(1, 1)
+        layout.addWidget(reopt)
 
         layout.addWidget(
             self._caption(
@@ -1817,46 +1819,50 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(page)
         layout.addWidget(
             self._caption(
-                "Sweep levels at each calibrated wavelength. Narrow window + higher "
-                "sensitivity = less noise."
+                "Sweep levels at each calibrated coordinate and read the DAQ. One "
+                "window is lit at a time; intensity is dark-frame subtracted."
             )
         )
-        # higher precision defaults: HIGH3 + narrower span
-        layout.addWidget(
-            self._build_measurement_group(3, {"sensitivity": "HIGH3", "span": "4nm"})
-        )
-
-        cfg = QtWidgets.QHBoxLayout()
         widgets = self.step_widgets[3]
+
+        widgets["daq_group"] = self._build_step3_daq_group()
+        layout.addWidget(widgets["daq_group"])
+
+        # shared config: window px + coordinate stride
+        cfg = QtWidgets.QHBoxLayout()
         widgets["window"] = self._spin(1, 8191, 3)
-        widgets["avg_nm"] = self._double_spin(0.0, 50.0, 0.1, " nm", 3)
-        widgets["avg_nm"].setToolTip("Averaging window around each wavelength, in nm")
-        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.5, " nm", 3)
-        widgets["sweep_nm"].setToolTip(
-            "OSA span per coordinate, re-centered on the Step 2 wavelength. "
-            "Narrower = faster. 0 = use the full span above."
-        )
         widgets["stride"] = self._spin(1, 8191, 1)
         widgets["stride"].setToolTip(
             "Measure only every Nth calibrated coordinate (1 = every coordinate)."
         )
-        widgets["refine"] = QtWidgets.QCheckBox("Refine λ")
-        widgets["refine"].setChecked(True)
-        widgets["refine"].setToolTip(
-            "Re-calibrate each coordinate's wavelength from the narrow high-res "
-            "sweep (needs a sweep span above)."
-        )
         cfg.addWidget(QtWidgets.QLabel("Window px"))
         cfg.addWidget(widgets["window"])
-        cfg.addWidget(QtWidgets.QLabel("Avg ± window"))
-        cfg.addWidget(widgets["avg_nm"])
-        cfg.addWidget(QtWidgets.QLabel("Sweep span"))
-        cfg.addWidget(widgets["sweep_nm"])
         cfg.addWidget(QtWidgets.QLabel("Stride"))
         cfg.addWidget(widgets["stride"])
-        cfg.addWidget(widgets["refine"])
         cfg.addStretch(1)
         layout.addLayout(cfg)
+
+        # OSA measurement settings + extras. Step 3's own run is DAQ-only, but the
+        # Pipeline tab and Run All still drive an OSA intensity sweep and reuse
+        # these values (rather than duplicating the state), so they are kept
+        # alive here in a hidden backing container.
+        osa_backing = QtWidgets.QWidget()
+        osa_layout = QtWidgets.QVBoxLayout(osa_backing)
+        osa_layout.setContentsMargins(0, 0, 0, 0)
+        widgets["osa_group"] = self._build_measurement_group(
+            3, {"sensitivity": "HIGH3", "span": "4nm"}
+        )
+        osa_layout.addWidget(widgets["osa_group"])
+        widgets["avg_nm"] = self._double_spin(0.0, 50.0, 0.1, " nm", 3)
+        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.5, " nm", 3)
+        widgets["refine"] = QtWidgets.QCheckBox("Refine λ")
+        widgets["refine"].setChecked(True)
+        osa_layout.addWidget(widgets["avg_nm"])
+        osa_layout.addWidget(widgets["sweep_nm"])
+        osa_layout.addWidget(widgets["refine"])
+        osa_backing.setVisible(False)
+        layout.addWidget(osa_backing)
+
         layout.addWidget(self._level_sweep_row(3, stop=1023, stepv=32))
         layout.addWidget(self._region_row(3))
 
@@ -1883,6 +1889,49 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         self._toggle_step3_source()
         return page
+
+    def _build_step3_daq_group(self) -> QtWidgets.QGroupBox:
+        """DAQ acquisition settings for the Step-3 bucket-detector sweep.
+
+        Defaults mirror tests/slm_sin2_level_sweep_test.py (ai1, 100 kS/s, 1 s
+        average, 150 ms settle, ±0.1 V). Hidden unless Detector = DAQ.
+        """
+        box = QtWidgets.QGroupBox("DAQ acquisition (NI-DAQmx)")
+        grid = QtWidgets.QGridLayout(box)
+        widgets = self.step_widgets[3]
+        widgets["daq_channel"] = QtWidgets.QLineEdit("ai1")
+        widgets["daq_channel"].setMaximumWidth(90)
+        widgets["daq_sample_rate"] = QtWidgets.QDoubleSpinBox()
+        widgets["daq_sample_rate"].setRange(1.0, 2_000_000.0)
+        widgets["daq_sample_rate"].setDecimals(0)
+        widgets["daq_sample_rate"].setValue(100_000.0)
+        widgets["daq_sample_rate"].setSuffix(" S/s")
+        widgets["daq_hold"] = QtWidgets.QDoubleSpinBox()
+        widgets["daq_hold"].setRange(0.0, 10_000.0)
+        widgets["daq_hold"].setValue(150.0)
+        widgets["daq_hold"].setSuffix(" ms")
+        widgets["daq_hold"].setToolTip("Settle after each SLM frame before the DAQ reads.")
+        widgets["daq_duration"] = QtWidgets.QDoubleSpinBox()
+        widgets["daq_duration"].setRange(0.001, 10.0)
+        widgets["daq_duration"].setDecimals(3)
+        widgets["daq_duration"].setValue(1.0)
+        widgets["daq_duration"].setSuffix(" s")
+        widgets["daq_duration"].setToolTip("Averaging window per reading.")
+        widgets["daq_range"] = QtWidgets.QComboBox()
+        for lo, hi in self._DAQ_RANGES:
+            widgets["daq_range"].addItem(f"\N{PLUS-MINUS SIGN}{hi:g} V", (lo, hi))
+        widgets["daq_range"].setCurrentIndex(0)
+        pairs = [
+            ("Channel", widgets["daq_channel"]),
+            ("Sample rate", widgets["daq_sample_rate"]),
+            ("Hold", widgets["daq_hold"]),
+            ("Average for", widgets["daq_duration"]),
+            ("Range", widgets["daq_range"]),
+        ]
+        for col, (label, widget) in enumerate(pairs):
+            grid.addWidget(QtWidgets.QLabel(label), 0, 2 * col)
+            grid.addWidget(widget, 0, 2 * col + 1)
+        return box
 
     def _caption(self, text: str) -> QtWidgets.QLabel:
         label = QtWidgets.QLabel(text)
@@ -4284,6 +4333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daq_disconnect_button.setEnabled(True)
         self._log(f"DAQ connected: {identity.strip()}")
         self._sync_monitor_source()
+        self._refresh_step3_run_button()
 
     def _on_daq_error(self, _error: str) -> None:
         self._set_status(self.daq_status_label, "DAQ: error", "error")
@@ -5043,7 +5093,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stage3_reopt_stop_button.setEnabled(running)
         self.osa_connect_button.setEnabled(not running and not connected)
         self.osa_disconnect_button.setEnabled(not running and connected)
+        # Step 3 may run on the DAQ instead of the OSA, so its Run button is
+        # gated on whichever detector it currently targets.
+        self._refresh_step3_run_button()
         self._refresh_pipeline_ui()
+
+    def _refresh_step3_run_button(self) -> None:
+        """Step 3 reads the DAQ, so its Run button is gated on the DAQ, not the OSA."""
+        widgets = getattr(self, "step_widgets", {}).get(3)
+        if not widgets or "run" not in widgets:
+            return
+        if getattr(self, "_calibration_is_running", False):
+            widgets["run"].setEnabled(False)
+            return
+        widgets["run"].setEnabled(
+            self.daq_controller is not None and self.daq_controller.is_connected
+        )
 
     # ----- per-step config readers (GUI thread) -----
     def _step_settings(self, step: int) -> MeasurementSettings:
@@ -5172,6 +5237,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return osa
 
+    def _daq_ready(self) -> DAQController | None:
+        daq = self.daq_controller
+        if daq is None or not daq.is_connected:
+            self._log("Connect the DAQ first (Connections page)")
+            return None
+        return daq
+
+    def _step3_daq_settings(self) -> DAQMonitorSettings:
+        widgets = self.step_widgets[3]
+        min_val, max_val = widgets["daq_range"].currentData()
+        return DAQMonitorSettings(
+            channel=widgets["daq_channel"].text().strip() or "ai1",
+            sample_rate=widgets["daq_sample_rate"].value(),
+            duration=widgets["daq_duration"].value(),
+            hold=widgets["daq_hold"].value() / 1000.0,  # ms -> s
+            min_val=min_val,
+            max_val=max_val,
+        )
+
     def _run_step1(self) -> None:
         osa = self._osa_ready()
         if osa is None:
@@ -5240,19 +5324,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._launch_calibration("Run step 2", work)
 
     def _run_step3(self) -> None:
-        osa = self._osa_ready()
-        if osa is None:
+        """Step 3 intensity calibration read from the DAQ bucket detector."""
+        daq = self._daq_ready()
+        if daq is None:
             return
         try:
-            settings = self._step_settings(3)
             mapping = self._resolve_step_input(3)
             levels = self._step_levels(3)
             window = self.step_widgets[3]["window"].value()
-            avg_nm = self.step_widgets[3]["avg_nm"].value() or None
-            sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
             stride = self.step_widgets[3]["stride"].value()
-            refine = self.step_widgets[3]["refine"].isChecked()
             region = self._step_region(3)
+            daq_settings = self._step3_daq_settings()
         except ValueError as exc:
             return self._reject_calibration(exc)
         out_json = self._resolve_output_path(
@@ -5262,14 +5344,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.step_widgets[3]["out_csv"].text(), "calibration.csv"
         )
         controller = self._controller()
-        self._log(f"Step 3 started: {len(levels)} levels, window {window} px")
+        daq.configure_monitor(daq_settings)
+        read_timeout = max(30.0, daq_settings.duration * 3.0 + 10.0)
+        self._log(
+            f"Step 3 (DAQ) started: {len(levels)} levels, window {window} px, "
+            f"{daq_settings.channel} @ {daq_settings.sample_rate:g} S/s, "
+            f"avg {daq_settings.duration:g}s"
+        )
 
         def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
-            result = intensity_calibration(
-                osa, controller, levels, settings, mapping,
-                window_size=window, wavelength_window_nm=avg_nm,
-                sweep_span_nm=sweep_nm, coordinate_stride=stride,
-                refine_wavelength=refine, region=region,
+            result = intensity_calibration_daq(
+                daq, controller, levels, mapping,
+                window_size=window, coordinate_stride=stride, region=region,
+                read_timeout=read_timeout,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_json)
@@ -5279,7 +5366,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "csv": csv_path, "summary": f"{result.coordinates.size} coordinates",
             }
 
-        self._launch_calibration("Run step 3", work)
+        self._launch_calibration("Run step 3 (DAQ)", work)
 
     def _pipeline_file_path(
         self,
