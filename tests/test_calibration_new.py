@@ -19,6 +19,7 @@ from slm_module.calibration.calibration_new import (
     batch_intensity_calibration,
     build_channel_calibration_grid,
     intensity_calibration,
+    intensity_calibration_daq,
     load_calibration_result,
     load_wavelength_map_csv,
     local_peak_centroid,
@@ -820,6 +821,98 @@ class CalibrationNewTests(unittest.TestCase):
         self.assertEqual(points[0].wavelength_nm, 101.0)
         self.assertEqual(points[1].level, 100)
         self.assertEqual(points[1].intensity, 0.6)
+
+
+class _MonitorSample:
+    def __init__(self, value: float):
+        self.value = float(value)
+        self.std = 0.0
+        self.index = 0
+        self.timestamp = 0.0
+
+
+class _BucketDAQ:
+    """DAQ-shaped fake: total 'power' summed over the pixels the SLM shows.
+
+    Each pixel contributes a per-pixel sin^2-in-level transfer plus a small dark
+    leakage, so the full-panel dark reference and the per-window sweep behave like
+    a real bucket detector reading whatever pattern is on the SLM.
+    """
+
+    def __init__(self, slm: FakeSLM):
+        self.slm = slm
+        self.reads = 0
+
+    def _transfer(self, levels: np.ndarray) -> np.ndarray:
+        return 0.002 + 0.010 * np.sin(np.pi * (levels - 400) / 1000.0) ** 2
+
+    def monitor_cycle(self, *, index=0, timeout=30.0, stop_event=None):
+        if stop_event is not None and stop_event.is_set():
+            return None
+        self.reads += 1
+        row = np.asarray(self.slm.arrays[-1], dtype=float)[0]
+        return _MonitorSample(float(np.sum(self._transfer(row))))
+
+
+class IntensityCalibrationDaqTests(unittest.TestCase):
+    def _seed(self) -> CalibrationResult:
+        coords = np.asarray([40.0, 100.0, 160.0])
+        return CalibrationResult(
+            wavelength=np.asarray([775.0, 778.0, 781.0]),
+            coordinates=coords,
+            max_level=900,
+            min_level=400,
+            level_range=np.asarray([], dtype=int),
+            wavelength_fit_coefficients=np.polyfit(coords, [775.0, 778.0, 781.0], 1),
+        )
+
+    def test_shapes_reads_and_dark_frame_subtraction(self) -> None:
+        slm = FakeSLM(size=(200, 4))
+        daq = _BucketDAQ(slm)
+        levels = list(range(400, 901, 50))
+
+        result = intensity_calibration_daq(
+            daq, slm, levels, self._seed(), window_size=8,
+        )
+
+        self.assertEqual(result.intensity_levels.shape, (3, len(levels)))
+        self.assertEqual(result.raw_intensity_levels.shape, (3, len(levels)))
+        # one dark ref only (no bright frame) + n_coords * n_levels window reads
+        self.assertEqual(daq.reads, 1 + 3 * len(levels))
+        # dark-frame subtraction: raw is >= 0 and the darkest level ~ 0 above dark
+        self.assertTrue(np.all(result.raw_intensity_levels >= 0.0))
+        self.assertAlmostEqual(result.raw_intensity_levels[0, 0], 0.0, places=6)
+        # no bright normalization: intensity is exactly the dark-subtracted signal
+        np.testing.assert_allclose(
+            result.intensity_levels, result.raw_intensity_levels
+        )
+        # sin^2 shape preserved: the curve rises off the dark end
+        row = result.raw_intensity_levels[1]
+        self.assertLess(row[0], row[-1])
+        # wavelength map is passed through unchanged (no OSA refine)
+        np.testing.assert_allclose(result.wavelength, [775.0, 778.0, 781.0])
+
+    def test_region_and_stride_select_coordinates(self) -> None:
+        slm = FakeSLM(size=(200, 4))
+        daq = _BucketDAQ(slm)
+        result = intensity_calibration_daq(
+            daq, slm, [400, 600, 900], self._seed(),
+            window_size=8, coordinate_stride=2, region=(30, 130),
+        )
+        # region keeps coords 40 and 100; stride 2 then keeps coord 40 only
+        np.testing.assert_allclose(result.coordinates, [40.0])
+        self.assertEqual(result.intensity_levels.shape, (1, 3))
+
+    def test_stop_event_aborts(self) -> None:
+        slm = FakeSLM(size=(200, 4))
+        daq = _BucketDAQ(slm)
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaises(CalibrationAborted):
+            intensity_calibration_daq(
+                daq, slm, [400, 600, 900], self._seed(), window_size=8,
+                stop_event=stop,
+            )
 
 
 if __name__ == "__main__":
