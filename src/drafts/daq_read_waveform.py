@@ -18,7 +18,7 @@ from nidaqmx.constants import AcquisitionType
 DEVICE = "Dev1"
 CHANNEL = "ai0"
 SAMPLE_RATE_HZ = 100_000  # 100 kS/s
-DURATION_S = 1.0
+DURATION_S = 2
 MIN_VAL_V = -0.010
 MAX_VAL_V = 0.050
 EXPECTED_RESOLUTION_BITS = 16

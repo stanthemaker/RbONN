@@ -14,36 +14,52 @@ only (``phi = pi`` is exactly ``x = 1``, fully on).  That is a *half* phase turn
 which is enough: with the reference fixed at ``phi = pi`` and the target swept
 over ``phi in [0, pi]`` the relative SLM phase spans a full half fringe.
 
-Sweep (Table 1).  Reference pair 0: ``phi^x_0 = phi^w_0 = pi`` (``x = w = 1``),
-all other pairs off.  Target pair k swept symmetrically ``phi^x_k = phi^w_k =
-phi`` over ``[0, pi]``.  Then::
+Sweep (Table 1).  Reference pair 1: ``x_1 = w_1 = 1`` (both channels fully on,
+``phi^x_1 = phi^w_1 = pi``), all other pairs off.  Target pair 2 swept
+symmetrically with per-channel field amplitude ``x_2 = w_2 = sin(theta2/2)``
+(commanded INTENSITY ``sin(theta2/2)^2``) as ``theta2`` runs over ``[0, pi]``.
+Writing ``a := R_1`` (the fixed reference amplitude) and ``b := eta_2 Cx_2 Cw_2``
+(the target amplitude scale), the measured signal is::
 
-    R_k    = eta_k * sin(phi/2)^2            (target amplitude; x_k = w_k = sin(phi/2)^2)
-    R_0    = eta_0                           (reference amplitude, fixed)
-    dPhi_SLM = 1/2*[(phi^x_k+phi^w_k) - (phi^x_0+phi^w_0)] = phi - pi   in [-pi, 0]
-    Y      = R_0^2 + R_k^2 + 2*R_0*R_k*cos(dPhi_SLM + dPhi_comb)
-             + (linear single-beam) + d
+    Y = a^2                                   (reference self term)
+      + b^2 sin(theta2/2)^4                    (target self term R_2^2)
+      + 2 a b sin(theta2/2)^2 cos(dPhi_comb - pi + theta2)   (interference)
+      + d                                      (dark)
 
-The reference-first turn (``phi = 0``, ``R_k = 0``) is a free baseline
-``Y = R_0^2 + d``.  Because the target is calibrated *against* pair 0 and pair 0
-defines ``Phi_0 == 0``, the fitted ``dPhi_comb`` IS pair k's phase in the
-spectrum; running Table 1 for every k builds ``{Phi_k}``.
+With ``g := sin(theta2/2)^2 = sqrt(x_2 w_2)`` the target-pair field amplitude and
+``dPhi_SLM := theta2 - pi`` the SLM phase difference, the fringe argument
+``dPhi_comb - pi + theta2`` is exactly ``dPhi_SLM + dPhi_comb``.  Because the
+target is calibrated *against* pair 1 and pair 1 defines ``Phi_1 == 0``, the
+fitted ``dPhi_comb`` IS the target pair's phase in the spectrum; running Table 1
+for every target builds ``{Phi_k}``.
 
-Background removal uses the step-6 per-pair fit (``a_x, q_x, a_w, q_w, d`` and
-``eta``).  For each averaged point we subtract the linear/quadratic single-beam
-response, the dark current and the two self-TPA pedestals ``R_k^2 + R_0^2``,
-leaving the isolated interference term::
+The pair amplitudes come from step 6: ``a = eta_ref`` and ``b = eta_tgt``.
+Physically these should not diverge from each other, so rather than boxing ``a``
+and ``b`` independently (which let them trade off -- one collapsing while the
+other rails at its box, dragging ``a/b`` far from the step-6 ratio), the fit
+LOCKS the ratio ``a:b`` to ``eta_ref:eta_tgt`` and floats only a single shared
+scale ``s`` (``a = s eta_ref``, ``b = s eta_tgt``), boxed to
+``[max(0,1-frac), 1+frac]`` (``frac=1`` -> a 0..2x common gain drift between step
+6 and step 7 with the calibrated relative efficiencies preserved).  It also folds
+in both pairs' step-6 single-beam background as a FIXED additive term
+(``a_x x + q_x x^2 + a_w w + q_w w^2`` per pair).  In Table 1 the reference (pair
+0) is held fully on and never changes, so its single-beam is a constant; only the
+target (pair k) is swept, so only its single-beam varies.  Written as a
+polynomial in ``g`` for the symmetric target sweep (``x_t = w_t = g``)::
 
-    Z := Y - d - single_beam_k - single_beam_0 - R_k^2 - R_0^2
-       = 2*R_k*R_0*cos(dPhi_SLM + dPhi_comb)
-       = A*[2*R_k*R_0*cos(dPhi_SLM)] + B*[2*R_k*R_0*sin(dPhi_SLM)]  (+ c)
+    Y = s^2 (a0^2 + b0^2 g^2 + 2 a0 b0 g cos(dPhi_SLM + dPhi_comb))
+      + bg0 + bg1 g + bg2 g^2 + d          (a0 = eta_ref, b0 = eta_tgt)
+    bg0 = sb_ref(1, 1)             (reference single-beam, constant, pair 0)
+    bg1 = a_x^tgt + a_w^tgt        (target single-beam, linear in g, pair k)
+    bg2 = q_x^tgt + q_w^tgt        (target single-beam, quadratic in g, pair k)
 
-which is LINEAR in ``A = cos(dPhi_comb)``, ``B = -sin(dPhi_comb)`` and solved by
-weighted least squares.  ``dPhi_comb = atan2(-B, A)``; the fitted amplitude
-``V = sqrt(A^2 + B^2)`` is the fringe *visibility* and should sit near 1 when the
-step-6 etas are consistent and the two pairs are mutually coherent (V far from 1
-flags an eta mismatch or partial coherence).  An optional constant ``c`` absorbs
-any residual DC left by imperfect dark subtraction.
+The three free parameters ``s, dPhi_comb, d`` are solved by a bounded nonlinear
+least squares (:func:`fit_phase_ratio`); ``d`` should sit near 0 after per-row
+dark removal.  Folding the target single-beam background in is what keeps the
+fringe from absorbing the ``~g`` single-beam ramp (and biasing dPhi_comb).  An
+unconstrained closed-form variant is kept as :func:`fit_phase` for diagnostics.
+``a_at_bound``/``b_at_bound`` (both track the shared ``s``) warn when the scale
+box actually bound.
 
 A second, one-time diagnostic (Table 2, :func:`build_symmetry_grid`) sweeps the
 target's two channel phases *independently* on a 3x3 grid to check that phase
@@ -199,29 +215,54 @@ def slm_phase_diff(x_t, w_t, x_r, w_r) -> np.ndarray:
 
 
 # ======================================================================
-# fit  (linear least squares in A = cos dPhi_comb, B = -sin dPhi_comb, [c])
+# fit  (bounded nonlinear LS in a, b, dPhi_comb, d; a,b boxed to +/-frac*eta)
 # ======================================================================
 
 @dataclass
 class PhaseFit:
-    """Weighted-least-squares recovery of dPhi_comb from the interference fringe."""
+    """Recovery of dPhi_comb (+ boxed pair amplitudes a, b) from Y(theta2).
+
+    Model (background written for the symmetric sweep in ``g = sin(theta2/2)^2``)::
+
+        Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb)
+          + bg0 + bg1 g + bg2 g^2 + offset
+
+    ``a``/``b`` are the reference/target pair amplitudes (step-6 eta_ref/eta_tgt);
+    they float but are BOXED to ``+/- bound_frac`` of those etas, and
+    ``bg0/bg1/bg2`` are the fixed step-6 single-beam background (reference-const /
+    target-linear / target-quadratic in g).  ``a_at_bound``/``b_at_bound`` flag a
+    box constraint that bound.
+    """
 
     dphi_comb: float           # radians, wrapped to (-pi, pi]
     dphi_comb_err: float
-    visibility: float          # sqrt(A^2 + B^2); ~1 when etas are consistent
-    visibility_err: float
-    offset: float              # fitted DC nuisance c (0 if not fit)
+    a: float                   # reference amplitude R_1 = eta_ref (x_1 = w_1 = 1)
+    a_err: float
+    b: float                   # target amplitude scale eta_tgt
+    b_err: float
+    amp: float                 # interference amplitude 2 a b
+    amp_err: float
+    offset: float              # residual dark d (should be ~0)
     offset_err: float
     chi2_red: float
     dof: int
     birge: float
     r2: float
+    eta_ref: float             # step-6 bound centre for a
+    eta_tgt: float             # step-6 bound centre for b
+    bound_frac: float          # box half-width as a fraction of eta (inf == free)
+    a_at_bound: bool
+    b_at_bound: bool
+    bg0: float                 # step-6 single-beam background, constant
+    bg1: float                 #   ... * g   (target single-beam, linear)
+    bg2: float                 #   ... * g^2 (target single-beam, quadratic)
     # point arrays the fit ran on (kept for plotting)
-    dphi_slm: np.ndarray = field(repr=False)
-    amp: np.ndarray = field(repr=False)          # 2*R_t*R_r at each point
-    z: np.ndarray = field(repr=False)            # isolated interference term
+    dphi_slm: np.ndarray = field(repr=False)     # theta2 - pi
+    g: np.ndarray = field(repr=False)            # sin(theta2/2)^2 = sqrt(x_t w_t)
+    y: np.ndarray = field(repr=False)            # dark-subtracted measured Y
     sem: np.ndarray = field(repr=False)
-    z_pred: np.ndarray = field(repr=False)
+    known: np.ndarray = field(repr=False)        # a^2 + b^2 g^2 + step-6 single-beam (no fringe/offset)
+    y_pred: np.ndarray = field(repr=False)       # full model prediction
     residuals: np.ndarray = field(repr=False)
 
     @property
@@ -231,73 +272,82 @@ class PhaseFit:
 
 def fit_phase(
     dphi_slm: np.ndarray,
-    amp: np.ndarray,
-    z: np.ndarray,
+    g: np.ndarray,
+    y: np.ndarray,
     sem: np.ndarray,
-    *,
-    fit_offset: bool = True,
 ) -> PhaseFit:
-    """Weighted LS fit of the isolated fringe ``z`` to ``A*g_c + B*g_s (+ c)``.
+    """Weighted LS fit of ``Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb) + d``.
 
-    ``amp`` is ``2*R_t*R_r`` per point; ``g_c = amp*cos(dPhi_SLM)``,
-    ``g_s = amp*sin(dPhi_SLM)``.  Errors are Birge-scaled by ``sqrt(chi2/dof)``
-    when chi2/dof > 1.  ``dPhi_comb = atan2(-B, A)`` with covariance-propagated
-    error; ``visibility = sqrt(A^2 + B^2)``.
+    ``g = sin(theta2/2)^2 = sqrt(x_t w_t)`` is the target pair-field amplitude and
+    ``dPhi_SLM = theta2 - pi``.  The model is linear in the four coefficients of
+    ``[1, g^2, g cos(dPhi_SLM), g sin(dPhi_SLM)]``::
+
+        c0 = a^2 + d   c1 = b^2   c2 = 2ab cos(dPhi_comb)   c3 = -2ab sin(dPhi_comb)
+
+    and the physical (a, b, dPhi_comb, d) follow in closed form (see module
+    docstring).  Errors are covariance-propagated and Birge-scaled by
+    ``sqrt(chi2/dof)`` when chi2/dof > 1.  The amplitude ``a`` is fixed by the
+    interference + target self term, so it separates from the flat baseline (and
+    hence from the residual dark ``d``).
     """
     dphi_slm = np.asarray(dphi_slm, dtype=float)
-    amp = np.asarray(amp, dtype=float)
-    z = np.asarray(z, dtype=float)
+    g = np.asarray(g, dtype=float)
+    y = np.asarray(y, dtype=float)
     sem = np.asarray(sem, dtype=float)
 
-    gc = amp * np.cos(dphi_slm)
-    gs = amp * np.sin(dphi_slm)
-    cols = [gc, gs] + ([np.ones_like(gc)] if fit_offset else [])
+    cols = [np.ones_like(g), g**2, g * np.cos(dphi_slm), g * np.sin(dphi_slm)]
     A = np.column_stack(cols)
 
     Aw = A / sem[:, None]
-    coeffs, *_ = np.linalg.lstsq(Aw, z / sem, rcond=None)
+    coeffs, *_ = np.linalg.lstsq(Aw, y / sem, rcond=None)
     cov = np.linalg.inv(Aw.T @ Aw)
 
-    z_pred = A @ coeffs
-    residuals = z - z_pred
-    dof = max(len(z) - A.shape[1], 1)
+    y_pred = A @ coeffs
+    residuals = y - y_pred
+    dof = max(len(y) - A.shape[1], 1)
     chi2_red = float(np.sum((residuals / sem) ** 2) / dof)
     birge = max(1.0, np.sqrt(chi2_red))
-    cov_scaled = cov * birge**2
+    cov = cov * birge**2
 
-    Av, Bv = float(coeffs[0]), float(coeffs[1])
-    var_a, var_b = float(cov_scaled[0, 0]), float(cov_scaled[1, 1])
-    cov_ab = float(cov_scaled[0, 1])
+    c0, c1, c2, c3 = (float(coeffs[i]) for i in range(4))
+    amp = float(np.hypot(c2, c3))                       # 2 a b
+    b = float(np.sqrt(c1)) if c1 > 0 else 0.0
+    a = amp / (2.0 * b) if b > 0 else float("nan")
+    dphi = float(np.arctan2(-c3, c2))
+    d = c0 - a**2 if np.isfinite(a) else float("nan")
 
-    v2 = Av**2 + Bv**2
-    dphi = float(np.arctan2(-Bv, Av))
-    visibility = float(np.sqrt(v2))
-    if v2 > 0:
-        # theta = atan2(-B, A): d/dA = B/V^2, d/dB = -A/V^2
-        dphi_var = (Bv**2 * var_a + Av**2 * var_b - 2 * Av * Bv * cov_ab) / v2**2
-        # V = sqrt(A^2+B^2): d/dA = A/V, d/dB = B/V
-        vis_var = (Av**2 * var_a + Bv**2 * var_b + 2 * Av * Bv * cov_ab) / v2
-        dphi_err = float(np.sqrt(max(dphi_var, 0.0)))
-        vis_err = float(np.sqrt(max(vis_var, 0.0)))
+    def _err(grad) -> float:
+        gvec = np.asarray(grad, dtype=float)
+        return float(np.sqrt(max(gvec @ cov @ gvec, 0.0)))
+
+    if b > 0 and amp > 0:
+        # gradients wrt (c0, c1, c2, c3)
+        grad_b = [0.0, 1.0 / (2 * b), 0.0, 0.0]
+        grad_a = [0.0, -a / (2 * c1), c2 / (2 * b * amp), c3 / (2 * b * amp)]
+        grad_phi = [0.0, 0.0, c3 / amp**2, -c2 / amp**2]
+        grad_d = [1.0, -2 * a * grad_a[1], -2 * a * grad_a[2], -2 * a * grad_a[3]]
+        a_err, b_err = _err(grad_a), _err(grad_b)
+        dphi_err, offset_err = _err(grad_phi), _err(grad_d)
     else:
-        dphi_err = vis_err = float("nan")
-
-    if fit_offset:
-        offset, offset_err = float(coeffs[2]), float(np.sqrt(cov_scaled[2, 2]))
-    else:
-        offset, offset_err = 0.0, 0.0
+        a_err = b_err = dphi_err = offset_err = float("nan")
 
     ss_res = float(np.sum(residuals**2))
-    ss_tot = float(np.sum((z - z.mean()) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
+    bg2_self = c1 if c1 > 0 else 0.0
+    known = (a**2 if np.isfinite(a) else 0.0) + bg2_self * g**2
     return PhaseFit(
         dphi_comb=dphi, dphi_comb_err=dphi_err,
-        visibility=visibility, visibility_err=vis_err,
-        offset=offset, offset_err=offset_err,
+        a=a, a_err=a_err, b=b, b_err=b_err,
+        amp=amp, amp_err=float("nan"),
+        offset=d, offset_err=offset_err,
         chi2_red=chi2_red, dof=dof, birge=birge, r2=r2,
-        dphi_slm=dphi_slm, amp=amp, z=z, sem=sem,
-        z_pred=z_pred, residuals=residuals,
+        eta_ref=a, eta_tgt=b, bound_frac=float("inf"),
+        a_at_bound=False, b_at_bound=False,
+        bg0=0.0, bg1=0.0, bg2=0.0,
+        dphi_slm=dphi_slm, g=g, y=y, sem=sem, known=known,
+        y_pred=y_pred, residuals=residuals,
     )
 
 
@@ -387,67 +437,209 @@ def _average_points(result: PhaseResult, dark_override: float | None = None):
     return keys[:, 0], keys[:, 1], keys[:, 2], keys[:, 3], ys, sem
 
 
+def fit_phase_ratio(
+    dphi_slm: np.ndarray,
+    g: np.ndarray,
+    fixed_bg: np.ndarray,
+    y: np.ndarray,
+    sem: np.ndarray,
+    *,
+    eta_ref: float,
+    eta_ref_err: float,
+    eta_tgt: float,
+    eta_tgt_err: float,
+    bg0: float,
+    bg1: float,
+    bg2: float,
+    frac: float = 1.0,
+) -> PhaseFit:
+    """Fit dPhi_comb with a,b LOCKED to the step-6 eta ratio via a shared scale.
+
+    Model per row (``A := eta_ref``, ``B := eta_tgt`` are the fixed step-6
+    amplitudes, ``s`` a single shared scale)::
+
+        a = s A ,  b = s B
+        Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb) + fixed_bg + d
+          = s^2 (A^2 + B^2 g^2 + 2 A B g cos(dPhi_SLM + dPhi_comb)) + fixed_bg + d
+
+    Instead of boxing ``a`` and ``b`` independently (which let them trade off --
+    ``a`` collapsing while ``b`` railed at its box, so ``a/b`` drifted far from the
+    step-6 ratio), the *ratio* ``a:b`` is pinned to ``eta_ref:eta_tgt`` exactly and
+    only the common scale ``s`` floats, boxed to ``[max(0,1-frac), 1+frac]`` (so
+    ``frac=1`` allows a 0..2x overall gain drift between step 6 and step 7 while
+    keeping the calibrated relative efficiencies).  Three free parameters
+    (``s, dPhi_comb, d``); ``fixed_bg`` is the per-row step-6 single-beam
+    background (dark already removed) that the amplitudes do NOT scale.  Solved as
+    a bounded nonlinear least squares (:func:`scipy.optimize.least_squares`);
+    errors are covariance-propagated from the Jacobian and Birge-scaled.
+    ``bg0/bg1/bg2`` are the same background as a polynomial in ``g`` (for the
+    symmetric sweep) and are only stashed for plots.  ``eta_ref_err``/
+    ``eta_tgt_err`` are accepted for API symmetry (reserved for a soft ratio
+    prior) but do not enter this hard-ratio fit.
+    """
+    from scipy.optimize import least_squares
+
+    dphi_slm = np.asarray(dphi_slm, dtype=float)
+    g = np.asarray(g, dtype=float)
+    fixed_bg = np.asarray(fixed_bg, dtype=float)
+    y = np.asarray(y, dtype=float)
+    sem = np.asarray(sem, dtype=float)
+
+    A, B = float(eta_ref), float(eta_tgt)
+
+    def predict(p):
+        s, dphi, d = p
+        s2 = s * s
+        return (s2 * (A * A + B * B * g * g)
+                + 2.0 * s2 * A * B * g * np.cos(dphi_slm + dphi) + fixed_bg + d)
+
+    def resid(p):
+        return (predict(p) - y) / sem
+
+    lo = [max(0.0, 1.0 - frac), -np.inf, -np.inf]
+    hi = [1.0 + frac, np.inf, np.inf]
+
+    # phase seed: linear projection of the (background + self) subtracted signal
+    w = 1.0 / sem**2
+    r0 = y - fixed_bg - A**2 - B**2 * g**2
+    P = float(np.sum(w * r0 * g * np.cos(dphi_slm)))
+    Q = float(np.sum(w * r0 * g * np.sin(dphi_slm)))
+    dphi0 = float(np.arctan2(-Q, P))
+    p0 = [1.0, dphi0, 0.0]
+
+    sol = least_squares(resid, p0, bounds=(lo, hi), max_nfev=20000)
+    s, dphi, d = (float(v) for v in sol.x)
+    dphi = float(np.arctan2(np.sin(dphi), np.cos(dphi)))      # wrap to (-pi, pi]
+    a, b = s * A, s * B                                       # ratio locked to A:B
+
+    y_pred = predict(sol.x)
+    residuals = y - y_pred
+    dof = max(len(y) - 3, 1)
+    chi2_red = float(np.sum((residuals / sem) ** 2) / dof)
+    birge = max(1.0, np.sqrt(chi2_red))
+
+    # covariance from the weighted Jacobian at the solution (resid already /sem)
+    try:
+        cov = np.linalg.inv(sol.jac.T @ sol.jac) * birge**2
+    except np.linalg.LinAlgError:
+        cov = np.full((3, 3), np.nan)
+    s_err = float(np.sqrt(max(cov[0, 0], 0.0)))
+    dphi_err = float(np.sqrt(max(cov[1, 1], 0.0)))
+    offset_err = float(np.sqrt(max(cov[2, 2], 0.0)))
+    a_err, b_err = A * s_err, B * s_err                       # fully correlated via s
+    amp = 2.0 * a * b                                         # = 2 s^2 A B
+    amp_err = float(abs(4.0 * s * A * B) * s_err)             # d(amp)/ds = 4 s A B
+
+    def _hit(val, lower, upper) -> bool:
+        span = max(abs(upper - lower), 1e-30)
+        return bool(val - lower <= 1e-6 * span or upper - val <= 1e-6 * span)
+
+    # a and b move together, so both share the single scale's bound state
+    s_at_bound = _hit(s, lo[0], hi[0])
+    a_at_bound = b_at_bound = s_at_bound
+
+    known = a * a + b * b * g * g + fixed_bg
+    ss_res = float(np.sum(residuals**2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    return PhaseFit(
+        dphi_comb=dphi, dphi_comb_err=dphi_err,
+        a=a, a_err=a_err, b=b, b_err=b_err,
+        amp=amp, amp_err=amp_err,
+        offset=d, offset_err=offset_err,
+        chi2_red=chi2_red, dof=dof, birge=birge, r2=r2,
+        eta_ref=eta_ref, eta_tgt=eta_tgt, bound_frac=frac,
+        a_at_bound=a_at_bound, b_at_bound=b_at_bound,
+        bg0=bg0, bg1=bg1, bg2=bg2,
+        dphi_slm=dphi_slm, g=g, y=y, sem=sem, known=known,
+        y_pred=y_pred, residuals=residuals,
+    )
+
+
 def fit_result(
     result: PhaseResult,
     tgt_model: PairModel,
     ref_model: PairModel,
     *,
     dark: float | None = None,
-    fit_offset: bool = True,
+    frac: float | None = None,
+    single_beam_bg: bool = False,
 ) -> PhaseFit:
-    """Isolate the interference term with the step-6 models and fit dPhi_comb.
+    """Fit ``a``, ``b`` and ``dPhi_comb`` to the dark-subtracted Y(theta2).
 
     Per-row dark-subtracts and averages repeated trials per point (see
-    :func:`_average_points`), removes the single-beam response of both pairs and
-    the two self-TPA pedestals, then fits the remaining fringe.  ``dark`` (scalar)
-    overrides the per-row dark uniformly (e.g. to force the step-6 value).
+    :func:`_average_points`), then fits ``Y = a^2 + b^2 g^2 +
+    2ab g cos(dPhi_SLM + dPhi_comb) + d``.
+
+    ``frac`` selects how ``a``/``b`` are handled:
+
+    * ``None`` (default) -- unconstrained closed-form fit (:func:`fit_phase`).
+      This is the numerically clean, well-conditioned fit for ``dPhi_comb``.
+    * a number -- lock the ratio ``a:b`` to the step-6 ``eta_ref:eta_tgt`` and
+      float only a shared scale ``s`` boxed to ``+/- frac`` about 1, via the
+      ratio-locked nonlinear fit (:func:`fit_phase_ratio`).  ``single_beam_bg``
+      then also folds in both pairs' step-6 single-beam response as a FIXED
+      additive background: the reference (held fully on) contributes a constant,
+      the swept target contributes the ``~g`` ramp, so ``s``/``dPhi_comb`` are not
+      forced to absorb it.
+
+    ``dark`` (scalar) overrides the per-row dark uniformly.
     """
     x_t, w_t, x_r, w_r, y, sem = _average_points(result, dark_override=dark)
 
-    r_t = tgt_model.amplitude(x_t, w_t)
-    r_r = ref_model.amplitude(x_r, w_r)
-    # dark was already removed per-row in _average_points; only the
-    # cell-dependent single-beam + self-TPA terms remain to subtract
-    background = (
-        tgt_model.single_beam(x_t, w_t)
-        + ref_model.single_beam(x_r, w_r)
-        + r_t**2 + r_r**2
-    )
-    z = y - background
-    dphi_slm = slm_phase_diff(x_t, w_t, x_r, w_r)
-    amp = 2.0 * r_t * r_r
+    g = np.sqrt(np.clip(x_t * w_t, 0.0, None))         # sin(theta2/2)^2, target field
+    dphi_slm = slm_phase_diff(x_t, w_t, x_r, w_r)       # theta2 - pi
 
     result.tgt_model = tgt_model
     result.ref_model = ref_model
-    result.fit = fit_phase(dphi_slm, amp, z, sem, fit_offset=fit_offset)
+    if frac is None:
+        result.fit = fit_phase(dphi_slm, g, y, sem)
+        return result.fit
+
+    if single_beam_bg:
+        # step-6 single-beam of both pairs as a fixed background (dark already out)
+        fixed_bg = np.asarray(
+            ref_model.single_beam(x_r, w_r) + tgt_model.single_beam(x_t, w_t),
+            dtype=float,
+        )
+        bg0 = float(ref_model.single_beam(1.0, 1.0))
+        bg1 = float(tgt_model.a_x + tgt_model.a_w)
+        bg2 = float(tgt_model.q_x + tgt_model.q_w)
+    else:
+        fixed_bg = np.zeros_like(g)
+        bg0 = bg1 = bg2 = 0.0
+
+    result.fit = fit_phase_ratio(
+        dphi_slm, g, fixed_bg, y, sem,
+        eta_ref=ref_model.eta, eta_ref_err=ref_model.eta_err,
+        eta_tgt=tgt_model.eta, eta_tgt_err=tgt_model.eta_err,
+        bg0=bg0, bg1=bg1, bg2=bg2, frac=frac,
+    )
     return result.fit
 
 
 def swap_invariance(result: PhaseResult):
     """Table-2 diagnostic: |Z(x=a,w=b) - Z(x=b,w=a)| for each swap pair.
 
-    The test runs on the CLEAN interference term, not raw Y, so the known
-    single-beam channel asymmetry is removed first (each ``a``/``q`` stays bolted
-    to its own physical channel -- they are NOT swapped)::
+    The test runs on the CLEAN interference term, not raw Y, so the fitted self
+    terms AND the step-6 single-beam background are removed first::
 
-        Z(x=a,w=b) = Y(a,b) - d - [a_x*a + q_x*a^2 + a_w*b + q_w*b^2] - R^2 - R_0^2
-        Z(x=b,w=a) = Y(b,a) - d - [a_x*b + q_x*b^2 + a_w*a + q_w*a^2] - R^2 - R_0^2
+        Z(x,w) = Y(x,w) - [a^2 + b^2 (x w) + sb_ref + sb_tgt] - d
+               = 2 a b sqrt(x w) cos(dPhi_SLM + dPhi_comb)
 
-    Under the bilinear TPA model ``R = eta*sqrt(x*w)`` and ``dPhi_SLM`` (a channel
-    *sum*) are swap-symmetric, so ``Z`` must be too; a residual well above the
-    combined SEM flags a genuine channel asymmetry (unequal per-channel
-    phase/amplitude law or crosstalk) that survives the step-6 correction.
-    Returns ``(x_t, w_t, z, z_swapped, abs_diff, sem)`` for the off-diagonal
-    cells.  Falls back to raw Y only if the step-6 models are not attached.
+    Under the bilinear model the target amplitude ``sqrt(x w)`` and ``dPhi_SLM``
+    (a channel *sum*) are swap-symmetric, so ``Z`` must be too; a residual well
+    above the combined SEM flags a genuine channel asymmetry (unequal per-channel
+    phase/amplitude law or crosstalk).  Returns ``(x_t, w_t, z, z_swapped,
+    abs_diff, sem)`` for the off-diagonal cells.  Falls back to raw Y only if the
+    fit is not attached.  ``fit.known`` already carries ``a^2 + b^2 g^2 + sb``.
     """
     x_t, w_t, x_r, w_r, y, sem = _average_points(result)   # y already dark-subtracted
-    tgt, ref = result.tgt_model, result.ref_model
-    if tgt is not None and ref is not None:
-        r_t = tgt.amplitude(x_t, w_t)
-        r_r = ref.amplitude(x_r, w_r)
-        background = (tgt.single_beam(x_t, w_t)
-                      + ref.single_beam(x_r, w_r) + r_t**2 + r_r**2)
-        sig = y - background        # clean interference term Z
+    fit = result.fit
+    if fit is not None and fit.known is not None and np.isfinite(fit.a):
+        # clean interference: strip fitted self terms + step-6 single-beam + d
+        sig = y - fit.known - fit.offset
     else:
         sig = y
 
@@ -563,6 +755,8 @@ def measure_phase_sweep(
     measure_dark: bool = True,
     dark_per_trial: bool = True,
     col_ratio: np.ndarray | None = None,
+    frac: float | None = None,
+    single_beam_bg: bool = False,
     stop_event: threading.Event | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PhaseResult:
@@ -579,6 +773,12 @@ def measure_phase_sweep(
     over the run is tracked; set it False to take a single all-off reading once at
     the start.  If ``measure_dark`` is False the mean of the two step-6 darks is
     used for every row.  Raises :class:`TPAPhaseAborted` if ``stop_event`` is set.
+
+    ``frac``/``single_beam_bg`` are forwarded to :func:`fit_result`: ``frac=None``
+    (default) keeps the unconstrained closed-form fit; a number locks ``a:b`` to
+    the step-6 ``eta_ref:eta_tgt`` ratio and floats a shared scale boxed to
+    ``+/- frac``.  ``single_beam_bg`` additionally folds in both pairs' step-6
+    single-beam response as a fixed background.
     """
     n = layout.n_channels
     for name, idx in (("tgt_index", tgt_index), ("ref_index", ref_index)):
@@ -671,14 +871,16 @@ def measure_phase_sweep(
         dark_v=np.array([r[7] for r in rows], dtype=float),
         n_trials=n_trials,
     )
-    fit_result(result, tgt_model, ref_model)
+    fit_result(result, tgt_model, ref_model, frac=frac, single_beam_bg=single_beam_bg)
     if progress_callback is not None and result.fit is not None:
         progress_callback(
             TPAPhaseProgress(
                 step=total, total=total,
                 message=(
                     f"fit: dPhi_comb = {np.degrees(result.fit.dphi_comb):+.2f} deg "
-                    f"(V = {result.fit.visibility:.3f})"
+                    f"(a = {result.fit.a:.4g}, b = {result.fit.b:.4g}"
+                    + (", a@bound" if result.fit.a_at_bound else "")
+                    + (", b@bound" if result.fit.b_at_bound else "") + ")"
                 ),
                 dphi_comb=result.fit.dphi_comb,
             )
@@ -734,12 +936,20 @@ def load_phase_csv(
     ref_model: PairModel,
     *,
     dark: float | None = None,
+    frac: float | None = None,
+    single_beam_bg: bool = False,
 ) -> PhaseResult:
     """Load a raw phase-sweep CSV and re-fit dPhi_comb with the given step-6 models.
 
     The per-row ``dark_v`` column is used when present; otherwise the scalar
     ``# dark_mean_v`` (or legacy ``# dark_v``) comment, then the step-6 mean, is
     filled for every row.  ``dark`` (scalar) overrides all of them uniformly.
+
+    ``frac``/``single_beam_bg`` are forwarded to :func:`fit_result`: ``frac=None``
+    (default) keeps the unconstrained closed-form fit; a number locks ``a:b`` to
+    the step-6 ``eta_ref:eta_tgt`` ratio and floats a shared scale boxed to
+    ``+/- frac``.  ``single_beam_bg`` additionally folds in both pairs' step-6
+    single-beam response as a fixed background.
     """
     file_dark: float | None = None
     with open(Path(path), newline="", encoding="utf-8") as f:
@@ -790,7 +1000,7 @@ def load_phase_csv(
         n_trials=int(trials.max()) + 1 if trials.size else 1,
         csv_path=str(Path(path).resolve()),
     )
-    fit_result(result, tgt_model, ref_model)
+    fit_result(result, tgt_model, ref_model, frac=frac, single_beam_bg=single_beam_bg)
     return result
 
 
@@ -813,9 +1023,19 @@ def save_phase_json(result: PhaseResult, path: str | Path) -> str:
             "dphi_comb_deg": fit.dphi_comb_deg,
             "dphi_comb_err_rad": fit.dphi_comb_err,
             "dphi_comb_err_deg": float(np.degrees(fit.dphi_comb_err)),
-            "visibility": fit.visibility,
-            "visibility_err": fit.visibility_err,
-            "offset_v": fit.offset,
+            "a": fit.a,                 # reference amplitude R_1 (~ eta_ref)
+            "a_err": fit.a_err,
+            "a_at_bound": fit.a_at_bound,
+            "b": fit.b,                 # target amplitude scale (~ eta_tgt)
+            "b_err": fit.b_err,
+            "b_at_bound": fit.b_at_bound,
+            "eta_ref": fit.eta_ref,     # step-6 box centre for a
+            "eta_tgt": fit.eta_tgt,     # step-6 box centre for b
+            "bound_frac": fit.bound_frac,
+            "amp_2ab": fit.amp,         # interference amplitude 2ab
+            "amp_2ab_err": fit.amp_err,
+            "dark_resid_v": fit.offset,  # residual DC after per-row dark subtraction
+            "dark_resid_err_v": fit.offset_err,
             "chi2_red": fit.chi2_red,
             "dof": fit.dof,
             "birge": fit.birge,
@@ -838,6 +1058,7 @@ __all__ = [
     "intensity_for_phase",
     "slm_phase_diff",
     "fit_phase",
+    "fit_phase_ratio",
     "fit_result",
     "swap_invariance",
     "build_phase_sweep",
