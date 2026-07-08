@@ -617,6 +617,7 @@ def build_channel_calibration_grid(
     gap_px: int = 5,
     slm_width: int | None = None,
     guard_bands_nm: Iterable[tuple[float, float]] | None = None,
+    require_symmetric_guard_bands: bool = True,
 ) -> tuple[CalibrationResult, float]:
     """Generate a Step-3 seed only at channel centers around a target wavelength.
 
@@ -633,6 +634,14 @@ def build_channel_calibration_grid(
     overlaps one of those wavelength bands is skipped and the next pitch outward
     is tried. The requested number of channels per side is preserved when the
     Step-2 range is wide enough.
+
+    Channels are placed at mirror-image offsets ``center +/- (k + 0.5) * pitch``,
+    so the k-th channel on each side pairs up at equal wavelength offset from the
+    target only when the skipped (guard) bands are themselves symmetric about
+    ``target_wavelength_nm``. With ``require_symmetric_guard_bands`` (the
+    default), an asymmetric guard set is rejected up front so a lopsided pairing
+    cannot slip through; pass False to allow it (e.g. to probe the skip
+    mechanics in isolation).
     """
 
     target = float(target_wavelength_nm)
@@ -673,6 +682,8 @@ def build_channel_calibration_grid(
         if guard_bands_nm is None
         else _validate_guard_bands_nm(guard_bands_nm)
     )
+    if require_symmetric_guard_bands:
+        _validate_guard_bands_symmetric(guard_bands, target)
     coord_min = float(source_coordinates[0])
     coord_max = float(source_coordinates[-1])
 
@@ -1470,6 +1481,45 @@ def _validate_guard_bands_nm(
             raise ValueError(f"guard band {index} half-width must be positive")
         bands.append((center, half_width))
     return bands
+
+
+def _validate_guard_bands_symmetric(
+    guard_bands: list[tuple[float, float]],
+    target_wavelength_nm: float,
+    *,
+    tolerance_nm: float = 1e-6,
+) -> None:
+    """Reject guard bands that are not mirror-symmetric about the target.
+
+    Channel candidates sit at ``center +/- (k + 0.5) * pitch``, so a guard band
+    at ``(c, w)`` skips the same k-th candidate on its side that a partner band
+    at ``(2 * target - c, w)`` skips on the other side. Without that partner the
+    two sides drop different candidates and the k-th left/right pair no longer
+    shares a wavelength offset. Each band must therefore have a mirror partner
+    (a band centred on the target is its own mirror); multiplicities must match
+    too, so two identical bands need two mirrors.
+    """
+
+    target = float(target_wavelength_nm)
+    remaining = list(guard_bands)
+    for center, half_width in guard_bands:
+        mirror = 2.0 * target - center
+        match_index: int | None = None
+        for index, (other_center, other_half) in enumerate(remaining):
+            if (
+                abs(other_center - mirror) <= tolerance_nm
+                and abs(other_half - half_width) <= tolerance_nm
+            ):
+                match_index = index
+                break
+        if match_index is None:
+            raise ValueError(
+                f"guard band ({center:g} +/- {half_width:g} nm) has no mirror "
+                f"about the target {target:g} nm (expected a band near "
+                f"{mirror:g} +/- {half_width:g} nm); guard bands must be "
+                f"symmetric so left/right channel pairs stay wavelength-symmetric"
+            )
+        remaining.pop(match_index)
 
 
 def _calibrated_mapping(

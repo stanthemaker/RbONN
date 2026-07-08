@@ -170,6 +170,9 @@ class CalibrationNewTests(unittest.TestCase):
             gap_px=5,
             slm_width=240,
             guard_bands_nm=[(779.0, 0.01)],
+            # this test exercises the skip mechanics with a single guard, which
+            # is intentionally asymmetric about the target
+            require_symmetric_guard_bands=False,
         )
 
         self.assertAlmostEqual(center, 100.0)
@@ -178,6 +181,52 @@ class CalibrationNewTests(unittest.TestCase):
             np.asarray([50.0, 70.0, 110.0, 130.0]),
         )
         self.assertNotIn(90.0, set(grid.coordinates.tolist()))
+
+    def test_channel_calibration_grid_rejects_asymmetric_guard_bands(self) -> None:
+        step2 = CalibrationResult(
+            wavelength=np.asarray([788.0, 778.0, 766.0]),
+            coordinates=np.asarray([0.0, 100.0, 220.0]),
+            max_level=900,
+            min_level=100,
+            level_range=np.asarray([100, 900]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "symmetric"):
+            build_channel_calibration_grid(
+                step2,
+                target_wavelength_nm=778.0,
+                n_channels_per_side=2,
+                channel_width_px=15,
+                gap_px=5,
+                slm_width=240,
+                guard_bands_nm=[(780.0, 0.06)],
+            )
+
+    def test_channel_calibration_grid_accepts_symmetric_guard_bands(self) -> None:
+        step2 = CalibrationResult(
+            wavelength=np.asarray([788.0, 778.0, 766.0]),
+            coordinates=np.asarray([0.0, 100.0, 220.0]),
+            max_level=900,
+            min_level=100,
+            level_range=np.asarray([100, 900]),
+        )
+
+        # 780 and 776 mirror each other about the 778 nm target
+        grid, center = build_channel_calibration_grid(
+            step2,
+            target_wavelength_nm=778.0,
+            n_channels_per_side=2,
+            channel_width_px=15,
+            gap_px=5,
+            slm_width=240,
+            guard_bands_nm=[(780.0, 0.06), (776.0, 0.06)],
+        )
+
+        self.assertAlmostEqual(center, 100.0)
+        # left/right channel pairs stay at equal wavelength offset from 778 nm,
+        # so the offset set is closed under negation
+        offsets = grid.wavelength - 778.0
+        np.testing.assert_allclose(np.sort(offsets), np.sort(-offsets))
 
     def test_refine_center_coordinate_with_osa_uses_linear_slope(self) -> None:
         step2 = CalibrationResult(

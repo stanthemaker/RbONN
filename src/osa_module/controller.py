@@ -128,7 +128,7 @@ class OSAController:
     def run_single_sweep(
         self,
         *,
-        timeout: float = 120.0,
+        timeout: float = 180.0,
         poll_interval: float = 0.5,
         stop_event: threading.Event | None = None,
     ) -> bool:
@@ -172,7 +172,7 @@ class OSAController:
         settings: MeasurementSettings | None = None,
         *,
         averages: int = 1,
-        timeout: float = 120.0,
+        timeout: float = 180.0,
         poll_interval: float = 0.5,
         stop_event: threading.Event | None = None,
     ) -> TraceData:
