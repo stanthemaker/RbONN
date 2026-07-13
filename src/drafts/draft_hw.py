@@ -25,6 +25,13 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from daq_module import DAQController, DAQMonitorSettings  # noqa: E402
 from slm_module.controller import SLMController  # noqa: E402
 
+# Our transimpedance amplifier outputs a NEGATIVE voltage for positive light, so
+# every read is sign-inverted here to record a positive light signal (more light
+# -> more positive volts).  This is the single read chokepoint the step-6/7
+# calibrations share (via read_point -> monitor_cycle), so inverting here flips
+# both without touching the shared daq_module.
+INVERT = True
+
 
 def detect_slm_display() -> int:
     """Find the LCOS-SLM display number (the GUI's Detect step).
@@ -95,7 +102,8 @@ def connect_daq(
 
 
 def read_point(
-    daq: DAQController, *, single: bool = False, timeout: float = 30.0
+    daq: DAQController, *, single: bool = False, invert: bool = INVERT,
+    timeout: float = 30.0,
 ) -> tuple[float, float, float]:
     """One fixed-window averaged read; return ``(mean, std, sem)`` in volts.
 
@@ -103,11 +111,17 @@ def read_point(
     (``x == 0 or w == 0``, incl. all-off darks; see ``DAQMonitorSettings``).
     ``std`` is the low-passed trace spread, ``sem`` the standard error of the
     mean over the effective independent-sample count ``2 * T * f_cut``.
+
+    With ``invert`` (default ``INVERT``) the mean is negated so the TIA's
+    negative-for-light output records as a positive light signal.  ``std`` and
+    ``sem`` are spreads and stay non-negative -- negating the trace leaves them
+    unchanged.
     """
     sample = daq.monitor_cycle(timeout=timeout, single=single)
     if sample is None:
         raise RuntimeError("DAQ read aborted")
-    return float(sample.value), float(sample.std), float(sample.sem)
+    mean = -float(sample.value) if invert else float(sample.value)
+    return mean, float(sample.std), float(sample.sem)
 
 
 __all__ = [

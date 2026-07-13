@@ -8,6 +8,15 @@ invocations, no flags:
     python src/drafts/calib_step7_test.py some.csv   # REFIT:   fit dPhi_comb from an
                                                      #   existing CSV, offline (no hw)
 
+Add ``--flip`` to either invocation when the photodiode/DAQ reads inverted (more
+light -> more negative volts): it negates the raw ``voltage_mean_v`` and its
+per-row ``dark_v`` (the SAME channel) so the fit's ``y = mean - dark`` becomes
+the positive light signal (= dark - |mean|).  On a REFIT it writes a sibling
+``*_flipped.csv`` and fits that; on a COLLECT the values are negated as they are
+read, before the CSV is written.  The spreads (``voltage_std_v`` /
+``voltage_sem_v``) and ``sem_ratio`` (= |sem/mean|) are sign-independent and
+left untouched.
+
 What it measures.  Each target pair carries a fixed comb-phase offset ``dPhi_comb``
 relative to a common reference pair (the reference defines ``Phi = 0``).  Driving
 the two pairs at once makes them interfere; the interference fringe encodes
@@ -295,7 +304,49 @@ def _targets_in_csv(path, default) -> list[int]:
     return sorted(seen) if seen else list(default)
 
 
-def fit_csv(path) -> None:
+def _flip_meas_csv(path) -> Path:
+    """Write a sign-flipped copy of a raw step-7 CSV and return its path.
+
+    The photodiode/DAQ reads inverted (more light -> more negative volts), so the
+    raw ``voltage_mean_v`` and its per-row ``dark_v`` are negated -- both are the
+    same channel, so the fit's ``y = mean - dark`` then yields the positive light
+    signal (= dark - |mean|) with the residual dark still near zero.  Every other
+    column is copied through unchanged: the spreads (``voltage_std_v`` /
+    ``voltage_sem_v``) and ``sem_ratio`` (= |sem/mean|) are sign-independent.
+    Mirrors the hand-made ``*_flipped.csv`` refit workflow.  Output lands next to
+    the source as ``<stem>_flipped.csv``.
+    """
+    src = Path(path)
+    with open(src, newline="", encoding="utf-8") as f:
+        lines = f.readlines()
+    comments = [ln for ln in lines if ln.lstrip().startswith("#")]
+    data_lines = [ln for ln in lines if not ln.lstrip().startswith("#")]
+
+    reader = csv.DictReader(data_lines)
+    fields = reader.fieldnames or []
+    rows = []
+    for row in reader:
+        for col in ("voltage_mean_v", "dark_v"):
+            val = row.get(col)
+            if val not in (None, ""):
+                row[col] = f"{-float(val):.9g}"
+        rows.append(row)
+
+    dst = src.with_name(f"{src.stem}_flipped.csv")
+    with open(dst, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+        for ln in comments:                              # carry trailing comments over
+            parts = ln.lstrip("#").strip().split(",")    # negate a dark_mean_v comment too
+            if len(parts) == 2 and parts[0].strip() == "dark_mean_v":
+                f.write(f"# dark_mean_v,{-float(parts[1]):.9g}\n")
+            else:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+    return dst
+
+
+def fit_csv(path, *, flip: bool = False) -> None:
     """Re-fit an already-recorded CSV offline (no hardware).
 
     Needs two inputs: this CSV plus the combined step-6 JSON (``IN_STEP6``) for
@@ -303,7 +354,14 @@ def fit_csv(path) -> None:
     pairs -- a collected file records every TGT_INDICES entry vs the shared
     REF_INDEX -- so every target present (that has a step-6 model) is fit separately
     against the reference and gets its own refit PNG.
+
+    ``flip`` handles an inverted photodiode/DAQ read: it writes a sign-flipped
+    sibling CSV (:func:`_flip_meas_csv`, negating ``voltage_mean_v`` + ``dark_v``)
+    and re-fits that instead, so the fitted fringe is the positive light signal.
     """
+    if flip:
+        path = _flip_meas_csv(path)
+        print(f"Flip: negated voltage_mean_v + dark_v -> re-fitting {path}")
     models = load_models()
     targets = _targets_in_csv(path, TGT_INDICES)
     fittable = [k for k in targets if k in models and k != REF_INDEX]
@@ -400,12 +458,16 @@ def _read_point(daq, x_t: float, w_t: float, x_r: float, w_r: float) -> tuple[fl
     return mean_v, std_v, sem_v, (T_SINGLE_S if single else T_BOTH_S)
 
 
-def _measure_target(slm, daq, layout, k: int, drive) -> PhaseResult:
+def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> PhaseResult:
     """Drive pair ``k`` (vs REF_INDEX) over ``drive`` and read Y; PhaseResult, no fit.
 
     Only channels ``k`` and ``REF_INDEX`` are driven; all others held off.  An
     all-off dark is read once at the start (T_SINGLE_S window) and stored per
     row for per-row subtraction.  Needs no step-6 model -- raw data only.
+
+    ``flip`` negates the raw mean and dark reads (inverted DAQ sign convention:
+    more light -> more negative volts), so the CSV this writes already carries the
+    positive light signal; the spreads/SEM are magnitudes and stay as read.
     """
     from slm_module.encoding import encode_to_pattern
 
@@ -427,12 +489,16 @@ def _measure_target(slm, daq, layout, k: int, drive) -> PhaseResult:
     rows: list[tuple] = []
     _display(0.0, 0.0, 0.0, 0.0)                     # all-off dark, once
     dark_v, _, _, dur = _read_point(daq, 0.0, 0.0, 0.0, 0.0)
+    if flip:
+        dark_v = -dark_v                             # inverted DAQ sign (same channel)
     step += 1
     print(f"[{step}/{total}] pair {k} dark (all off, {dur:.0f}s) "
           f"= {dark_v*1000:.4f} mV")
     for x_t, w_t, x_r, w_r in drive:
         _display(x_t, w_t, x_r, w_r)
         mean_v, std_v, sem_v, dur = _read_point(daq, x_t, w_t, x_r, w_r)
+        if flip:
+            mean_v = -mean_v
         rows.append((0, x_t, w_t, x_r, w_r, mean_v, std_v, sem_v, dark_v))
         step += 1
         ratio = abs(sem_v / mean_v) if mean_v else float("inf")
@@ -454,7 +520,7 @@ def _measure_target(slm, daq, layout, k: int, drive) -> PhaseResult:
     )
 
 
-def measure_only() -> None:
+def measure_only(*, flip: bool = False) -> None:
     """Sweep every target pair vs the shared reference; write one raw CSV.
 
     Loops over TGT_INDICES (each vs REF_INDEX), holding the reference fully on
@@ -464,8 +530,13 @@ def measure_only() -> None:
     so REF_INDEX and every TGT_INDICES entry are recorded.  Raw data only: no
     step-6 models, no fit -- just drive the SLM and record the DAQ.  Refit later
     with ``python calib_step7_test.py <that csv>``.
+
+    ``flip`` negates each raw mean/dark read (inverted DAQ sign) so the written
+    CSV already holds the positive light signal -- refit it later WITHOUT --flip.
     """
     layout = load_layout()
+    if flip:
+        print("Flip: negating voltage_mean_v + dark_v as read (inverted DAQ sign).")
 
     drive = build_xw_sweep()
     values = [x_t for x_t, _, _, _ in drive]
@@ -478,7 +549,7 @@ def measure_only() -> None:
             print(f"\n=== Sweep: pair {k} vs reference {REF_INDEX}  "
                   f"(x{REF_INDEX}=w{REF_INDEX}=1, sweep x{k}=w{k} over "
                   f"{values}) ===")
-            results.append(_measure_target(slm, daq, layout, k, drive))
+            results.append(_measure_target(slm, daq, layout, k, drive, flip=flip))
     finally:
         slm.close_slm()
         daq.disconnect()
@@ -491,11 +562,12 @@ def measure_only() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    flip = "--flip" in argv     # inverted DAQ read -> negate voltage_mean_v + dark_v
     positional = [a for a in argv if not a.startswith("-")]
     if positional:              # a CSV path -> offline refit, no hardware
-        fit_csv(positional[0])
+        fit_csv(positional[0], flip=flip)
     else:                       # no arg -> collect a fresh sweep (drives the SLM/DAQ)
-        measure_only()
+        measure_only(flip=flip)
     return 0
 
 

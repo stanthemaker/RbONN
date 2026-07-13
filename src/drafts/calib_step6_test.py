@@ -5,6 +5,13 @@ Not a pytest test (no mocks, needs real hardware) -- run it directly::
     python drafts/calib_step6_test.py             # sweep hardware, fit, plot
     python drafts/calib_step6_test.py --meas       # raw meas CSV only: sweep + record, no fit
     python drafts/calib_step6_test.py some.csv     # re-fit an existing CSV offline
+    python drafts/calib_step6_test.py some.csv --flip  # re-fit sign-flipped (inverted read)
+
+``--flip`` applies to a REFIT only (the measure path always records the raw
+signal): when the photodiode/DAQ reads inverted (more light -> more negative
+volts) it negates the loaded ``voltage_mean_v`` in memory (every row incl. the
+(0,0) dark) and re-fits, so the fitted Y = eta^2*(x*w) + ... + d is the positive
+light signal.  Nothing is written back -- the raw CSV on disk is untouched.
 
 For channel pair ``PAIR_INDEX`` (x[PAIR_INDEX], w[PAIR_INDEX]) this walks the
 reduced 1-D calibration curves built by ``tpa_pair.build_pair_points`` -- one
@@ -65,11 +72,11 @@ from slm_module.tpa_pair import (  # noqa: E402
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"  # data directory: inputs + outputs live here
 
-PAIR_INDICES = [1,3,4,5]                           # near (cols 660/680) + far (cols 600/740)
+PAIR_INDICES = [1,3]                           # near (cols 660/680) + far (cols 600/740)
 SWEEP_MIN = 0.1                                # min per-side intensity in the ramp (0..1)
 SWEEP_MAX = 1.0                                 # max per-side intensity in the ramp (0..1)
 N_SWEEP_POINTS = 10                              # points per 1-D curve (x-only / w-only / cross)
-IN_STEP3 = CALIB_PATH / "calib_step3_0711.json"    # Step 3 calib (near pair 0 + far pair 3)
+IN_STEP3 = CALIB_PATH / "calib_step3_0712.json"    # Step 3 calib (near pair 0 + far pair 3)
 
 SLM_DISPLAY_NO = None           # None -> auto-detect the LCOS-SLM display (like the GUI's Detect)
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch (USB link)
@@ -82,8 +89,8 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
-T_SINGLE_S = 5.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
-T_BOTH_S = 3.0                  # both beams on (the bright cross points) (s)
+T_SINGLE_S = 4.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
+T_BOTH_S = 2.0                  # both beams on (the bright cross points) (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 
@@ -286,15 +293,26 @@ def sweep_and_fit() -> None:
         print(f"Plot saved to {plot_path}")
 
 
-def fit_csv(path: str | Path) -> None:
+def fit_csv(path: str | Path, *, flip: bool = False) -> None:
     """Re-fit an already-recorded pair-grid CSV offline (no hardware).
 
     Writes the same combined ``calib_step6_result_MMDD_HHMM.json`` (input Step-3
     calib + every fitted pair) as the hardware run; the timestamp keeps a refit
     from clobbering earlier results.  No PNGs are written -- instead one random
     fitted pair's model plot is shown interactively to eyeball the refit.
+
+    ``flip`` handles an inverted photodiode/DAQ read (more light -> more negative
+    volts): the loaded ``voltage_mean_v`` is negated in memory on every row (incl.
+    the (0,0) dark) and each pair is re-fit, so Y = eta^2*(x*w) + ... + d comes out
+    as the positive light signal.  Nothing is written back -- the raw CSV on disk
+    is untouched, and the spreads (std/SEM) are magnitudes so they stay as read.
     """
     result = load_tpa_pair_csv(path)
+    if flip:
+        for grid in result.channels:
+            grid.voltage_mean_v = -grid.voltage_mean_v   # inverted read (same channel)
+            fit_grid(grid)                               # re-fit the negated data
+        print("Flip: negated voltage_mean_v in memory and re-fit (inverted read).")
     n_axis = int(sum(
         int(((c.fit.x == 0) | (c.fit.w == 0)).sum()) for c in result.channels if c.fit
     ))
@@ -422,10 +440,11 @@ def measure_only() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    flags = {"--meas", "-m"}
+    flags = {"--meas", "-m", "--flip"}
+    flip = "--flip" in argv               # refit only: negate voltage_mean_v (inverted read)
     positional = [a for a in argv if a not in flags]
     if positional:                       # a CSV path -> offline re-fit, no hardware
-        fit_csv(positional[0])
+        fit_csv(positional[0], flip=flip)
         return 0
     if any(a in ("--meas", "-m") for a in argv):   # raw meas CSV only: sweep + record, no fit
         measure_only()

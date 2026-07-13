@@ -8460,7 +8460,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_segment_preview()
 
     def _add_segment_row(self) -> None:
-        width, _height = self.slm_size
+        size = self._segment_axis_size()
         row = self.segments_table.rowCount()
         previous_end = 0
         if row > 0:
@@ -8473,9 +8473,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.segments_table.insertRow(row)
             self.segments_table.setItem(
-                row, 0, QtWidgets.QTableWidgetItem(str(min(previous_end, width - 1)))
+                row, 0, QtWidgets.QTableWidgetItem(str(min(previous_end, size - 1)))
             )
-            self.segments_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(width)))
+            self.segments_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(size)))
             self.segments_table.setItem(row, 2, QtWidgets.QTableWidgetItem("0"))
         finally:
             self._segments_updating = False
@@ -8495,6 +8495,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _segment_pattern_data(self) -> np.ndarray:
         width, height = self.slm_size
+        axis = self._segment_axis()
         rows = self.segments_table.rowCount()
         if rows == 0:
             raise ValueError("define at least one segment")
@@ -8509,12 +8510,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._segment_mode_is_equal():
             levels = [cell(row, 2, "level") for row in range(rows)]
-            return make_equal_x_segments(width, height, levels)
+            return make_equal_segments(width, height, levels, axis=axis)
         segments = [
-            (cell(row, 0, "x start"), cell(row, 1, "x end"), cell(row, 2, "level"))
+            (
+                cell(row, 0, f"{axis} start"),
+                cell(row, 1, f"{axis} end"),
+                cell(row, 2, "level"),
+            )
             for row in range(rows)
         ]
-        return make_x_segments(width, height, segments)
+        return make_segments(width, height, segments, axis=axis)
 
     def _update_segment_preview(self) -> None:
         if not hasattr(self, "segment_preview_label"):
