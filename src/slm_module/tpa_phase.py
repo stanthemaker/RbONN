@@ -30,10 +30,8 @@ with ``phi_half(x) = asin(sqrt(x)) = phi/2`` (:func:`phi_half`,
 where ``a`` := reference amplitude and ``b`` := target amplitude.  ``(g, dPhi_SLM)``
 are computed per row straight from the commanded intensities, so the fit is
 GEOMETRY-GENERAL: it does not care how the sweep was built.  The usual drive holds
-the reference AND the target's x channel fully on and sweeps only ``w_t`` (so
-``g = sqrt(w_t)``, ``dPhi_SLM = phi_half(w_t) - pi/2``); a re-fit of an older CSV
-that swept both target channels together (``x_t = w_t``, so ``g = sin(theta/2)^2``,
-``dPhi_SLM = theta - pi``) fits identically.  Because the target is calibrated
+the reference fully on and sweeps both target channels together (``x_t = w_t``, so
+``g = sin(theta/2)^2``, ``dPhi_SLM = theta - pi``).  Because the target is calibrated
 *against* the reference and the reference defines ``Phi = 0``, the fitted
 ``dPhi_comb`` IS the target pair's phase in the spectrum ``{Phi_k}``.
 
@@ -54,10 +52,12 @@ parameters ``s, dPhi_comb, d`` are solved by bounded nonlinear least squares
 actually bound.  An unconstrained closed-form variant is kept as :func:`fit_phase`
 for diagnostics.
 
-The measurement is instrument-agnostic exactly like step 6.  Raw rows (one per
+This module is fitting + IO only and geometry-general.  The instrument-facing
+half (drive builders + the SLM/monitor sweep) lives in
+:mod:`slm_module.tpa_phase_measure` for the pipeline, and in
+``src/drafts/calib_step7_test.py`` for the offline driver.  Raw rows (one per
 trial x point) are persisted as a CSV (:func:`write_phase_csv`) so a run can be
-reloaded and re-fit offline (:func:`load_phase_csv`); the driver in
-``src/drafts/calib_step7_test.py`` does the SLM/DAQ wiring.
+reloaded and re-fit offline (:func:`load_phase_csv`).
 """
 from __future__ import annotations
 
@@ -68,7 +68,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-
 
 # ======================================================================
 # per-pair step-6 model  (background + eta, used to isolate the fringe)
@@ -251,9 +250,7 @@ class PhaseFit:
     y_pred: np.ndarray = field(repr=False)       # full model prediction
     residuals: np.ndarray = field(repr=False)
     # commanded intensities per fitted point (same order as g/dphi_slm), so the
-    # plot/report can tell how the sweep was driven: w-only (x_t != w_t; ref +
-    # target-x held on, only w_t swept, g = sqrt(w_t)) vs both target channels
-    # together (x_t == w_t, g = sin^2(theta/2)).  Optional -> None: old fits load.
+    # plot can rebuild the swept geometry.  Optional -> None: old fits load.
     x_t: np.ndarray | None = field(default=None, repr=False)
     w_t: np.ndarray | None = field(default=None, repr=False)
     x_r: np.ndarray | None = field(default=None, repr=False)
@@ -628,11 +625,49 @@ def fit_result(
             bg0=bg0, bg1=bg1, bg2=bg2, frac=frac,
         )
 
-    # stash the per-point commanded intensities so plot/report can tell how the
-    # sweep was driven (w-only: x_t != w_t; both target channels together: x_t == w_t)
+    # stash the per-point commanded intensities so the plot can rebuild the sweep
     fit.x_t, fit.w_t, fit.x_r, fit.w_r = x_t, w_t, x_r, w_r
     result.fit = fit
     return fit
+
+
+def swap_invariance(result: PhaseResult):
+    """Table-2 diagnostic: |Z(x=a,w=b) - Z(x=b,w=a)| for each swap pair.
+
+    The test runs on the CLEAN interference term, not raw Y, so the fitted self
+    terms AND the step-6 single-beam background are removed first::
+
+        Z(x,w) = Y(x,w) - [a^2 + b^2 (x w) + sb_ref + sb_tgt] - d
+               = 2 a b sqrt(x w) cos(dPhi_SLM + dPhi_comb)
+
+    Under the bilinear model the target amplitude ``sqrt(x w)`` and ``dPhi_SLM``
+    (a channel *sum*) are swap-symmetric, so ``Z`` must be too; a residual well
+    above the combined SEM flags a genuine channel asymmetry (unequal per-channel
+    phase/amplitude law or crosstalk).  Returns ``(x_t, w_t, z, z_swapped,
+    abs_diff, sem)`` for the off-diagonal cells.  Falls back to raw Y only if the
+    fit is not attached.  ``fit.known`` already carries ``a^2 + b^2 g^2 + sb``.
+    """
+    x_t, w_t, x_r, w_r, y, sem = _average_points(result)   # y already dark-subtracted
+    fit = result.fit
+    if fit is not None and fit.known is not None and np.isfinite(fit.a):
+        # clean interference: strip fitted self terms + step-6 single-beam + d
+        sig = y - fit.known - fit.offset
+    else:
+        sig = y
+
+    lut = {(round(a, 9), round(b, 9)): (zz, ss)
+           for a, b, zz, ss in zip(x_t, w_t, sig, sem)}
+    out = []
+    for a, b, zz, ss in zip(x_t, w_t, sig, sem):
+        if round(a, 9) == round(b, 9):
+            continue
+        swapped = lut.get((round(b, 9), round(a, 9)))
+        if swapped is None:
+            continue
+        z_sw, s_sw = swapped
+        out.append((float(a), float(b), float(zz), float(z_sw),
+                    abs(float(zz) - float(z_sw)), float(np.hypot(ss, s_sw))))
+    return out
 
 
 # ======================================================================
@@ -691,8 +726,8 @@ def load_phase_csv(
     """Load a raw phase-sweep CSV and re-fit dPhi_comb with the given step-6 models.
 
     The per-row ``dark_v`` column is used when present; otherwise the scalar
-    ``# dark_mean_v`` (or legacy ``# dark_v``) comment, then the step-6 mean, is
-    filled for every row.  ``dark`` (scalar) overrides all of them uniformly.
+    ``# dark_mean_v`` comment, then the step-6 mean, is filled for every row.
+    ``dark`` (scalar) overrides all of them uniformly.
 
     ``only_tgt`` keeps only rows whose ``tgt_index`` matches it; a collected file
     records every target pair vs the shared reference in one CSV, so pass the pair
@@ -709,7 +744,7 @@ def load_phase_csv(
         for raw in f:
             if raw.startswith("#"):
                 parts = raw.lstrip("#").strip().split(",")
-                if len(parts) == 2 and parts[0].strip() in ("dark_mean_v", "dark_v"):
+                if len(parts) == 2 and parts[0].strip() == "dark_mean_v":
                     file_dark = float(parts[1])
 
     rows: list[tuple[int, float, float, float, float, float, float, float, float | None]] = []
@@ -721,10 +756,7 @@ def load_phase_csv(
                 continue  # skip the other targets in a multi-pair CSV
             dv = row.get("dark_v")
             std_v = float(row.get("voltage_std_v", "nan") or "nan")
-            # New CSVs carry voltage_sem_v (the fit weight); older single-column
-            # CSVs stored the SEM in voltage_std_v, so fall back to it when absent.
-            sem_raw = row.get("voltage_sem_v")
-            sem_v = float(sem_raw) if sem_raw not in (None, "") else std_v
+            sem_v = float(row["voltage_sem_v"])  # the fit weight; every CSV records it
             rows.append((
                 int(float(row.get("trial", 0))),
                 float(row["x_t"]), float(row["w_t"]),
@@ -820,6 +852,7 @@ __all__ = [
     "fit_phase",
     "fit_phase_ratio",
     "fit_result",
+    "swap_invariance",
     "write_phase_csv",
     "load_phase_csv",
     "save_phase_json",

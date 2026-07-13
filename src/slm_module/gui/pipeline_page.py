@@ -488,11 +488,6 @@ class PipelinePage(QtWidgets.QWidget):
         self.eta_reduced.setToolTip(
             "x-only / w-only / cross lines instead of the full 2-D grid"
         )
-        self.eta_trials = QtWidgets.QSpinBox()
-        self.eta_trials.setRange(1, 100)
-        self.eta_trials.setValue(5)
-        self.eta_repeats = QtWidgets.QSpinBox()
-        self.eta_repeats.setRange(1, 100)
         grid.addWidget(QtWidgets.QLabel("Pairs"), 0, 0)
         grid.addWidget(self.eta_pairs, 0, 1, 1, 3)
         grid.addWidget(self.eta_reduced, 0, 4, 1, 2)
@@ -502,10 +497,6 @@ class PipelinePage(QtWidgets.QWidget):
         grid.addWidget(self.eta_max, 1, 3)
         grid.addWidget(QtWidgets.QLabel("points"), 1, 4)
         grid.addWidget(self.eta_points, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("Trials"), 2, 0)
-        grid.addWidget(self.eta_trials, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("Repeats"), 2, 2)
-        grid.addWidget(self.eta_repeats, 2, 3)
         csv_edit = QtWidgets.QLineEdit()
         csv_edit.setPlaceholderText("optional CSV output path")
         self.eta_csv_edit = csv_edit
@@ -514,9 +505,9 @@ class PipelinePage(QtWidgets.QWidget):
         csv_browse.clicked.connect(
             lambda _=False: self._browse_save(csv_edit, "CSV (*.csv)")
         )
-        grid.addWidget(QtWidgets.QLabel("CSV output"), 3, 0)
-        grid.addWidget(csv_edit, 3, 1, 1, 4)
-        grid.addWidget(csv_browse, 3, 5)
+        grid.addWidget(QtWidgets.QLabel("CSV output"), 2, 0)
+        grid.addWidget(csv_edit, 2, 1, 1, 4)
+        grid.addWidget(csv_browse, 2, 5)
         self.rows["pair_eta"].add_settings(widget)
 
         # ---- comb_phase -----------------------------------------------------
@@ -539,11 +530,6 @@ class PipelinePage(QtWidgets.QWidget):
         self.ph_ref_phase = QtWidgets.QDoubleSpinBox()
         self.ph_ref_phase.setRange(0.0, 180.0)
         self.ph_ref_phase.setValue(180.0)
-        self.ph_trials = QtWidgets.QSpinBox()
-        self.ph_trials.setRange(1, 100)
-        self.ph_trials.setValue(10)
-        self.ph_repeats = QtWidgets.QSpinBox()
-        self.ph_repeats.setRange(1, 100)
         self.ph_bound = QtWidgets.QDoubleSpinBox()
         self.ph_bound.setRange(0.01, 10.0)
         self.ph_bound.setSingleStep(0.1)
@@ -559,8 +545,6 @@ class PipelinePage(QtWidgets.QWidget):
         self.ph_single_beam.setChecked(True)
         self.ph_dark = QtWidgets.QCheckBox("Measure dark")
         self.ph_dark.setChecked(True)
-        self.ph_dark_per_trial = QtWidgets.QCheckBox("Dark per trial")
-        self.ph_dark_per_trial.setChecked(True)
         grid.addWidget(QtWidgets.QLabel("Reference"), 0, 0)
         grid.addWidget(self.ph_ref, 0, 1)
         grid.addWidget(QtWidgets.QLabel("Targets"), 0, 2)
@@ -573,16 +557,11 @@ class PipelinePage(QtWidgets.QWidget):
         grid.addWidget(self.ph_stop, 1, 3)
         grid.addWidget(QtWidgets.QLabel("Ref phase"), 1, 4)
         grid.addWidget(self.ph_ref_phase, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("Trials"), 2, 0)
-        grid.addWidget(self.ph_trials, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("Repeats"), 2, 2)
-        grid.addWidget(self.ph_repeats, 2, 3)
-        grid.addWidget(QtWidgets.QLabel("Bound ±frac"), 3, 0)
-        grid.addWidget(self.ph_bound, 3, 1)
-        grid.addWidget(self.ph_unconstrained, 3, 2, 1, 2)
-        grid.addWidget(self.ph_single_beam, 3, 4, 1, 2)
-        grid.addWidget(self.ph_dark, 4, 0, 1, 2)
-        grid.addWidget(self.ph_dark_per_trial, 4, 2, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Bound ±frac"), 2, 0)
+        grid.addWidget(self.ph_bound, 2, 1)
+        grid.addWidget(self.ph_unconstrained, 2, 2, 1, 2)
+        grid.addWidget(self.ph_single_beam, 2, 4, 1, 2)
+        grid.addWidget(self.ph_dark, 3, 0, 1, 2)
         self.rows["comb_phase"].add_settings(widget)
 
     def _build_phase_view(self) -> QtWidgets.QGroupBox:
@@ -730,8 +709,6 @@ class PipelinePage(QtWidgets.QWidget):
                 sweep_max=self.eta_max.value(),
                 n_points=self.eta_points.value(),
                 reduced_points=self.eta_reduced.isChecked(),
-                n_trials=self.eta_trials.value(),
-                repeats=self.eta_repeats.value(),
                 settle=monitor_settle,
             )
         if stage_id == "comb_phase":
@@ -745,8 +722,6 @@ class PipelinePage(QtWidgets.QWidget):
                 phi_start_deg=self.ph_start.value(),
                 phi_stop_deg=self.ph_stop.value(),
                 ref_phase_deg=self.ph_ref_phase.value(),
-                n_trials=self.ph_trials.value(),
-                repeats=self.ph_repeats.value(),
                 settle=monitor_settle,
                 bound_frac=(
                     None if self.ph_unconstrained.isChecked()
@@ -754,7 +729,6 @@ class PipelinePage(QtWidgets.QWidget):
                 ),
                 single_beam_bg=self.ph_single_beam.isChecked(),
                 measure_dark=self.ph_dark.isChecked(),
-                dark_per_trial=self.ph_dark_per_trial.isChecked(),
             )
         raise ValueError(f"unknown stage {stage_id!r}")
 
@@ -835,7 +809,12 @@ class PipelinePage(QtWidgets.QWidget):
                 else:
                     settings = host._daq_monitor_settings()
                 settle = float(settings.hold)
-                read_timeout = max(30.0, settings.duration * 3.0 + 10.0)
+                # the DAQ reads single-beam/dark points over the longer
+                # T_single window
+                window = max(
+                    settings.duration, getattr(settings, "single_duration", 0.0)
+                )
+                read_timeout = max(30.0, window * 3.0 + 10.0)
                 monitor.configure_monitor(replace(settings, hold=0.0))
                 request = self._build_request(settle)   # bake the real settle in
 
@@ -1019,8 +998,8 @@ class PipelinePage(QtWidgets.QWidget):
     _PERSIST_SPINS = (
         "lay_channels", "lay_width", "lay_gap", "lay_center_gap",
         "wl_window", "wl_stride", "int_skip", "ctr_points", "ctr_pair", "ctr_trials",
-        "ctr_repeats", "eta_points", "eta_trials", "eta_repeats",
-        "ph_ref", "ph_points", "ph_trials", "ph_repeats",
+        "ctr_repeats", "eta_points",
+        "ph_ref", "ph_points",
     )
     _PERSIST_DSPINS = (
         "lay_center_wl", "lay_guard_half", "ctr_halfspan", "ctr_drive",
@@ -1031,7 +1010,7 @@ class PipelinePage(QtWidgets.QWidget):
         "lay_center_gap_check", "lay_use_center_fit", "lay_guard_check",
         "wl_peak_check", "wl_region_check", "int_refine_center",
         "int_refine_wl", "ctr_bg", "eta_reduced", "ph_unconstrained",
-        "ph_single_beam", "ph_dark", "ph_dark_per_trial",
+        "ph_single_beam", "ph_dark",
     )
     _PERSIST_EDITS = (
         "lay_guard_centers", "eta_pairs", "ph_targets", "int_csv_edit",

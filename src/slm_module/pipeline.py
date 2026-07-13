@@ -251,8 +251,6 @@ class PairEtaConfig:
     sweep_max: float = 1.0
     n_points: int = 5
     reduced_points: bool = True       # 1-D curves (x-only/w-only/cross) vs full grid
-    n_trials: int = 5
-    repeats: int = 1
     settle: float = 0.15
 
 
@@ -264,13 +262,10 @@ class CombPhaseConfig:
     phi_start_deg: float = 0.0
     phi_stop_deg: float = 180.0
     ref_phase_deg: float = 180.0
-    n_trials: int = 10
-    repeats: int = 1
     settle: float = 0.15
     bound_frac: float | None = 1.0    # None -> unconstrained closed-form fit
     single_beam_bg: bool = True
     measure_dark: bool = True
-    dark_per_trial: bool = True
 
 
 _CONFIG_TYPES: dict[str, type] = {
@@ -677,7 +672,7 @@ def _run_pair_eta(ctx: _Context, plan: StagePlan) -> Any:
     result = measure_pair_grids(
         ctx.instruments.monitor, ctx.instruments.slm, layout_obj,
         pair_indices=indices, sweep=sweep, points=points,
-        n_trials=cfg.n_trials, repeats=cfg.repeats, settle=cfg.settle,
+        settle=cfg.settle,
         read_timeout=ctx.instruments.monitor_read_timeout,
         col_ratio=ctx.request.col_ratio,
         stop_event=ctx.stop_event, progress_callback=report,
@@ -744,9 +739,9 @@ def _run_comb_phase(ctx: _Context, plan: StagePlan) -> Any:
             ctx.instruments.monitor, ctx.instruments.slm, layout_obj,
             tgt_index=k, ref_index=cfg.ref_index,
             drive=drive, tgt_model=models[k], ref_model=models[cfg.ref_index],
-            n_trials=cfg.n_trials, repeats=cfg.repeats, settle=cfg.settle,
+            settle=cfg.settle,
             read_timeout=ctx.instruments.monitor_read_timeout,
-            measure_dark=cfg.measure_dark, dark_per_trial=cfg.dark_per_trial,
+            measure_dark=cfg.measure_dark,
             col_ratio=ctx.request.col_ratio,
             frac=cfg.bound_frac, single_beam_bg=cfg.single_beam_bg,
             stop_event=ctx.stop_event, progress_callback=report,

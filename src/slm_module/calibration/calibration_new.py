@@ -1492,14 +1492,13 @@ def save_calibration_result(
     return out
 
 
-def load_calibration_result(path: str | Path) -> CalibrationResult:
-    """Rebuild a CalibrationResult written by save_calibration_result."""
+def calibration_result_from_dict(payload: dict) -> CalibrationResult:
+    """Rebuild a CalibrationResult from a save_calibration_result payload dict.
 
-    src = Path(path).resolve()
-    if not src.is_file():
-        raise FileNotFoundError(f"Calibration result not found: {src}")
-    with open(src, "r", encoding="utf-8") as file:
-        payload = json.load(file)
+    Accepts the parsed JSON either straight from a calibration file or embedded
+    in another output (e.g. the step-6 combined result stores the raw step-3
+    payload under its ``"step3"`` key).
+    """
 
     return CalibrationResult(
         wavelength=_array_or_empty(payload.get("wavelength")),
@@ -1513,6 +1512,18 @@ def load_calibration_result(path: str | Path) -> CalibrationResult:
             payload.get("wavelength_fit_coefficients")
         ),
     )
+
+
+def load_calibration_result(path: str | Path) -> CalibrationResult:
+    """Rebuild a CalibrationResult written by save_calibration_result."""
+
+    src = Path(path).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"Calibration result not found: {src}")
+    with open(src, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    return calibration_result_from_dict(payload)
 
 
 def load_wavelength_map_csv(

@@ -1,71 +1,80 @@
-"""Manual smoke test: read one waveform from an NI-DAQ analog input and plot it.
+"""Read one waveform from an NI-DAQ analog input -- diagnostic script *and* module.
 
-Not a pytest test (no mocks, needs real hardware) -- run it directly::
+Needs real hardware (no mocks), so it is not a pytest test.  The acquisition
+itself lives in :mod:`daq_module` (``NIDAQDriver`` -> ``DAQController``): DIFF
+input, one untriggered finite window, Butterworth low-pass at the detector
+bandwidth, SEM over the effective sample count ``n_eff = 2*T*f_cut``.  This
+draft drives that same path directly to eyeball a raw trace and its amplitude
+spectrum -- the bring-up view the production monitor doesn't plot.
 
-    python tests/daq_read_waveform.py
+* Run it directly -- read once with the module defaults, print stats, plot
+  time + frequency domain::
 
-Records ``DURATION_S`` seconds on a single channel with no trigger: the PC
-arms the task, blocks until the buffer fills, then stops it. Prints the
-device-reported ADC resolution so you can confirm it's the expected 16 bits.
+      python src/drafts/daq_read_waveform.py
+
+* Import it from another draft and grab one read, overriding any acquisition
+  parameter per call::
+
+      from daq_read_waveform import measure, read_waveform
+      mean_v, sem_v = measure(duration_s=1.0)         # low-passed mean + its SEM
+      times, voltages = read_waveform()               # raw trace, if you want it
+
+The module-level constants mirror the :class:`daq_module.DAQMonitorSettings`
+defaults (the values the step-6/7 calibration drafts validated), so this
+diagnostic can never drift from what the calibrations actually use.
 """
 from __future__ import annotations
 
-import nidaqmx
+import sys
+from pathlib import Path
+
 import numpy as np
-from nidaqmx.constants import AcquisitionType, TerminalConfiguration
-from scipy.signal import butter, sosfiltfilt
 
-# Edit these to match your setup (see NI-MAX for the device name).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from daq_module import DAQMonitorSettings, NIDAQDriver, lowpass  # noqa: E402
+
+# Defaults come from daq_module (single source of truth); DEVICE names the
+# board (see NI-MAX).
+_DEFAULTS = DAQMonitorSettings()
 DEVICE = "Dev1"
-CHANNEL = "ai0"
-F_CUT = 10 # hardware 3dB bandwidth
-FILTER_ORDER = 4  # digital Butterworth low-pass order
-SAMPLE_RATE_HZ = 1_000  # 100 kS/s
-DURATION_S = 2
+CHANNEL = _DEFAULTS.channel
+F_CUT = _DEFAULTS.f_cut                  # detector 3 dB bandwidth (Hz)
+FILTER_ORDER = _DEFAULTS.filter_order    # digital Butterworth low-pass order
+SAMPLE_RATE_HZ = _DEFAULTS.sample_rate
+DURATION_S = _DEFAULTS.duration
 # Input range is quantized: the board only offers +/-0.1, 0.2, 0.5, 1, 2, 5, 10 V
-# and rounds any request UP to the next one. Keep +/-0.1 V (most sensitive) for mV signals.
-MIN_VAL_V = -0.1
-MAX_VAL_V = 0.1
-EXPECTED_RESOLUTION_BITS = 16
+# and rounds any request UP to the next one -- +/-0.1 V is the most sensitive.
+MIN_VAL_V = _DEFAULTS.min_val
+MAX_VAL_V = _DEFAULTS.max_val
 
 
-def read_waveform() -> tuple[np.ndarray, np.ndarray]:
-    n_samples = int(SAMPLE_RATE_HZ * DURATION_S)
-    with nidaqmx.Task() as task:
-        chan = task.ai_channels.add_ai_voltage_chan(
-            f"{DEVICE}/{CHANNEL}",
-            terminal_config=TerminalConfiguration.RSE,  # single-ended vs AI GND
-            min_val=MIN_VAL_V,
-            max_val=MAX_VAL_V,
-        )
-        task.timing.cfg_samp_clk_timing(
-            SAMPLE_RATE_HZ, sample_mode=AcquisitionType.FINITE, samps_per_chan=n_samples
-        )
+def read_waveform(
+    *,
+    device: str = DEVICE,
+    channel: str = CHANNEL,
+    sample_rate_hz: float = SAMPLE_RATE_HZ,
+    duration_s: float = DURATION_S,
+    min_val_v: float = MIN_VAL_V,
+    max_val_v: float = MAX_VAL_V,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One untriggered finite acquisition via NIDAQDriver; return ``(times, voltages)``.
 
-        resolution = chan.ai_resolution
-        print(f"ADC resolution: {resolution:.0f} bits (expected {EXPECTED_RESOLUTION_BITS})")
-        if int(resolution) != EXPECTED_RESOLUTION_BITS:
-            print("WARNING: resolution does not match the expected 16 bits")
-
-        task.start()
-        values = task.read(number_of_samples_per_channel=n_samples, timeout=DURATION_S + 10.0)
-        task.stop()
-
-    voltages = np.asarray(values, dtype=float)
-    times = np.arange(voltages.size) / SAMPLE_RATE_HZ
-    return times, voltages
-
-
-def lowpass(v: np.ndarray, fs: float, f_cut: float, order: int = FILTER_ORDER) -> np.ndarray:
-    """Zero-phase Butterworth low-pass (SOS form) at ``f_cut`` Hz.
-
-    Returns ``v`` unchanged if the cutoff is at/above Nyquist (nothing to do).
+    Every parameter defaults to the module-level constant, so a direct run needs
+    no arguments while an importer can override any of them per call.
     """
-    nyq = 0.5 * fs
-    if f_cut >= nyq:
-        return v
-    sos = butter(order, f_cut / nyq, btype="low", output="sos")
-    return sosfiltfilt(sos, v)
+    driver = NIDAQDriver(device=device)
+    driver.connect()
+    voltages = driver.read_waveform(
+        channel=channel, sample_rate=sample_rate_hz, duration=duration_s,
+        min_val=min_val_v, max_val=max_val_v, timeout=duration_s + 10.0,
+    )
+    if verbose:
+        print(f"read {voltages.size} samples ({duration_s:g} s @ {sample_rate_hz:g} S/s)")
+    times = np.arange(voltages.size) / sample_rate_hz
+    return times, voltages
 
 
 def amplitude_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
@@ -83,24 +92,68 @@ def amplitude_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray
     return freqs[1:], spec[1:]  # drop DC bin
 
 
-def report(label: str, v: np.ndarray, n_eff: float) -> None:
-    """Print mean, SEM (= std / sqrt(n_eff)), and the SEM ratio for a trace."""
-    mean = v.mean()
-    sem = v.std() / np.sqrt(n_eff)
+def stats(v: np.ndarray, n_eff: float) -> tuple[float, float]:
+    """Return ``(mean, sem)`` for a trace, sem = std / sqrt(n_eff)."""
+    return float(v.mean()), float(v.std() / np.sqrt(n_eff))
+
+
+def report(label: str, v: np.ndarray, n_eff: float) -> tuple[float, float]:
+    """Print mean, SEM (= std / sqrt(n_eff)) and the SEM ratio; return ``(mean, sem)``."""
+    mean, sem = stats(v, n_eff)
     print(
-        f"{label:>8}: mean={mean*1000:.4f} mV, sem={sem*1000:.4f} mV, "
-        f"sem ratio={sem/mean*100:.4f}%"
+        f"{label:>8}: mean={abs(mean)*1000:.4f} mV, sem={sem*1000:.4f} mV, "
+        f"sem ratio={abs(sem/mean)*100:.4f}%"
     )
+    return mean, sem
+
+
+def measure(
+    *,
+    f_cut: float = F_CUT,
+    filter_order: int = FILTER_ORDER,
+    device: str = DEVICE,
+    channel: str = CHANNEL,
+    sample_rate_hz: float = SAMPLE_RATE_HZ,
+    duration_s: float = DURATION_S,
+    min_val_v: float = MIN_VAL_V,
+    max_val_v: float = MAX_VAL_V,
+    verbose: bool = False,
+) -> tuple[float, float]:
+    """Read one waveform and return ``(mean_v, sem_v)`` of the low-passed trace.
+
+    Same processing as ``DAQController.monitor_cycle``: band-limit to ``f_cut``
+    (the detector bandwidth) and report the mean plus its standard error over
+    the effective independent-sample count ``n_eff = 2 * duration_s * f_cut``
+    -- so out-of-band noise inflates neither the mean nor its uncertainty.
+    """
+    _, voltages = read_waveform(
+        device=device, channel=channel, sample_rate_hz=sample_rate_hz,
+        duration_s=duration_s, min_val_v=min_val_v, max_val_v=max_val_v,
+        verbose=verbose,
+    )
+    filtered = lowpass(voltages, sample_rate_hz, f_cut, filter_order)
+    n_eff = max(2.0 * duration_s * f_cut, 1.0)
+    return stats(filtered, n_eff)
+
+
+__all__ = [
+    "read_waveform",
+    "lowpass",
+    "amplitude_spectrum",
+    "stats",
+    "measure",
+    "report",
+]
 
 
 def main() -> None:
     import matplotlib.pyplot as plt
 
-    times, voltages = read_waveform()
-    n_eff = 2 * DURATION_S * F_CUT
+    times, voltages = read_waveform(verbose=True)
+    n_eff = max(2.0 * DURATION_S * F_CUT, 1.0)
     print(f"Read {voltages.size} samples over {times[-1]:.3f} s, Effective samples: {n_eff}")
 
-    filtered = lowpass(voltages, SAMPLE_RATE_HZ, F_CUT)
+    filtered = lowpass(voltages, SAMPLE_RATE_HZ, F_CUT, FILTER_ORDER)
     report("raw", voltages, n_eff)
     report("filtered", filtered, n_eff)
 

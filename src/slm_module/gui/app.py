@@ -50,10 +50,10 @@ from ..controller import ScanParams, ScanResult, SLMController
 from ..detector import Detector, SimulatedDetector
 from ..generator import (
     MAX_LEVEL,
-    equal_x_segment_edges,
-    make_equal_x_segments,
+    equal_segment_edges,
+    make_equal_segments,
     make_vertical_window,
-    make_x_segments,
+    make_segments,
     write_santec_csv,
 )
 from ..analysis import (
@@ -108,6 +108,19 @@ from ..tpa_center import (
     average_trace_points,
     measure_center_scan,
 )
+from ..tpa_phase import (
+    PairModel,
+    PhaseResult,
+    load_pair_models,
+    save_phase_json,
+    write_phase_csv,
+)
+from ..tpa_phase_measure import (
+    TPAPhaseAborted,
+    build_phase_sweep,
+    measure_phase_sweep,
+)
+from ..tpa_phase_report import plot_fringe
 from ..keepalive import SLMKeepAlive
 from .common import (
     CalibrationProgressDialog,
@@ -393,6 +406,7 @@ class MainWindow(QtWidgets.QMainWindow):
     calibration_progress = QtCore.pyqtSignal(object)
     analysis_progress = QtCore.pyqtSignal(object)
     tpa_progress = QtCore.pyqtSignal(object)
+    tpa_phase_progress = QtCore.pyqtSignal(object)
     tpa_center_progress = QtCore.pyqtSignal(object)
     edge_gain_progress = QtCore.pyqtSignal(int, int, str)
     edge_optimization_progress = QtCore.pyqtSignal(object)
@@ -446,6 +460,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ana_capture_dir: str | None = None
         self.tpa_result: TPAPairResult | None = None
         self.tpa_stop_event: threading.Event | None = None
+        self.tpa_phase_results: dict[int, PhaseResult] = {}
+        self.tpa_phase_stop_event: threading.Event | None = None
+        self._tpa_phase_ntargets = 1
         self.tpa_center_result: TPACenterResult | None = None
         self.tpa_center_stop_event: threading.Event | None = None
         self.scope_controller: ScopeController | None = None
@@ -474,6 +491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_progress.connect(self._on_calibration_progress)
         self.analysis_progress.connect(self._on_analysis_progress)
         self.tpa_progress.connect(self._on_tpa_progress)
+        self.tpa_phase_progress.connect(self._on_tpa_phase_progress)
         self.tpa_center_progress.connect(self._on_tpa_center_progress)
         self.edge_gain_progress.connect(self._edge_gain_progress)
         self.edge_optimization_progress.connect(self._edge_optimization_progress)
@@ -778,6 +796,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(self._build_scope_holding_tab(), "Step 5 · Holding")
         tabs.addTab(self._build_tpa_tab(), "Step 6 · TPA Efficiency")
         tabs.addTab(self._build_tpa_center_tab(), "Step 6b · TPA Center")
+        tabs.addTab(self._build_tpa_phase_tab(), "Step 7 · Comb Phase")
         self.pipeline_page = PipelinePage(self)
         tabs.insertTab(0, self.pipeline_page, "Pipeline")
         tabs.addTab(self._build_stage3_reopt_page(), "Step 4b - Stage3 Reopt")
@@ -2013,14 +2032,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_segments_page(self) -> QtWidgets.QWidget:
         page = self._page_shell("Phase Segments")
         subtitle = QtWidgets.QLabel(
-            "Divide the x axis into vertical bands and assign a phase level "
-            "to each (constant along y)."
+            "Divide the panel into bands along x (vertical) or y (horizontal) "
+            "and assign a phase level to each."
         )
         subtitle.setObjectName("PageSubtitle")
         page.layout().addWidget(subtitle)
 
         controls = self._panel("Segments")
         controls_layout = QtWidgets.QGridLayout(controls)
+        self.segment_axis_combo = QtWidgets.QComboBox()
+        self.segment_axis_combo.addItems(["Vertical (along x)", "Horizontal (along y)"])
         self.segment_mode_combo = QtWidgets.QComboBox()
         self.segment_mode_combo.addItems(["Equal division", "Explicit segments"])
         self.segment_count_spin = self._spin(1, 256, 4)
@@ -2032,14 +2053,16 @@ class MainWindow(QtWidgets.QMainWindow):
         remove_row_button = QtWidgets.QPushButton("Remove Row")
         remove_row_button.setProperty("variant", "ghost")
 
-        controls_layout.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
-        controls_layout.addWidget(self.segment_mode_combo, 0, 1)
-        controls_layout.addWidget(QtWidgets.QLabel("Parts"), 0, 2)
-        controls_layout.addWidget(self.segment_count_spin, 0, 3)
-        controls_layout.addWidget(self.segment_fill_spin, 0, 4)
-        controls_layout.addWidget(fill_button, 0, 5)
-        controls_layout.addWidget(add_row_button, 0, 6)
-        controls_layout.addWidget(remove_row_button, 0, 7)
+        controls_layout.addWidget(QtWidgets.QLabel("Axis"), 0, 0)
+        controls_layout.addWidget(self.segment_axis_combo, 0, 1)
+        controls_layout.addWidget(QtWidgets.QLabel("Mode"), 0, 2)
+        controls_layout.addWidget(self.segment_mode_combo, 0, 3)
+        controls_layout.addWidget(QtWidgets.QLabel("Parts"), 0, 4)
+        controls_layout.addWidget(self.segment_count_spin, 0, 5)
+        controls_layout.addWidget(self.segment_fill_spin, 0, 6)
+        controls_layout.addWidget(fill_button, 0, 7)
+        controls_layout.addWidget(add_row_button, 0, 8)
+        controls_layout.addWidget(remove_row_button, 0, 9)
 
         self.segments_table = QtWidgets.QTableWidget(0, 3)
         self.segments_table.setHorizontalHeaderLabels(["x start", "x end", "Level"])
@@ -2071,6 +2094,7 @@ class MainWindow(QtWidgets.QMainWindow):
         page.layout().addWidget(actions)
         page.layout().addWidget(self.segment_preview_label, 1)
 
+        self.segment_axis_combo.currentIndexChanged.connect(self._on_segment_axis_changed)
         self.segment_mode_combo.currentIndexChanged.connect(self._on_segment_mode_changed)
         self.segment_count_spin.valueChanged.connect(self._rebuild_equal_segment_rows)
         fill_button.clicked.connect(self._fill_segment_levels)
@@ -4702,17 +4726,23 @@ class MainWindow(QtWidgets.QMainWindow):
             "Ramp points per side; the x=0 / w=0 axis is added automatically "
             "→ (points+1)² grid cells"
         )
-        self.tpa_trials = self._spin(1, 500, 10)
-        self.tpa_trials.setToolTip(
-            "Times the whole grid is repeated (gives each cell a standard error)"
+        # DAQ acquisition windows -- mirrored two-way with the DAQ Monitor
+        # panel on the TPA Encoder page (same setting, shown in both places)
+        self.tpa_tboth = self._double_spin(0.001, 10.0, 3.0, " s", 3)
+        self.tpa_tboth.setToolTip(
+            "T_both: DAQ averaging window when both beams of the pair are on "
+            "(x>0 and w>0). Mirrors the DAQ Monitor panel."
         )
-        self.tpa_repeats = self._spin(1, 20, 1)
-        self.tpa_repeats.setToolTip("Monitor reads averaged per grid point within a trial")
+        self.tpa_tsingle = self._double_spin(0.001, 30.0, 5.0, " s", 3)
+        self.tpa_tsingle.setToolTip(
+            "T_single: DAQ averaging window when at most one beam is on "
+            "(x=0 or w=0, incl. the all-off dark). Mirrors the DAQ Monitor panel."
+        )
         widgets = [
             ("Pair index", self.tpa_pair_index), ("", self.tpa_all_pairs),
             ("Sweep min", self.tpa_sweep_min), ("Sweep max", self.tpa_sweep_max),
-            ("Ramp points", self.tpa_points), ("Trials", self.tpa_trials),
-            ("Repeats", self.tpa_repeats),
+            ("Ramp points", self.tpa_points), ("T_both", self.tpa_tboth),
+            ("T_single", self.tpa_tsingle),
         ]
         for i, (label, widget) in enumerate(widgets):
             r, c = i // 2, (i % 2) * 2
@@ -4823,21 +4853,23 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             settings = self._daq_monitor_settings()
         settle = float(settings.hold)               # the tab's settle = monitor-page hold
-        read_timeout = max(30.0, settings.duration * 3.0 + 10.0)
+        # single-beam/dark points read the longer T_single window on the DAQ
+        window = max(
+            settings.duration, getattr(settings, "single_duration", 0.0)
+        )
+        read_timeout = max(30.0, window * 3.0 + 10.0)
         settings0 = replace(settings, hold=0.0)     # the module owns the settle
 
         sweep = build_sweep(
             self.tpa_sweep_min.value(), self.tpa_sweep_max.value(), self.tpa_points.value()
         )
-        n_trials = self.tpa_trials.value()
-        repeats = self.tpa_repeats.value()
-        total = max(n_trials * len(indices) * sweep.size * sweep.size, 1)
+        total = max(len(indices) * sweep.size * sweep.size, 1)
 
         self.tpa_progress_bar.setMaximum(total)
         self.tpa_progress_bar.setValue(0)
         self.tpa_status.setText(
-            f"Starting… {len(indices)} pair(s) × {sweep.size}×{sweep.size} grid × "
-            f"{n_trials} trial(s) via {kind}"
+            f"Starting… {len(indices)} pair(s) × {sweep.size}×{sweep.size} grid "
+            f"via {kind}"
         )
         self._tpa_set_running(True)
 
@@ -4852,8 +4884,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 result = measure_pair_grids(
                     monitor, controller, layout,
-                    pair_indices=indices, sweep=sweep,
-                    n_trials=n_trials, repeats=repeats, settle=settle,
+                    pair_indices=indices, sweep=sweep, settle=settle,
                     read_timeout=read_timeout, col_ratio=self._active_col_ratio(),
                     stop_event=stop_event, progress_callback=report,
                 )
@@ -5030,6 +5061,386 @@ class MainWindow(QtWidgets.QMainWindow):
         csv_path = write_tpa_pair_csv(self.tpa_result, base.with_suffix(".csv"))
         js = save_tpa_pair_json(self.tpa_result, base.with_suffix(".json"))
         self.tpa_status.setText(f"Saved {Path(csv_path).name}  +  {Path(js).name}")
+
+    # ===================== TPA comb phase (step 7) tab ==================
+    def _build_tpa_phase_tab(self) -> QtWidgets.QWidget:
+        page = self._page_shell("Comb Phase (ΔΦ_comb) Calibration")
+        subtitle = QtWidgets.QLabel(
+            "Step 7: each target pair's SLM phase is swept symmetrically "
+            "against a fixed, fully-on reference pair and the TPA interference "
+            "fringe Y = a² + b²g² + 2ab·g·cos(ΔΦ_SLM + ΔΦ_comb) is fit for "
+            "the comb phase. Needs the channel grid from the TPA Encoding page "
+            "and step-6 pair models — the Step 6 tab's last result is used "
+            "automatically, or point at a saved step-6 JSON/CSV. Reads use "
+            "whichever monitor (scope or DAQ) is connected; the all-off dark "
+            "reads the DAQ's longer T_single window."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- sweep settings ---
+        cfg = self._panel("Sweep Settings")
+        grid = QtWidgets.QGridLayout(cfg)
+        self.tpa_phase_ref = self._spin(0, 63, 1)
+        self.tpa_phase_ref.setToolTip("Reference pair index (ΔΦ_comb = 0 by definition)")
+        self.tpa_phase_targets = QtWidgets.QLineEdit("3, 4, 5")
+        self.tpa_phase_targets.setToolTip("Comma-separated target pair indices")
+        self.tpa_phase_points = self._spin(3, 200, 15)
+        self.tpa_phase_points.setToolTip("Points in the target phase ramp")
+        self.tpa_phase_start = self._double_spin(0.0, 180.0, 0.0, " °", 1)
+        self.tpa_phase_start.setToolTip("Target phase ramp start")
+        self.tpa_phase_stop = self._double_spin(0.0, 180.0, 180.0, " °", 1)
+        self.tpa_phase_stop.setToolTip("Target phase ramp stop")
+        self.tpa_phase_refphase = self._double_spin(0.0, 180.0, 180.0, " °", 1)
+        self.tpa_phase_refphase.setToolTip(
+            "Fixed reference phase (180° = intensity 1, fully on)"
+        )
+        self.tpa_phase_bound = QtWidgets.QDoubleSpinBox()
+        self.tpa_phase_bound.setRange(0.01, 10.0)
+        self.tpa_phase_bound.setSingleStep(0.1)
+        self.tpa_phase_bound.setValue(1.0)
+        self.tpa_phase_bound.setToolTip(
+            "a:b locked to the step-6 η ratio; a shared scale floats boxed to ±frac"
+        )
+        self.tpa_phase_unconstrained = QtWidgets.QCheckBox("Unconstrained fit")
+        self.tpa_phase_unconstrained.setToolTip(
+            "Ignore the step-6 eta ratio lock (closed-form fit)"
+        )
+        self.tpa_phase_unconstrained.toggled.connect(
+            lambda checked: self.tpa_phase_bound.setEnabled(not checked)
+        )
+        self.tpa_phase_single_beam = QtWidgets.QCheckBox("Step-6 single-beam background")
+        self.tpa_phase_single_beam.setChecked(True)
+        self.tpa_phase_dark = QtWidgets.QCheckBox("Measure dark")
+        self.tpa_phase_dark.setChecked(True)
+        self.tpa_phase_dark.setToolTip(
+            "All-off reading at the start (T_single window), subtracted per row"
+        )
+        self.tpa_phase_models_edit = QtWidgets.QLineEdit()
+        self.tpa_phase_models_edit.setPlaceholderText(
+            "step-6 models file (.json/.csv) — empty = use the Step 6 tab's last result"
+        )
+        models_browse = QtWidgets.QPushButton("Browse…")
+        models_browse.setProperty("variant", "ghost")
+        models_browse.clicked.connect(self._tpa_phase_browse_models)
+        grid.addWidget(QtWidgets.QLabel("Reference"), 0, 0)
+        grid.addWidget(self.tpa_phase_ref, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Targets"), 0, 2)
+        grid.addWidget(self.tpa_phase_targets, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Points"), 0, 4)
+        grid.addWidget(self.tpa_phase_points, 0, 5)
+        grid.addWidget(QtWidgets.QLabel("φ start"), 1, 0)
+        grid.addWidget(self.tpa_phase_start, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("φ stop"), 1, 2)
+        grid.addWidget(self.tpa_phase_stop, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Ref phase"), 1, 4)
+        grid.addWidget(self.tpa_phase_refphase, 1, 5)
+        grid.addWidget(QtWidgets.QLabel("Bound ±frac"), 2, 0)
+        grid.addWidget(self.tpa_phase_bound, 2, 1)
+        grid.addWidget(self.tpa_phase_unconstrained, 2, 2, 1, 2)
+        grid.addWidget(self.tpa_phase_single_beam, 2, 4, 1, 2)
+        grid.addWidget(self.tpa_phase_dark, 3, 0, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Step-6 models"), 4, 0)
+        grid.addWidget(self.tpa_phase_models_edit, 4, 1, 1, 4)
+        grid.addWidget(models_browse, 4, 5)
+        page.layout().addWidget(cfg)
+
+        # --- results: fringe fit + pulls (plot_fringe, same as the pipeline) ---
+        self.tpa_phase_fig = Figure(figsize=(9, 3.6), tight_layout=True)
+        self.tpa_phase_canvas = FigureCanvas(self.tpa_phase_fig)
+        self.tpa_phase_canvas.setMinimumHeight(260)
+        page.layout().addWidget(
+            self._panel_with_widget("Fringe fit (ΔΦ_comb)", self.tpa_phase_canvas), 1
+        )
+
+        # --- displayed-pair selector + report ---
+        self.tpa_phase_combo = QtWidgets.QComboBox()
+        self.tpa_phase_combo.setToolTip("Which target pair's fit to display")
+        self.tpa_phase_combo.currentIndexChanged.connect(
+            lambda _=0: self._tpa_phase_redraw()
+        )
+        self.tpa_phase_report = QtWidgets.QLabel("ΔΦ_comb: (run a sweep)")
+        self.tpa_phase_report.setObjectName("PageSubtitle")
+        self.tpa_phase_report.setWordWrap(True)
+        show_row = QtWidgets.QHBoxLayout()
+        show_row.addWidget(QtWidgets.QLabel("Show pair"))
+        show_row.addWidget(self.tpa_phase_combo)
+        show_row.addWidget(self.tpa_phase_report, 1)
+        page.layout().addLayout(show_row)
+
+        # --- controls ---
+        self.tpa_phase_progress_bar = QtWidgets.QProgressBar()
+        self.tpa_phase_progress_bar.setValue(0)
+        self.tpa_phase_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_phase_run_button = QtWidgets.QPushButton("Run Sweep")
+        self.tpa_phase_run_button.clicked.connect(self._tpa_phase_run)
+        self.tpa_phase_stop_button = QtWidgets.QPushButton("Stop")
+        self.tpa_phase_stop_button.setProperty("variant", "danger")
+        self.tpa_phase_stop_button.setEnabled(False)
+        self.tpa_phase_stop_button.clicked.connect(self._tpa_phase_stop)
+        self.tpa_phase_save_button = QtWidgets.QPushButton("Save…")
+        self.tpa_phase_save_button.setProperty("variant", "ghost")
+        self.tpa_phase_save_button.setEnabled(False)
+        self.tpa_phase_save_button.clicked.connect(self._tpa_phase_save)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(self.tpa_phase_status, 1)
+        ctrl.addWidget(self.tpa_phase_save_button)
+        ctrl.addWidget(self.tpa_phase_run_button)
+        ctrl.addWidget(self.tpa_phase_stop_button)
+        page.layout().addWidget(self.tpa_phase_progress_bar)
+        page.layout().addLayout(ctrl)
+        return page
+
+    def _tpa_phase_browse_models(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select Step-6 models file", "",
+            "Step-6 models (*.json *.csv);;All files (*)",
+        )
+        if path:
+            self.tpa_phase_models_edit.setText(path)
+
+    def _tpa_phase_models(self, layout) -> dict[int, PairModel] | None:
+        """Step-6 pair models: the file edit if set, else the Step 6 tab's result."""
+        text = self.tpa_phase_models_edit.text().strip()
+        if text:
+            return load_pair_models(text, layout=layout)
+        if self.tpa_result is not None:
+            models = {
+                grid.index: PairModel.from_fit(grid.index, grid.fit)
+                for grid in self.tpa_result.channels if grid.fit is not None
+            }
+            if models:
+                return models
+        return None
+
+    @staticmethod
+    def _tpa_phase_parse_targets(text: str) -> list[int]:
+        return [
+            int(part) for part in text.replace(";", ",").split(",") if part.strip()
+        ]
+
+    def _tpa_phase_set_running(self, running: bool) -> None:
+        self.tpa_phase_run_button.setEnabled(not running)
+        self.tpa_phase_stop_button.setEnabled(running)
+        self.tpa_phase_save_button.setEnabled(
+            not running and bool(self.tpa_phase_results)
+        )
+
+    def _tpa_phase_run(self) -> None:
+        from dataclasses import replace
+        layout = self.encoding_layout
+        if layout is None:
+            self.tpa_phase_status.setText(
+                "No channel grid — build a layout on the TPA Encoding page first."
+            )
+            return
+        active = self._enc_active_monitor()
+        if active is None:
+            self.tpa_phase_status.setText(
+                "Connect the scope or DAQ first (Scope / DAQ page)."
+            )
+            return
+        controller = self._controller()
+        if not getattr(controller, "is_open", False):
+            self.tpa_phase_status.setText("Open the SLM on the SLM Control page first.")
+            return
+        try:
+            targets = self._tpa_phase_parse_targets(self.tpa_phase_targets.text())
+        except ValueError:
+            self.tpa_phase_status.setText(
+                f"Bad target list: {self.tpa_phase_targets.text()!r}"
+            )
+            return
+        ref = self.tpa_phase_ref.value()
+        if not targets:
+            self.tpa_phase_status.setText("Need at least one target pair index.")
+            return
+        bad = [i for i in [ref, *targets] if not (0 <= i < layout.n_channels)]
+        if bad:
+            self.tpa_phase_status.setText(
+                f"Pair index out of range: {bad} (layout has {layout.n_channels} pairs)."
+            )
+            return
+        if ref in targets:
+            self.tpa_phase_status.setText("Reference pair cannot also be a target.")
+            return
+        try:
+            models = self._tpa_phase_models(layout)
+        except Exception as exc:
+            self.tpa_phase_status.setText(f"Step-6 models load failed: {exc}")
+            return
+        if models is None:
+            self.tpa_phase_status.setText(
+                "No step-6 models — run/load a sweep on the Step 6 tab or pick a file."
+            )
+            return
+        missing = [i for i in [ref, *targets] if i not in models]
+        if missing:
+            self.tpa_phase_status.setText(
+                f"No step-6 model for pair(s) {missing}; models cover {sorted(models)}."
+            )
+            return
+
+        kind, monitor = active
+        if kind == "scope":
+            settings = self._monitor_settings(trigger_mode="AUTO")
+        else:
+            settings = self._daq_monitor_settings()
+        settle = float(settings.hold)               # the tab's settle = monitor-page hold
+        # the dark point reads the longer T_single window on the DAQ
+        window = max(
+            settings.duration, getattr(settings, "single_duration", 0.0)
+        )
+        read_timeout = max(30.0, window * 3.0 + 10.0)
+        settings0 = replace(settings, hold=0.0)     # the module owns the settle
+
+        drive = build_phase_sweep(
+            n_points=self.tpa_phase_points.value(),
+            phi_start_deg=self.tpa_phase_start.value(),
+            phi_stop_deg=self.tpa_phase_stop.value(),
+            ref_phase_deg=self.tpa_phase_refphase.value(),
+        )
+        measure_dark = self.tpa_phase_dark.isChecked()
+        frac = (
+            None if self.tpa_phase_unconstrained.isChecked()
+            else self.tpa_phase_bound.value()
+        )
+        single_beam_bg = self.tpa_phase_single_beam.isChecked()
+
+        per_target = max(len(drive) + (1 if measure_dark else 0), 1)
+        self._tpa_phase_ntargets = len(targets)
+        self.tpa_phase_progress_bar.setMaximum(len(targets) * per_target)
+        self.tpa_phase_progress_bar.setValue(0)
+        self.tpa_phase_status.setText(
+            f"Starting… {len(targets)} target(s) vs ref {ref}, "
+            f"{len(drive)} points via {kind}"
+        )
+        self._tpa_phase_set_running(True)
+
+        stop_event = threading.Event()
+        self.tpa_phase_stop_event = stop_event
+        col_ratio = self._active_col_ratio()
+
+        def work() -> dict[str, Any]:
+            monitor.configure_monitor(settings0)
+            results: dict[int, PhaseResult] = {}
+            for pos, k in enumerate(targets):
+                def report(progress, pos=pos):
+                    self.tpa_phase_progress.emit((pos, progress))
+                try:
+                    results[k] = measure_phase_sweep(
+                        monitor, controller, layout,
+                        tgt_index=k, ref_index=ref, drive=drive,
+                        tgt_model=models[k], ref_model=models[ref],
+                        settle=settle,
+                        read_timeout=read_timeout,
+                        measure_dark=measure_dark,
+                        col_ratio=col_ratio,
+                        frac=frac, single_beam_bg=single_beam_bg,
+                        stop_event=stop_event, progress_callback=report,
+                    )
+                except TPAPhaseAborted:
+                    return {"status": "aborted", "results": results}
+            return {"status": "ok", "results": results}
+
+        self._run_slm_task(
+            "TPA comb-phase sweep", work,
+            self._tpa_phase_finished, self._tpa_phase_error,
+        )
+
+    def _tpa_phase_stop(self) -> None:
+        if self.tpa_phase_stop_event is not None:
+            self.tpa_phase_stop_event.set()
+            self.tpa_phase_status.setText("Stopping…")
+
+    def _on_tpa_phase_progress(self, payload) -> None:
+        pos, progress = payload
+        per = max(progress.total, 1)
+        total = max(self._tpa_phase_ntargets, 1) * per
+        self.tpa_phase_progress_bar.setMaximum(total)
+        self.tpa_phase_progress_bar.setValue(min(pos * per + progress.step, total))
+        self.tpa_phase_status.setText(progress.message)
+
+    def _tpa_phase_finished(self, payload: dict[str, Any]) -> None:
+        self.tpa_phase_stop_event = None
+        self._tpa_phase_set_running(False)
+        results = payload.get("results", {})
+        if results:
+            self.tpa_phase_results = dict(results)
+            self.tpa_phase_save_button.setEnabled(True)
+            self._tpa_phase_populate_pairs()
+            self._tpa_phase_redraw()
+        if payload.get("status") == "aborted":
+            self.tpa_phase_status.setText(
+                "Sweep stopped."
+                + (f" ({len(results)} completed target(s) kept)" if results else "")
+            )
+            return
+        parts = []
+        for k, result in sorted(results.items()):
+            f = result.fit
+            if f is None:
+                parts.append(f"ΔΦ[{k}]=no fit")
+            else:
+                parts.append(
+                    f"ΔΦ[{k}]={f.dphi_comb_deg:+.2f}"
+                    f"±{np.degrees(f.dphi_comb_err):.2f}°"
+                )
+        self.tpa_phase_status.setText("Done · " + ("; ".join(parts) or "no results"))
+
+    def _tpa_phase_error(self, _error: str) -> None:
+        self.tpa_phase_stop_event = None
+        self._tpa_phase_set_running(False)
+        self.tpa_phase_status.setText("Comb-phase sweep failed (see Status log)")
+
+    def _tpa_phase_populate_pairs(self) -> None:
+        self.tpa_phase_combo.blockSignals(True)
+        self.tpa_phase_combo.clear()
+        for k, result in sorted(self.tpa_phase_results.items()):
+            f = result.fit
+            deg = f.dphi_comb_deg if f is not None else float("nan")
+            self.tpa_phase_combo.addItem(f"pair {k} · ΔΦ={deg:+.2f}°", k)
+        self.tpa_phase_combo.blockSignals(False)
+        if self.tpa_phase_combo.count():
+            self.tpa_phase_combo.setCurrentIndex(0)
+
+    def _tpa_phase_redraw(self) -> None:
+        k = self.tpa_phase_combo.currentData()
+        result = self.tpa_phase_results.get(k)
+        if result is None or result.fit is None:
+            self.tpa_phase_report.setText("ΔΦ_comb: (run a sweep)")
+            return
+        f = result.fit
+        flags = (("  [a@bound]" if f.a_at_bound else "")
+                 + ("  [b@bound]" if f.b_at_bound else ""))
+        self.tpa_phase_report.setText(
+            f"ΔΦ_comb = {f.dphi_comb_deg:+.2f} ± "
+            f"{np.degrees(f.dphi_comb_err):.2f}°   "
+            f"a={f.a:.4g}  b={f.b:.4g}   "
+            f"χ²/dof={f.chi2_red:.2f} (Birge ×{f.birge:.2f}){flags}"
+        )
+        plot_fringe(self.tpa_phase_fig, f, k)
+        self.tpa_phase_canvas.draw_idle()
+
+    def _tpa_phase_save(self) -> None:
+        if not self.tpa_phase_results:
+            return
+        default = f"calib_step7_{time.strftime('%m%d_%H%M')}.json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Comb-Phase Results", default, "JSON (*.json)"
+        )
+        if not path:
+            return
+        base = Path(path).with_suffix("")
+        saved: list[str] = []
+        for k, result in sorted(self.tpa_phase_results.items()):
+            csv_path = base.parent / f"{base.name}_pair{k}.csv"
+            json_path = base.parent / f"{base.name}_pair{k}.json"
+            write_phase_csv(result, csv_path)
+            save_phase_json(result, json_path)
+            saved += [csv_path.name, json_path.name]
+        self.tpa_phase_status.setText(f"Saved {', '.join(saved)}")
 
     def _build_tpa_center_tab(self) -> QtWidgets.QWidget:
         page = self._page_shell("TPA Centre-Wavelength Calibration")
@@ -5532,7 +5943,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daqmon_fcut = QtWidgets.QDoubleSpinBox()
         self.daqmon_fcut.setRange(0.1, 100_000.0)
         self.daqmon_fcut.setDecimals(1)
-        self.daqmon_fcut.setValue(30.0)
+        self.daqmon_fcut.setValue(20.0)
         self.daqmon_fcut.setSuffix(" Hz")
         self.daqmon_fcut.setToolTip(
             "Low-pass bandwidth for the mean/std and the effective-N behind the SEM"
@@ -5861,6 +6272,19 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.setColumnStretch(8, 1)   # absorb leftover width instead of stretching fields
         return cfg
 
+    @staticmethod
+    def _bind_spins(
+        a: QtWidgets.QDoubleSpinBox, b: QtWidgets.QDoubleSpinBox
+    ) -> None:
+        """Two-way sync: the two spinboxes are views of the same setting.
+
+        ``setValue`` only emits ``valueChanged`` on an actual change, so the
+        cross-connection cannot loop.  ``b`` is set to ``a``'s current value.
+        """
+        a.valueChanged.connect(b.setValue)
+        b.valueChanged.connect(a.setValue)
+        b.setValue(a.value())
+
     def _build_daq_monitor_config(self) -> QtWidgets.QWidget:
         cfg = self._panel("DAQ Monitor · acquisition")
         grid = QtWidgets.QGridLayout(cfg)
@@ -5870,29 +6294,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daq_mon_channel.setMaximumWidth(90)
         self.daq_mon_sample_rate = QtWidgets.QDoubleSpinBox()
         self.daq_mon_sample_rate.setRange(1.0, 2_000_000.0); self.daq_mon_sample_rate.setDecimals(0)
-        self.daq_mon_sample_rate.setValue(100_000.0); self.daq_mon_sample_rate.setSuffix(" S/s")
+        self.daq_mon_sample_rate.setValue(1000.0); self.daq_mon_sample_rate.setSuffix(" S/s")
         self.daq_mon_sample_rate.setMaximumWidth(120)
         self.daq_mon_hold = QtWidgets.QDoubleSpinBox()
-        self.daq_mon_hold.setRange(0.0, 10000.0); self.daq_mon_hold.setValue(100.0); self.daq_mon_hold.setSuffix(" ms")
+        self.daq_mon_hold.setRange(0.0, 10000.0); self.daq_mon_hold.setValue(250.0); self.daq_mon_hold.setSuffix(" ms")
         self.daq_mon_hold.setMaximumWidth(100)
         self.daq_mon_duration = QtWidgets.QDoubleSpinBox()
         self.daq_mon_duration.setRange(0.001, 10.0); self.daq_mon_duration.setDecimals(3)
-        self.daq_mon_duration.setValue(0.05); self.daq_mon_duration.setSuffix(" s")
+        self.daq_mon_duration.setValue(3.0); self.daq_mon_duration.setSuffix(" s")
         self.daq_mon_duration.setMaximumWidth(100)
+        self.daq_mon_duration.setToolTip(
+            "T_both: averaging window when both beams of a pair are on "
+            "(bright points); also the plain window for non-sweep reads"
+        )
+        self.daq_mon_single = QtWidgets.QDoubleSpinBox()
+        self.daq_mon_single.setRange(0.001, 30.0); self.daq_mon_single.setDecimals(3)
+        self.daq_mon_single.setValue(5.0); self.daq_mon_single.setSuffix(" s")
+        self.daq_mon_single.setMaximumWidth(100)
+        self.daq_mon_single.setToolTip(
+            "T_single: averaging window when at most one beam is on "
+            "(x=0 or w=0, incl. the all-off dark) -- weak signal needs a "
+            "longer window than the bright points"
+        )
+        # the Step 6 tab shows the same two windows -- keep both views in sync
+        self._bind_spins(self.daq_mon_duration, self.tpa_tboth)
+        self._bind_spins(self.daq_mon_single, self.tpa_tsingle)
+        self.daq_mon_fcut = QtWidgets.QDoubleSpinBox()
+        self.daq_mon_fcut.setRange(0.1, 100_000.0); self.daq_mon_fcut.setDecimals(1)
+        self.daq_mon_fcut.setValue(20.0); self.daq_mon_fcut.setSuffix(" Hz")
+        self.daq_mon_fcut.setMaximumWidth(100)
+        self.daq_mon_fcut.setToolTip(
+            "Detector 3 dB bandwidth: low-pass cutoff for the trace and the "
+            "effective-N (2*T*f_cut) behind the reported SEM"
+        )
         self.daq_mon_range = QtWidgets.QComboBox()
         self.daq_mon_range.setMaximumWidth(100)
         for lo, hi in self._DAQ_RANGES:
             self.daq_mon_range.addItem(f"\N{PLUS-MINUS SIGN}{hi:g} V", (lo, hi))
         self.daq_mon_range.setCurrentIndex(0)   # smallest / most sensitive range by default
         pairs = [("Channel", self.daq_mon_channel), ("Sample rate", self.daq_mon_sample_rate),
-                 ("Hold", self.daq_mon_hold), ("Average for", self.daq_mon_duration),
+                 ("Hold", self.daq_mon_hold), ("T_both", self.daq_mon_duration),
+                 ("T_single", self.daq_mon_single), ("Low-pass", self.daq_mon_fcut),
                  ("Range", self.daq_mon_range)]
-        # single row: the panel spans half the page width, so a 2-per-row grid
+        # 4 fields per row: the panel spans half the page width, so 2-per-row
         # left most of it empty and made the panel needlessly tall
         for i, (label, widget) in enumerate(pairs):
-            grid.addWidget(QtWidgets.QLabel(label), 0, i * 2)
-            grid.addWidget(widget, 0, i * 2 + 1)
-        grid.setColumnStretch(len(pairs) * 2, 1)   # absorb leftover width instead of stretching fields
+            r, c = i // 4, (i % 4) * 2
+            grid.addWidget(QtWidgets.QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+        grid.setColumnStretch(8, 1)   # absorb leftover width instead of stretching fields
         return cfg
 
     def _sync_monitor_source(self) -> None:
@@ -5941,9 +6391,11 @@ class MainWindow(QtWidgets.QMainWindow):
             channel=self.daq_mon_channel.text().strip() or "ai0",
             sample_rate=self.daq_mon_sample_rate.value(),
             duration=self.daq_mon_duration.value(),
+            single_duration=self.daq_mon_single.value(),
             hold=self.daq_mon_hold.value() / 1000.0,  # ms -> s
             min_val=min_val,
             max_val=max_val,
+            f_cut=self.daq_mon_fcut.value(),
         )
 
     def _on_monitor_sample(self, sample: MonitorSample) -> None:
@@ -7919,6 +8371,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _segment_mode_is_equal(self) -> bool:
         return self.segment_mode_combo.currentIndex() == 0
 
+    def _segment_axis(self) -> str:
+        return "x" if self.segment_axis_combo.currentIndex() == 0 else "y"
+
+    def _segment_axis_size(self) -> int:
+        width, height = self.slm_size
+        return width if self._segment_axis() == "x" else height
+
+    def _on_segment_axis_changed(self) -> None:
+        axis = self._segment_axis()
+        self.segments_table.setHorizontalHeaderLabels(
+            [f"{axis} start", f"{axis} end", "Level"]
+        )
+        if self._segment_mode_is_equal():
+            self._rebuild_equal_segment_rows()
+        else:
+            self._update_segment_preview()
+
     def _on_segment_mode_changed(self) -> None:
         equal = self._segment_mode_is_equal()
         self.segment_count_spin.setEnabled(equal)
@@ -7939,9 +8408,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _rebuild_equal_segment_rows(self) -> None:
         if not self._segment_mode_is_equal():
             return
-        width, _height = self.slm_size
-        count = min(self.segment_count_spin.value(), width)
-        edges = equal_x_segment_edges(width, count)
+        size = self._segment_axis_size()
+        count = min(self.segment_count_spin.value(), size)
+        edges = equal_segment_edges(size, count)
 
         previous_levels = []
         for row in range(self.segments_table.rowCount()):
