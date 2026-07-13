@@ -1454,10 +1454,34 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets["window"] = self._spin(1, 8191, 8)
         widgets["peak_nm"] = self._double_spin(0.0, 50.0, 0.2, " nm", 3)
         widgets["peak_nm"].setToolTip("Centroid half-window around the peak, in nm")
+        widgets["stride"] = self._spin(1, 8191, 1)
+        widgets["stride"].setToolTip(
+            "Measure every Nth column; the near-linear wavelength fit fills "
+            "in the skipped columns (1 = measure every column)."
+        )
+        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.0, " nm", 2)
+        widgets["sweep_nm"].setToolTip(
+            "0 = off: wide OSA span at every position. >0: measure the two "
+            "region-edge positions with the wide span first (anchors), then "
+            "re-center this narrow span on the predicted wavelength at every "
+            "other position — much faster."
+        )
+        widgets["max_wl"] = self._double_spin(0.0, 2000.0, 0.0, " nm", 2)
+        widgets["max_wl"].setToolTip(
+            "Ignore peak-search samples above this wavelength (0 = off). Use "
+            "to mask a fixed leakage artifact the SLM never modulates, "
+            "e.g. 781.5."
+        )
         cfg.addWidget(QtWidgets.QLabel("Window px"))
         cfg.addWidget(widgets["window"])
         cfg.addWidget(QtWidgets.QLabel("Peak ± window"))
         cfg.addWidget(widgets["peak_nm"])
+        cfg.addWidget(QtWidgets.QLabel("Stride"))
+        cfg.addWidget(widgets["stride"])
+        cfg.addWidget(QtWidgets.QLabel("Sweep span"))
+        cfg.addWidget(widgets["sweep_nm"])
+        cfg.addWidget(QtWidgets.QLabel("Exclude peak λ >"))
+        cfg.addWidget(widgets["max_wl"])
         cfg.addStretch(1)
         layout.addLayout(cfg)
         layout.addWidget(self._region_row(2))
@@ -7390,6 +7414,9 @@ class MainWindow(QtWidgets.QMainWindow):
             seed = self._resolve_step_input(2)
             window = self.step_widgets[2]["window"].value()
             peak_nm = self.step_widgets[2]["peak_nm"].value() or None
+            stride = self.step_widgets[2]["stride"].value()
+            sweep_nm = self.step_widgets[2]["sweep_nm"].value() or None
+            max_wl = self.step_widgets[2]["max_wl"].value() or None
             region = self._step_region(2)
         except ValueError as exc:
             return self._reject_calibration(exc)
@@ -7403,6 +7430,8 @@ class MainWindow(QtWidgets.QMainWindow):
             result = wavelength_calibration(
                 osa, controller, [], settings, seed,
                 window_size=window, peak_half_window_nm=peak_nm, region=region,
+                coordinate_stride=stride,
+                sweep_span_nm=sweep_nm, max_peak_wavelength_nm=max_wl,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_path)
@@ -7861,6 +7890,9 @@ class MainWindow(QtWidgets.QMainWindow):
             s2 = self._step_settings(2)
             window2 = self.step_widgets[2]["window"].value()
             peak_nm = self.step_widgets[2]["peak_nm"].value() or None
+            stride2 = self.step_widgets[2]["stride"].value()
+            sweep_nm2 = self.step_widgets[2]["sweep_nm"].value() or None
+            max_wl2 = self.step_widgets[2]["max_wl"].value() or None
             region2 = self._step_region(2)
             s3 = self._step_settings(3)
             levels3 = self._step_levels(3)
@@ -7895,6 +7927,8 @@ class MainWindow(QtWidgets.QMainWindow):
             wl_result = wavelength_calibration(
                 osa, controller, [], s2, seed,
                 window_size=window2, peak_half_window_nm=peak_nm, region=region2,
+                coordinate_stride=stride2,
+                sweep_span_nm=sweep_nm2, max_peak_wavelength_nm=max_wl2,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(wl_result, out2)

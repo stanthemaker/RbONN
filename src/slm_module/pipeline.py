@@ -213,6 +213,8 @@ class WlMapConfig:
     levels: list[int] = field(default_factory=lambda: list(range(0, 1024, 64)))
     window_size: int = 8
     coordinate_stride: int = 1        # measure every Nth column, fit fills the rest
+    sweep_span_nm: float | None = None       # narrow re-centered span; None = wide
+    max_peak_wavelength_nm: float | None = None  # ignore peaks above (leak mask)
     peak_half_window_nm: float | None = None
     region: tuple[int, int] | None = None
     osa: OSAStageSettings = field(default_factory=OSAStageSettings)
@@ -542,6 +544,8 @@ def _run_wl_map(ctx: _Context, plan: StagePlan) -> Any:
         peak_half_window_nm=cfg.peak_half_window_nm,
         region=cfg.region,
         coordinate_stride=cfg.coordinate_stride,
+        sweep_span_nm=cfg.sweep_span_nm,
+        max_peak_wavelength_nm=cfg.max_peak_wavelength_nm,
         outlier_policy=cfg.outlier_policy,
         stop_event=ctx.stop_event, progress_callback=report,
     )

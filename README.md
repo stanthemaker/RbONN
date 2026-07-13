@@ -2,6 +2,31 @@
 
 ## Calibration
 
+### Step 2 — wavelength map (px → nm)
+
+Maps each SLM column to the wavelength it controls. An all-dark and an
+all-bright frame are measured once as background / reference; then a
+`window_size`-wide bright window walks across the scan region, and each
+position's normalized spectrum is reduced to one `(coordinate, wavelength)`
+point by a weighted centroid around its peak (`peak ± window` nm). A polynomial
+fit (degree ≤ 3) over the points gives the map; the saved result always carries
+the **dense per-column grid** plus `wavelength_fit_coefficients`, regardless of
+how few positions were actually measured.
+
+Acquisition knobs (GUI: Step 2 tab / pipeline wl_map stage):
+
+| Knob | Effect |
+|------|--------|
+| `coordinate_stride` | measure every Nth column; the near-linear fit fills the skipped ones |
+| `sweep_span_nm` | fast mode: measure the two region-edge positions with the wide OSA span first (**anchors**), draw a line through them, then re-center this narrow span (~1 nm) on the predicted wavelength at every other position — ~8× fewer samples per sweep with AUTO sampling |
+| `max_peak_wavelength_nm` | ignore peak-search samples above this wavelength; masks a fixed leakage artifact the SLM never modulates (light landing outside the active area, ~781.7 nm on this setup → set ≈781.5) |
+| `outlier_policy` | post-sweep auto-remeasure of points that sit off the linear map |
+
+Normalized traces are only trusted where the bright reference carries at least
+5% of its peak power — outside the source spectrum the reference − background
+denominator is ≈0 and would inflate drift residue into spurious peaks (the
+historical cause of stride points landing off the line).
+
 ### Step 3 — grayscale transfer curve per coordinate
 
 For every coordinate mapped in Step 2, the panel lights one `window_size`-wide

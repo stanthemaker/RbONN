@@ -382,6 +382,23 @@ class PipelinePage(QtWidgets.QWidget):
         self.wl_region_end = QtWidgets.QSpinBox()
         self.wl_region_end.setRange(0, 4096)
         self.wl_region_end.setValue(1200)
+        self.wl_sweep_span = QtWidgets.QDoubleSpinBox()
+        self.wl_sweep_span.setRange(0.0, 50.0)
+        self.wl_sweep_span.setDecimals(2)
+        self.wl_sweep_span.setValue(0.0)
+        self.wl_sweep_span.setToolTip(
+            "0 = off: wide OSA span everywhere. >0: measure the two region-edge "
+            "positions with the wide span (anchors), then re-center this narrow "
+            "span on the predicted wavelength at every other position (fast)"
+        )
+        self.wl_max_peak = QtWidgets.QDoubleSpinBox()
+        self.wl_max_peak.setRange(0.0, 2000.0)
+        self.wl_max_peak.setDecimals(2)
+        self.wl_max_peak.setValue(0.0)
+        self.wl_max_peak.setToolTip(
+            "Ignore peak-search samples above this wavelength (0 = off); "
+            "masks a fixed leakage artifact, e.g. 781.5"
+        )
         grid.addWidget(QtWidgets.QLabel("Window (px)"), 1, 0)
         grid.addWidget(self.wl_window, 1, 1)
         grid.addWidget(self.wl_peak_check, 1, 2)
@@ -391,10 +408,14 @@ class PipelinePage(QtWidgets.QWidget):
         grid.addWidget(self.wl_region_check, 2, 0)
         grid.addWidget(self.wl_region_start, 2, 1)
         grid.addWidget(self.wl_region_end, 2, 3)
+        grid.addWidget(QtWidgets.QLabel("Sweep span (nm)"), 2, 4)
+        grid.addWidget(self.wl_sweep_span, 2, 5)
+        grid.addWidget(QtWidgets.QLabel("Exclude peak λ > (nm)"), 3, 4)
+        grid.addWidget(self.wl_max_peak, 3, 5)
         self.wl_osa = _OsaSettingsGroup()
         self.wl_outliers = _OutlierGroup()
-        grid.addWidget(self.wl_osa, 3, 0, 1, 6)
-        grid.addWidget(self.wl_outliers, 4, 0, 1, 6)
+        grid.addWidget(self.wl_osa, 4, 0, 1, 6)
+        grid.addWidget(self.wl_outliers, 5, 0, 1, 6)
         self.rows["wl_map"].add_settings(widget)
 
         # ---- intensity ------------------------------------------------------
@@ -669,6 +690,8 @@ class PipelinePage(QtWidgets.QWidget):
                 levels=_levels_from(*self.wl_levels),
                 window_size=self.wl_window.value(),
                 coordinate_stride=self.wl_stride.value(),
+                sweep_span_nm=self.wl_sweep_span.value() or None,
+                max_peak_wavelength_nm=self.wl_max_peak.value() or None,
                 peak_half_window_nm=(
                     self.wl_peak_nm.value()
                     if self.wl_peak_check.isChecked() else None
@@ -1002,7 +1025,8 @@ class PipelinePage(QtWidgets.QWidget):
         "ph_ref", "ph_points",
     )
     _PERSIST_DSPINS = (
-        "lay_center_wl", "lay_guard_half", "ctr_halfspan", "ctr_drive",
+        "lay_center_wl", "lay_guard_half", "wl_sweep_span", "wl_max_peak",
+        "ctr_halfspan", "ctr_drive",
         "eta_min", "eta_max", "ph_start", "ph_stop", "ph_ref_phase", "ph_bound",
         "wl_peak_nm",
     )
