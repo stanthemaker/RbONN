@@ -551,7 +551,7 @@ class MainWindow(QtWidgets.QMainWindow):
         nav_items = (
             ("\N{ELECTRIC PLUG}  Connections", "Connect SLM, OSA, scope and DAQ"),
             ("\N{LINK SYMBOL}  SLM Control", "Grayscale and CSV display"),
-            ("\N{CHART WITH UPWARDS TREND}  Calibration", "Intensity, mod error, scope holding"),
+            ("\N{CHART WITH UPWARDS TREND}  Calibration", "Min/max, wavelength, intensity, TPA"),
             ("\N{LEFT RIGHT ARROW}  Center Scan", "Sweep a window across x"),
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
             ("\N{HIGH VOLTAGE SIGN}  TPA Encoding", "Channel grid encoding + scope/DAQ readout"),
@@ -779,27 +779,33 @@ class MainWindow(QtWidgets.QMainWindow):
         return page
 
     def _build_calibration_page(self) -> QtWidgets.QWidget:
-        """Top-level step tabs; each step (incl. Mod Error / Holding) uses the full page."""
+        """Top-level step tabs; each step uses the full page."""
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
 
         # per-step widget registry: self.step_widgets[step][key]
-        self.step_widgets: dict[int, dict[str, Any]] = {1: {}, 2: {}, 3: {}}
+        self.step_widgets: dict[int | str, dict[str, Any]] = {
+            1: {}, 2: {}, 3: {}, "3c": {},
+        }
 
+        # tabs in step order: 1, 2, 3a, 3b, 3c, 4b, 6, 6b, 7 (Pipeline first)
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._build_step1_tab(), "Step 1 · Min/Max")
         tabs.addTab(self._build_step2_tab(), "Step 2 · Wavelength")
-        tabs.addTab(self._build_step3_page(), "Step 3 · Intensity")
-        tabs.addTab(self._build_fast_channel_calibration_page(), "Step 3b - Fast Channels")
-        tabs.addTab(self._build_analysis_page(), "Step 4 · Mod Error")
-        tabs.addTab(self._build_scope_holding_tab(), "Step 5 · Holding")
+        tabs.addTab(self._build_step3_page(), "Step 3a · Intensity")
+        tabs.addTab(self._build_fast_channel_calibration_page(), "Step 3b · Fast Channels")
+        tabs.addTab(self._build_step3c_page(), "Step 3c · Channels (DAQ)")
+        # Mod Error page is built but not shown as a tab: the Encoding Gain
+        # (TPA Encoding page) and Quick Test sweeps read its ana_* OSA
+        # sweep-settings widgets.
+        self._mod_error_page = self._build_analysis_page()
+        tabs.addTab(self._build_stage3_reopt_page(), "Step 4b · Stage3 Reopt")
         tabs.addTab(self._build_tpa_tab(), "Step 6 · TPA Efficiency")
         tabs.addTab(self._build_tpa_center_tab(), "Step 6b · TPA Center")
         tabs.addTab(self._build_tpa_phase_tab(), "Step 7 · Comb Phase")
         self.pipeline_page = PipelinePage(self)
         tabs.insertTab(0, self.pipeline_page, "Pipeline")
-        tabs.addTab(self._build_stage3_reopt_page(), "Step 4b - Stage3 Reopt")
         self.calibration_tabs = tabs
         lay.addWidget(tabs)
 
@@ -1312,7 +1318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(widgets["sampling_points"], 2, 1)
         return box
 
-    def _level_sweep_row(self, step: int, *, stop: int = 1023, stepv: int = 64) -> QtWidgets.QWidget:
+    def _level_sweep_row(self, step: int | str, *, stop: int = 1023, stepv: int = 64) -> QtWidgets.QWidget:
         """A 'Levels start / stop / step' row stored on self.step_widgets[step]."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1330,7 +1336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _default_calib_name(self, step: int, suffix: str = ".json") -> str:
+    def _default_calib_name(self, step: int | str, suffix: str = ".json") -> str:
         """Default calibration output filename, e.g. calib_step1_0704_1530.json.
 
         The MMDD_HHMM timestamp keeps successive runs from overwriting each
@@ -1339,7 +1345,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         return f"calib_step{step}_{time.strftime('%m%d_%H%M')}{suffix}"
 
-    def _output_row(self, step: int, key: str, label: str, default_name: str, is_csv: bool) -> QtWidgets.QWidget:
+    def _output_row(self, step: int | str, key: str, label: str, default_name: str, is_csv: bool) -> QtWidgets.QWidget:
         """An output path edit + Browse, stored under self.step_widgets[step][key]."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1355,7 +1361,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(button)
         return row
 
-    def _input_file_row(self, step: int, caption: str, filt: str) -> QtWidgets.QWidget:
+    def _input_file_row(self, step: int | str, caption: str, filt: str) -> QtWidgets.QWidget:
         """An input path edit + Browse for a step, stored under [step]['in_path']."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1369,7 +1375,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(button)
         return row
 
-    def _min_max_row(self, step: int, label: str) -> QtWidgets.QWidget:
+    def _min_max_row(self, step: int | str, label: str) -> QtWidgets.QWidget:
         """A manual min/max level pair stored under [step]['min'] / [step]['max']."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1385,7 +1391,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _region_row(self, step: int) -> QtWidgets.QWidget:
+    def _region_row(self, step: int | str) -> QtWidgets.QWidget:
         """A 'Limit region x start→end' toggle stored on self.step_widgets[step]."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1413,7 +1419,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _run_row(self, step: int, run_text: str, slot: Callable[[], None]) -> QtWidgets.QWidget:
+    def _run_row(self, step: int | str, run_text: str, slot: Callable[[], None]) -> QtWidgets.QWidget:
         """A status label + Run button row, stored under [step]['status'] / ['run']."""
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1612,15 +1618,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._toggle_step3_source()
         return page
 
-    def _build_step3_daq_group(self) -> QtWidgets.QGroupBox:
-        """DAQ acquisition settings for the Step-3 bucket-detector sweep.
+    def _build_step3_daq_group(self, step: int | str = 3) -> QtWidgets.QGroupBox:
+        """DAQ acquisition settings for a bucket-detector sweep (Step 3 / 3c).
 
         Defaults mirror tests/slm_sin2_level_sweep_test.py (ai1, 100 kS/s, 1 s
         average, 150 ms settle, ±0.1 V). Hidden unless Detector = DAQ.
         """
         box = QtWidgets.QGroupBox("DAQ acquisition (NI-DAQmx)")
         grid = QtWidgets.QGridLayout(box)
-        widgets = self.step_widgets[3]
+        widgets = self.step_widgets[step]
         widgets["daq_channel"] = QtWidgets.QLineEdit("ai1")
         widgets["daq_channel"].setMaximumWidth(90)
         widgets["daq_sample_rate"] = QtWidgets.QDoubleSpinBox()
@@ -1654,6 +1660,100 @@ class MainWindow(QtWidgets.QMainWindow):
             grid.addWidget(QtWidgets.QLabel(label), 0, 2 * col)
             grid.addWidget(widget, 0, 2 * col + 1)
         return box
+
+    def _build_step3c_page(self) -> QtWidgets.QWidget:
+        """Step 3c: the Step-3 DAQ intensity sweep at encoding-channel centres.
+
+        Mirrors Step 3 (one lit window at a time, dark-frame-subtracted DAQ
+        readings) but structures the scan like Step 3b: the channel grid is
+        tiled around a target centre wavelength with mirror-symmetric pairs,
+        skipping any channel that overlaps a guard band.
+        """
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.addWidget(
+            self._caption(
+                "Sweep levels at each encoding-channel centre and read the DAQ. "
+                "The channel grid is tiled around the target centre and skips "
+                "the guard bands (same structuring as Step 3b); one channel "
+                "window is lit at a time; intensity is dark-frame subtracted."
+            )
+        )
+        widgets = self.step_widgets["3c"]
+
+        widgets["daq_group"] = self._build_step3_daq_group("3c")
+        layout.addWidget(widgets["daq_group"])
+
+        grid_panel = self._panel("Channel grid")
+        grid = QtWidgets.QGridLayout(grid_panel)
+        widgets["target"] = self._double_spin(700.0, 900.0, 778.0, " nm", 3)
+        widgets["window"] = self._spin(1, 256, 15)
+        widgets["pad"] = self._spin(0, 256, 5)
+        widgets["count"] = self._spin(1, 200, 20)
+        widgets["guard_check"] = QtWidgets.QCheckBox("Min-level guard bands")
+        widgets["guard_check"].setChecked(True)
+        widgets["guard_wl"] = QtWidgets.QLineEdit("780, 776")
+        widgets["guard_wl"].setToolTip(
+            "Comma/space separated guard center wavelengths in nm."
+        )
+        widgets["guard_nm"] = self._double_spin(0.001, 5.0, 0.06, " nm", 3)
+        widgets["guard_nm"].setToolTip(
+            "Half-width around each guard wavelength; channels overlapping a "
+            "guard band are skipped."
+        )
+        grid.addWidget(QtWidgets.QLabel("Target center"), 0, 0)
+        grid.addWidget(widgets["target"], 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Channel width"), 0, 2)
+        grid.addWidget(widgets["window"], 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Gap px"), 0, 4)
+        grid.addWidget(widgets["pad"], 0, 5)
+        grid.addWidget(QtWidgets.QLabel("Channels/side"), 1, 0)
+        grid.addWidget(widgets["count"], 1, 1)
+        grid.addWidget(widgets["guard_check"], 2, 0, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Guard centers"), 2, 2)
+        grid.addWidget(widgets["guard_wl"], 2, 3)
+        grid.addWidget(QtWidgets.QLabel("Guard half-width"), 2, 4)
+        grid.addWidget(widgets["guard_nm"], 2, 5)
+        layout.addWidget(grid_panel)
+
+        layout.addWidget(self._level_sweep_row("3c", stop=1023, stepv=32))
+        layout.addWidget(self._region_row("3c"))
+
+        # wavelength source (same choices as Step 3)
+        src_row = QtWidgets.QHBoxLayout()
+        widgets["source"] = QtWidgets.QComboBox()
+        widgets["source"].addItems(["Step 2 result (memory)", "From file…"])
+        widgets["source"].currentIndexChanged.connect(self._toggle_step3c_source)
+        src_row.addWidget(QtWidgets.QLabel("Wavelength source"))
+        src_row.addWidget(widgets["source"])
+        src_row.addStretch(1)
+        layout.addLayout(src_row)
+
+        widgets["in_row"] = self._input_file_row(
+            "3c", "Open Step 2 result or λ-map CSV", "Calibration (*.json *.csv)"
+        )
+        layout.addWidget(widgets["in_row"])
+        widgets["manual_row"] = self._min_max_row("3c", "min/max for CSV source")
+        layout.addWidget(widgets["manual_row"])
+
+        layout.addWidget(
+            self._output_row("3c", "out", "Output JSON", self._default_calib_name("3c"), False)
+        )
+        layout.addWidget(
+            self._output_row("3c", "out_csv", "Output CSV", "calibration_step3c.csv", True)
+        )
+
+        run_row = self._run_row("3c", "Run Step 3c", self._run_step3c)
+        widgets["stop"] = QtWidgets.QPushButton("Stop")
+        widgets["stop"].setProperty("variant", "danger")
+        widgets["stop"].setEnabled(False)
+        widgets["stop"].clicked.connect(self._stop_full_calibration)
+        run_row.layout().addWidget(widgets["stop"])
+        layout.addWidget(run_row)
+        layout.addStretch(1)
+        self._toggle_step3c_source()
+        return page
 
     def _caption(self, text: str) -> QtWidgets.QLabel:
         label = QtWidgets.QLabel(text)
@@ -2865,7 +2965,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Run the Modulation Error sweep twice — flat baseline then the current "
             "encoding shape — and report the per-channel change in neighbour "
             "leakage and in-band fraction. Needs OSA + SLM connected and a layout "
-            "built. Uses the sweep settings on Calibration ▸ Step 4."
+            "built. Sweeps use the default Modulation Error settings "
+            "(0.8 nm span per channel, HIGH3, background-subtracted)."
         )
         self.edge_gain_button.clicked.connect(self._edge_measure_gain)
         self.edge_gain_stop_button = QtWidgets.QPushButton("Stop")
@@ -3541,8 +3642,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Turn on a single channel and sweep the OSA once with the flat band and "
             "once with the optimised encoding shape, then compute the crosstalk into "
             "the neighbour bands from each trace. Build a 15 px layout on the TPA "
-            "Encoding page first. OSA sweep settings (span, sensitivity, Y-unit) are "
-            "taken from the Modulation Error page."
+            "Encoding page first. OSA sweeps use the default Modulation Error "
+            "settings (0.8 nm span, HIGH3, LOG)."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
@@ -6928,6 +7029,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.step_widgets[3]["manual_row"].setVisible(index == 1)
         self._update_channel_map_button()
 
+    def _toggle_step3c_source(self) -> None:
+        index = self.step_widgets["3c"]["source"].currentIndex()
+        self.step_widgets["3c"]["in_row"].setVisible(index == 1)
+        # manual min/max only matter for a bare wavelength-map CSV source
+        self.step_widgets["3c"]["manual_row"].setVisible(index == 1)
+
     def _step3_wavelength_source_available(self) -> bool:
         """True when a Step-2 wavelength source is set (memory result or a file)."""
         widgets = self.step_widgets.get(3)
@@ -7125,6 +7232,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stage3_reopt_stop_button.setEnabled(running)
         if hasattr(self, "fast_channel_stop_button"):
             self.fast_channel_stop_button.setEnabled(running)
+        step3c = getattr(self, "step_widgets", {}).get("3c", {})
+        if "stop" in step3c:
+            step3c["stop"].setEnabled(running)
         self.osa_connect_button.setEnabled(not running and not connected)
         self.osa_disconnect_button.setEnabled(not running and connected)
         # The unified pipeline may run without the OSA (TPA stages only), so
@@ -7136,16 +7246,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_step3_run_button()
 
     def _refresh_step3_run_button(self) -> None:
-        """Step 3 reads the DAQ, so its Run button is gated on the DAQ, not the OSA."""
-        widgets = getattr(self, "step_widgets", {}).get(3)
-        if not widgets or "run" not in widgets:
-            return
-        if getattr(self, "_calibration_is_running", False):
-            widgets["run"].setEnabled(False)
-            return
-        widgets["run"].setEnabled(
-            self.daq_controller is not None and self.daq_controller.is_connected
-        )
+        """Steps 3/3c read the DAQ, so their Run buttons are gated on the DAQ, not the OSA."""
+        for step in (3, "3c"):
+            widgets = getattr(self, "step_widgets", {}).get(step)
+            if not widgets or "run" not in widgets:
+                continue
+            if getattr(self, "_calibration_is_running", False):
+                widgets["run"].setEnabled(False)
+                continue
+            widgets["run"].setEnabled(
+                self.daq_controller is not None and self.daq_controller.is_connected
+            )
 
     # ----- per-step config readers (GUI thread) -----
     def _step_settings(self, step: int) -> MeasurementSettings:
@@ -7162,7 +7273,7 @@ class MainWindow(QtWidgets.QMainWindow):
             y_unit="LINear",
         )
 
-    def _step_levels(self, step: int) -> list[int]:
+    def _step_levels(self, step: int | str) -> list[int]:
         widgets = self.step_widgets[step]
         start = widgets["level_start"].value()
         stop = widgets["level_stop"].value()
@@ -7202,7 +7313,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _fast_channel_guard_bands(self) -> list[tuple[float, float]]:
         if not self.fast_channel_guard_check.isChecked():
             return []
-        value_text = self.fast_channel_guard_wl_edit.text().strip()
+        return self._parse_guard_bands(
+            self.fast_channel_guard_wl_edit.text(),
+            self.fast_channel_guard_nm_spin.value(),
+        )
+
+    def _step3c_guard_bands(self) -> list[tuple[float, float]]:
+        widgets = self.step_widgets["3c"]
+        if not widgets["guard_check"].isChecked():
+            return []
+        return self._parse_guard_bands(
+            widgets["guard_wl"].text(), widgets["guard_nm"].value()
+        )
+
+    def _parse_guard_bands(
+        self, value_text: str, half_width: float
+    ) -> list[tuple[float, float]]:
+        value_text = value_text.strip()
         if not value_text:
             raise ValueError("guard center wavelengths are required")
         parts = [part for part in re.split(r"[\s,;]+", value_text) if part]
@@ -7214,12 +7341,11 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError("guard center wavelengths must be numbers in nm") from exc
         if not all(np.isfinite(center) for center in centers):
             raise ValueError("guard center wavelengths must be finite")
-        half_width = self.fast_channel_guard_nm_spin.value()
         if half_width <= 0.0:
             raise ValueError("guard half-width must be positive")
         return [(center, half_width) for center in centers]
 
-    def _step_region(self, step: int) -> tuple[int, int] | None:
+    def _step_region(self, step: int | str) -> tuple[int, int] | None:
         widgets = self.step_widgets[step]
         if not widgets["region_check"].isChecked():
             return None
@@ -7240,7 +7366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         handle.close()
         return Path(handle.name)
 
-    def _resolve_step_input(self, step: int) -> CalibrationResult:
+    def _resolve_step_input(self, step: int | str) -> CalibrationResult:
         widgets = self.step_widgets[step]
         index = widgets["source"].currentIndex()
         if step == 2:
@@ -7358,8 +7484,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return daq
 
-    def _step3_daq_settings(self) -> DAQMonitorSettings:
-        widgets = self.step_widgets[3]
+    def _step3_daq_settings(self, step: int | str = 3) -> DAQMonitorSettings:
+        widgets = self.step_widgets[step]
         min_val, max_val = widgets["daq_range"].currentData()
         return DAQMonitorSettings(
             channel=widgets["daq_channel"].text().strip() or "ai1",
@@ -7501,6 +7627,90 @@ class MainWindow(QtWidgets.QMainWindow):
             }
 
         self._launch_calibration("Run step 3 (DAQ)", work)
+
+    def _run_step3c(self) -> None:
+        """Step 3c: the DAQ intensity sweep over Step-3b-style channel centres."""
+        daq = self._daq_ready()
+        if daq is None:
+            return
+        widgets = self.step_widgets["3c"]
+        try:
+            mapping = self._resolve_step_input("3c")
+            levels = self._step_levels("3c")
+            target = widgets["target"].value()
+            window = widgets["window"].value()
+            pad = widgets["pad"].value()
+            n_channels = widgets["count"].value()
+            guard_bands = self._step3c_guard_bands()
+            region = self._step_region("3c")
+            daq_settings = self._step3_daq_settings("3c")
+        except ValueError as exc:
+            return self._reject_calibration(exc)
+        out_json = self._resolve_output_path(
+            widgets["out"].text(), "calib_step3c.json"
+        )
+        out_csv = self._resolve_output_path(
+            widgets["out_csv"].text(), "calibration_step3c.csv"
+        )
+        controller = self._controller()
+        daq.configure_monitor(daq_settings)
+        read_timeout = max(30.0, daq_settings.duration * 3.0 + 10.0)
+        self._log(
+            f"Step 3c (DAQ) started: {len(levels)} levels, "
+            f"{2 * n_channels} channels around {target:g} nm, "
+            f"width {window} px, gap {pad} px, "
+            f"{daq_settings.channel} @ {daq_settings.sample_rate:g} S/s, "
+            f"avg {daq_settings.duration:g}s"
+        )
+        if guard_bands:
+            guard_text = ", ".join(
+                f"{center:g}±{half:g} nm" for center, half in guard_bands
+            )
+            self._log(f"Step 3c guard bands: {guard_text} -> skipped")
+
+        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            slm_width, _slm_height = controller.get_slm_info()
+            grid_seed, center_coordinate = build_channel_calibration_grid(
+                mapping,
+                target_wavelength_nm=target,
+                n_channels_per_side=n_channels,
+                channel_width_px=window,
+                gap_px=pad,
+                slm_width=slm_width,
+                guard_bands_nm=guard_bands,
+            )
+            report(
+                CalibrationProgress(
+                    phase="fast_center",
+                    step=0,
+                    total=1,
+                    message=(
+                        f"Step 2 predicts {target:.4f} nm at "
+                        f"x={center_coordinate:.3f} px"
+                    ),
+                    x=center_coordinate,
+                    y=target,
+                )
+            )
+            result = intensity_calibration_daq(
+                daq, controller, levels, grid_seed,
+                window_size=window, region=region,
+                read_timeout=read_timeout,
+                stop_event=stop_event, progress_callback=report,
+            )
+            save_calibration_result(result, out_json)
+            csv_path = write_intensity_calibration_csv(result, out_csv)
+            return {
+                "status": "ok", "step": "3c", "result": result, "saved": out_json,
+                "csv": csv_path,
+                "center_coordinate": center_coordinate,
+                "summary": (
+                    f"{result.coordinates.size} channels, "
+                    f"pitch {window + pad} px"
+                ),
+            }
+
+        self._launch_calibration("Run step 3c (DAQ)", work)
 
     def _run_fast_channel_calibration(self) -> None:
         osa = self._osa_ready()
@@ -8028,11 +8238,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # a fresh Step-2 result enables the "memory" channel-map source
         self._update_channel_map_button()
 
-        if step in (1, 2, 3):
+        if step in (1, 2, 3, "3c"):
             self.step_widgets[step]["status"].setText(f"Done \N{MIDDLE DOT} {summary}")
             out_edit = self.step_widgets[step]["out"]
             if saved is not None and not out_edit.text().strip():
                 out_edit.setText(str(saved))
+            center_coordinate = payload.get("center_coordinate")
+            if step == "3c" and center_coordinate is not None:
+                self._log(
+                    "Step 3c center: "
+                    f"x={float(center_coordinate):.3f} px "
+                    f"(physical pixel {int(round(float(center_coordinate)))})"
+                )
         elif step == "stage3_reopt":
             self.stage3_reopt_status_label.setText(f"Done - {summary}")
             quick_target_coordinate = payload.get("quick_target_coordinate")

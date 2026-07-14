@@ -63,6 +63,13 @@ so the sweep is roughly `n_coordinates / n_channels` times shorter (≈20× on a
 typical map) while producing a `CalibrationResult` the encoder reads unchanged.
 Stride is ignored in this mode.
 
+**Step 3c — channel grid + DAQ**: the same DAQ sweep, but the scan coordinates
+come from Step 3b's channel structuring: mirror-symmetric channel pairs are
+tiled around a configurable **target center** wavelength (default 778 nm), and
+any channel whose window overlaps a **guard band** (default 780 / 776 ± 0.06 nm)
+is skipped, with the next pitch outward tried instead. Guard bands must be
+symmetric about the target so the x/w pairs keep equal wavelength offsets.
+
 At encode time the transfer curve is **inverted**: `EncodingChannel.level_for(val)`
 maps a target normalized value $val \in [0, 1]$ to the swept grayscale level
 whose measured output is closest, taken over the off→on rising segment (made
