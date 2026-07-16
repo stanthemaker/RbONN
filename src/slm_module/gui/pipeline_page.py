@@ -54,7 +54,6 @@ from .style import DARK_STYLESHEET
 _INPUT_LABELS = {
     "wl_map": "Step 1+2 wavelength map",
     "intensity_calib": "Step 3 intensity calibration",
-    "center_fit": "TPA centre fit (optional)",
     "pair_etas": "Step 6 pair etas",
 }
 _SENSITIVITIES = ("NORM", "MID", "HIGH1", "HIGH2", "HIGH3")
@@ -296,7 +295,10 @@ class PipelinePage(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ UI
     def _build_layout_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Channel layout (shared by all stages)")
+        group = QtWidgets.QGroupBox(
+            "Channel grid design (steps 3 / centre scan; downstream stages "
+            "load the measured grid verbatim)"
+        )
         grid = QtWidgets.QGridLayout(group)
 
         def spin(value: int, lo: int, hi: int) -> QtWidgets.QSpinBox:
@@ -321,15 +323,6 @@ class PipelinePage(QtWidgets.QWidget):
         self.lay_center_wl.setRange(700.0, 900.0)
         self.lay_center_wl.setDecimals(4)
         self.lay_center_wl.setValue(778.0)
-        self.lay_use_center_fit = QtWidgets.QCheckBox(
-            "Use TPA-centre fit downstream"
-        )
-        self.lay_use_center_fit.setChecked(True)
-        self.lay_use_center_fit.setToolTip(
-            "When a valid TPA centre fit is available (from this run or a "
-            "file), pair_eta and comb_phase rebuild their layout at the "
-            "fitted centre wavelength."
-        )
         self.lay_guard_check = QtWidgets.QCheckBox("Rb guard bands (nm)")
         self.lay_guard_check.setChecked(True)
         self.lay_guard_centers = QtWidgets.QLineEdit("780.0, 776.0")
@@ -348,7 +341,6 @@ class PipelinePage(QtWidgets.QWidget):
         grid.addWidget(self.lay_center_gap, 1, 1)
         grid.addWidget(QtWidgets.QLabel("Centre λ (nm)"), 1, 2)
         grid.addWidget(self.lay_center_wl, 1, 3)
-        grid.addWidget(self.lay_use_center_fit, 1, 4, 1, 2)
         grid.addWidget(self.lay_guard_check, 2, 0)
         grid.addWidget(self.lay_guard_centers, 2, 1, 1, 3)
         grid.addWidget(QtWidgets.QLabel("± half (nm)"), 2, 4)
@@ -391,6 +383,14 @@ class PipelinePage(QtWidgets.QWidget):
             "positions with the wide span (anchors), then re-center this narrow "
             "span on the predicted wavelength at every other position (fast)"
         )
+        self.wl_min_peak = QtWidgets.QDoubleSpinBox()
+        self.wl_min_peak.setRange(0.0, 2000.0)
+        self.wl_min_peak.setDecimals(2)
+        self.wl_min_peak.setValue(775.0)
+        self.wl_min_peak.setToolTip(
+            "Ignore peak-search samples below this wavelength (0 = off); "
+            "masks artifacts below the source band"
+        )
         self.wl_max_peak = QtWidgets.QDoubleSpinBox()
         self.wl_max_peak.setRange(0.0, 2000.0)
         self.wl_max_peak.setDecimals(2)
@@ -410,6 +410,8 @@ class PipelinePage(QtWidgets.QWidget):
         grid.addWidget(self.wl_region_end, 2, 3)
         grid.addWidget(QtWidgets.QLabel("Sweep span (nm)"), 2, 4)
         grid.addWidget(self.wl_sweep_span, 2, 5)
+        grid.addWidget(QtWidgets.QLabel("Exclude peak λ < (nm)"), 3, 2)
+        grid.addWidget(self.wl_min_peak, 3, 3)
         grid.addWidget(QtWidgets.QLabel("Exclude peak λ > (nm)"), 3, 4)
         grid.addWidget(self.wl_max_peak, 3, 5)
         self.wl_osa = _OsaSettingsGroup()
@@ -691,6 +693,7 @@ class PipelinePage(QtWidgets.QWidget):
                 window_size=self.wl_window.value(),
                 coordinate_stride=self.wl_stride.value(),
                 sweep_span_nm=self.wl_sweep_span.value() or None,
+                min_peak_wavelength_nm=self.wl_min_peak.value() or None,
                 max_peak_wavelength_nm=self.wl_max_peak.value() or None,
                 peak_half_window_nm=(
                     self.wl_peak_nm.value()
@@ -795,7 +798,6 @@ class PipelinePage(QtWidgets.QWidget):
             stages=stages,
             layout=self._layout_config(),
             col_ratio=self.host._active_col_ratio(),
-            use_center_fit=self.lay_use_center_fit.isChecked(),
         )
 
     # ------------------------------------------------------------------- run
@@ -1025,13 +1027,14 @@ class PipelinePage(QtWidgets.QWidget):
         "ph_ref", "ph_points",
     )
     _PERSIST_DSPINS = (
-        "lay_center_wl", "lay_guard_half", "wl_sweep_span", "wl_max_peak",
+        "lay_center_wl", "lay_guard_half", "wl_sweep_span", "wl_min_peak",
+        "wl_max_peak",
         "ctr_halfspan", "ctr_drive",
         "eta_min", "eta_max", "ph_start", "ph_stop", "ph_ref_phase", "ph_bound",
         "wl_peak_nm",
     )
     _PERSIST_CHECKS = (
-        "lay_center_gap_check", "lay_use_center_fit", "lay_guard_check",
+        "lay_center_gap_check", "lay_guard_check",
         "wl_peak_check", "wl_region_check", "int_refine_center",
         "int_refine_wl", "ctr_bg", "eta_reduced", "ph_unconstrained",
         "ph_single_beam", "ph_dark",

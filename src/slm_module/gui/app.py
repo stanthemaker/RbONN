@@ -72,6 +72,7 @@ from ..encoding import (
     ChannelLayout,
     build_channel_layout,
     build_single_anchor_layout,
+    channel_layout_from_calibration,
     compute_channel_geometry,
     encode_to_pattern,
     interpolate_coordinate_for_wavelength,
@@ -1040,7 +1041,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.fast_channel_guard_check = QtWidgets.QCheckBox("Min-level guard bands")
         self.fast_channel_guard_check.setChecked(True)
-        self.fast_channel_guard_wl_edit = QtWidgets.QLineEdit("780, 776")
+        self.fast_channel_guard_wl_edit = QtWidgets.QLineEdit("780.14, 775.94")
         self.fast_channel_guard_wl_edit.setToolTip(
             "Comma/space separated guard center wavelengths in nm."
         )
@@ -1073,7 +1074,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         scan = self._panel("OSA and level sweep")
         scan_grid = QtWidgets.QGridLayout(scan)
-        self.fast_channel_center_edit = QtWidgets.QLineEdit("778nm")
+        self.fast_channel_center_edit = QtWidgets.QLineEdit("778.04nm")
         self.fast_channel_span_edit = QtWidgets.QLineEdit("8nm")
         self.fast_channel_sensitivity_combo = QtWidgets.QComboBox()
         self.fast_channel_sensitivity_combo.addItems(
@@ -1111,21 +1112,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         out = self._panel("Output")
         out_grid = QtWidgets.QGridLayout(out)
-        self.fast_channel_json_edit = QtWidgets.QLineEdit("calib_fast_channels.json")
+        self.fast_channel_json_edit = QtWidgets.QLineEdit()
+        self.fast_channel_json_edit.setPlaceholderText(
+            "blank = src/calib_data/calib_step3b_MMDD_HHMM.json"
+        )
         self.fast_channel_json_button = QtWidgets.QPushButton("Browse")
         self.fast_channel_json_button.clicked.connect(
             lambda: self._browse_save_into(
                 self.fast_channel_json_edit,
-                "calib_fast_channels.json",
+                str(self._default_calib_dir() / self._default_calib_name("3b")),
                 "JSON Files (*.json)",
             )
         )
-        self.fast_channel_csv_edit = QtWidgets.QLineEdit("calibration_fast_channels.csv")
+        self.fast_channel_csv_edit = QtWidgets.QLineEdit()
+        self.fast_channel_csv_edit.setPlaceholderText(
+            "blank = src/calib_data/calib_step3b_MMDD_HHMM.csv"
+        )
         self.fast_channel_csv_button = QtWidgets.QPushButton("Browse")
         self.fast_channel_csv_button.clicked.connect(
             lambda: self._browse_save_into(
                 self.fast_channel_csv_edit,
-                "calibration_fast_channels.csv",
+                str(self._default_calib_dir() / self._default_calib_name("3b", ".csv")),
                 "CSV Files (*.csv)",
             )
         )
@@ -1345,16 +1352,33 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         return f"calib_step{step}_{time.strftime('%m%d_%H%M')}{suffix}"
 
-    def _output_row(self, step: int | str, key: str, label: str, default_name: str, is_csv: bool) -> QtWidgets.QWidget:
-        """An output path edit + Browse, stored under self.step_widgets[step][key]."""
+    def _default_calib_dir(self) -> Path:
+        """src/calib_data — where blank output fields put their results."""
+        return Path(__file__).resolve().parents[2] / "calib_data"
+
+    def _output_row(self, step: int | str, key: str, label: str, is_csv: bool) -> QtWidgets.QWidget:
+        """An output path edit + Browse, stored under self.step_widgets[step][key].
+
+        A blank edit saves to src/calib_data/calib_step{step}_MMDD_HHMM (see
+        _resolve_output_path); Browse pre-fills that same default.
+        """
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
+        suffix = ".csv" if is_csv else ".json"
         edit = QtWidgets.QLineEdit()
-        edit.setPlaceholderText(f"{label} (blank = temp file)")
+        edit.setPlaceholderText(
+            f"{label} (blank = src/calib_data/calib_step{step}_MMDD_HHMM{suffix})"
+        )
         button = QtWidgets.QPushButton("Browse")
         filt = "CSV Files (*.csv)" if is_csv else "JSON Files (*.json)"
-        button.clicked.connect(lambda: self._browse_save_into(edit, default_name, filt))
+        button.clicked.connect(
+            lambda: self._browse_save_into(
+                edit,
+                str(self._default_calib_dir() / self._default_calib_name(step, suffix)),
+                filt,
+            )
+        )
         self.step_widgets[step][key] = edit
         layout.addWidget(QtWidgets.QLabel(label))
         layout.addWidget(edit, 1)
@@ -1442,7 +1466,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self._build_measurement_group(1, {}))
         layout.addWidget(self._level_sweep_row(1, stop=1023, stepv=64))
-        layout.addWidget(self._output_row(1, "out", "Output JSON", self._default_calib_name(1), False))
+        layout.addWidget(self._output_row(1, "out", "Output JSON", False))
         layout.addWidget(self._run_row(1, "Run Step 1", self._run_step1))
         layout.addStretch(1)
         return page
@@ -1472,6 +1496,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "re-center this narrow span on the predicted wavelength at every "
             "other position — much faster."
         )
+        widgets["min_wl"] = self._double_spin(0.0, 2000.0, 775.0, " nm", 2)
+        widgets["min_wl"].setToolTip(
+            "Ignore peak-search samples below this wavelength (0 = off). Use "
+            "to mask artifacts below the source band."
+        )
         widgets["max_wl"] = self._double_spin(0.0, 2000.0, 0.0, " nm", 2)
         widgets["max_wl"].setToolTip(
             "Ignore peak-search samples above this wavelength (0 = off). Use "
@@ -1486,6 +1515,8 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg.addWidget(widgets["stride"])
         cfg.addWidget(QtWidgets.QLabel("Sweep span"))
         cfg.addWidget(widgets["sweep_nm"])
+        cfg.addWidget(QtWidgets.QLabel("Exclude peak λ <"))
+        cfg.addWidget(widgets["min_wl"])
         cfg.addWidget(QtWidgets.QLabel("Exclude peak λ >"))
         cfg.addWidget(widgets["max_wl"])
         cfg.addStretch(1)
@@ -1511,7 +1542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets["manual_row"] = self._min_max_row(2, "Manual levels")
         layout.addWidget(widgets["manual_row"])
 
-        layout.addWidget(self._output_row(2, "out", "Output JSON", self._default_calib_name(2), False))
+        layout.addWidget(self._output_row(2, "out", "Output JSON", False))
         layout.addWidget(self._run_row(2, "Run Step 2", self._run_step2))
         layout.addStretch(1)
         self._toggle_step2_source()
@@ -1611,8 +1642,8 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets["manual_row"] = self._min_max_row(3, "min/max for CSV source")
         layout.addWidget(widgets["manual_row"])
 
-        layout.addWidget(self._output_row(3, "out", "Output JSON", self._default_calib_name(3), False))
-        layout.addWidget(self._output_row(3, "out_csv", "Output CSV", "calibration.csv", True))
+        layout.addWidget(self._output_row(3, "out", "Output JSON", False))
+        layout.addWidget(self._output_row(3, "out_csv", "Output CSV", True))
         layout.addWidget(self._run_row(3, "Run Step 3", self._run_step3))
         layout.addStretch(1)
         self._toggle_step3_source()
@@ -1687,13 +1718,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grid_panel = self._panel("Channel grid")
         grid = QtWidgets.QGridLayout(grid_panel)
-        widgets["target"] = self._double_spin(700.0, 900.0, 778.0, " nm", 3)
+        widgets["target"] = self._double_spin(700.0, 900.0, 778.04, " nm", 3)
         widgets["window"] = self._spin(1, 256, 15)
         widgets["pad"] = self._spin(0, 256, 5)
         widgets["count"] = self._spin(1, 200, 20)
         widgets["guard_check"] = QtWidgets.QCheckBox("Min-level guard bands")
         widgets["guard_check"].setChecked(True)
-        widgets["guard_wl"] = QtWidgets.QLineEdit("780, 776")
+        widgets["guard_wl"] = QtWidgets.QLineEdit("780.14, 775.94")
         widgets["guard_wl"].setToolTip(
             "Comma/space separated guard center wavelengths in nm."
         )
@@ -1717,8 +1748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(widgets["guard_nm"], 2, 5)
         layout.addWidget(grid_panel)
 
-        layout.addWidget(self._level_sweep_row("3c", stop=1023, stepv=32))
-        layout.addWidget(self._region_row("3c"))
+        layout.addWidget(self._level_sweep_row("3c", stop=1023, stepv=10))
 
         # wavelength source (same choices as Step 3)
         src_row = QtWidgets.QHBoxLayout()
@@ -1737,12 +1767,8 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets["manual_row"] = self._min_max_row("3c", "min/max for CSV source")
         layout.addWidget(widgets["manual_row"])
 
-        layout.addWidget(
-            self._output_row("3c", "out", "Output JSON", self._default_calib_name("3c"), False)
-        )
-        layout.addWidget(
-            self._output_row("3c", "out_csv", "Output CSV", "calibration_step3c.csv", True)
-        )
+        layout.addWidget(self._output_row("3c", "out", "Output JSON", False))
+        layout.addWidget(self._output_row("3c", "out_csv", "Output CSV", True))
 
         run_row = self._run_row("3c", "Run Step 3c", self._run_step3c)
         widgets["stop"] = QtWidgets.QPushButton("Stop")
@@ -2241,20 +2267,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg_panel = self._panel("Channel Layout")
         cfg_grid = QtWidgets.QGridLayout(cfg_panel)
 
-        self.enc_center_wl_spin = self._double_spin(700.0, 900.0, 778.0, " nm", 2)
-        self.enc_width_spin = self._spin(1, 256, 15)
-        self.enc_pad_spin   = self._spin(0, 64, 5)
-        self.enc_center_gap_check = QtWidgets.QCheckBox("Centre gap")
-        self.enc_center_gap_check.setToolTip(
-            "Widen the dark pad between the innermost x/w pair (crosstalk "
-            "reduction); unchecked keeps the legacy pad = padding px"
-        )
-        self.enc_center_gap_spin = self._spin(0, 200, 10)
-        self.enc_center_gap_spin.setEnabled(False)
-        self.enc_center_gap_check.toggled.connect(
-            self.enc_center_gap_spin.setEnabled
-        )
-
         self.enc_calib_label = QtWidgets.QLabel("Calibration: (none loaded)")
         self.enc_calib_label.setObjectName("PageSubtitle")
         enc_reload = QtWidgets.QPushButton("Load other…")
@@ -2262,32 +2274,23 @@ class MainWindow(QtWidgets.QMainWindow):
         enc_reload.setToolTip("Override the local calibration with another result file")
         enc_reload.clicked.connect(self._enc_browse_calib)
 
-        self.enc_build_button = QtWidgets.QPushButton("Build Layout")
+        self.enc_build_button = QtWidgets.QPushButton("Reload Layout")
+        self.enc_build_button.setToolTip(
+            "Re-read the channel structure from the calibration file; centres, "
+            "pitch and guard skips come verbatim from the Step 3b/3c grid"
+        )
         self.enc_build_button.clicked.connect(self._enc_build_layout)
 
-        self.enc_layout_status = QtWidgets.QLabel("Configure parameters and click Build Layout")
+        self.enc_layout_status = QtWidgets.QLabel(
+            "The channel structure is loaded from the Step 3b/3c calibration."
+        )
         self.enc_layout_status.setWordWrap(True)
 
-        self.enc_width_spin.valueChanged.connect(self._enc_update_channel_count)
-        self.enc_pad_spin.valueChanged.connect(self._enc_update_channel_count)
-        self.enc_center_wl_spin.valueChanged.connect(self._enc_update_channel_count)
-
-        cfg_grid.addWidget(QtWidgets.QLabel("Centre λ"),      0, 0)
-        cfg_grid.addWidget(self.enc_center_wl_spin,           0, 1)
-        cfg_grid.addWidget(QtWidgets.QLabel("Channel width"),  0, 2)
-        cfg_grid.addWidget(self.enc_width_spin,               0, 3)
-        cfg_grid.addWidget(QtWidgets.QLabel("px   Padding"),  0, 4)
-        cfg_grid.addWidget(self.enc_pad_spin,                 0, 5)
-        cfg_grid.addWidget(QtWidgets.QLabel("px"),            0, 6)
-        cfg_grid.addWidget(self.enc_center_gap_check,         0, 7)
-        cfg_grid.addWidget(self.enc_center_gap_spin,          0, 8)
-        cfg_grid.addWidget(QtWidgets.QLabel("px"),            0, 9)
-        # calibration source + the shortened channel/pitch/pad summary share one
-        # row (right after the loaded-json label) so the panel needs no third row
-        cfg_grid.addWidget(self.enc_calib_label,             1, 0, 1, 3)
-        cfg_grid.addWidget(self.enc_layout_status,            1, 3, 1, 2)
-        cfg_grid.addWidget(enc_reload,                        1, 5)
-        cfg_grid.addWidget(self.enc_build_button,             1, 6)
+        cfg_grid.addWidget(self.enc_calib_label,   0, 0)
+        cfg_grid.addWidget(self.enc_layout_status, 0, 1)
+        cfg_grid.addWidget(enc_reload,             0, 2)
+        cfg_grid.addWidget(self.enc_build_button,  0, 3)
+        cfg_grid.setColumnStretch(1, 1)
 
         # --- Channel values table ---
         # Columns: # | x λ (nm) | x value [0-1] | w λ (nm) | w value [0-1]
@@ -2441,12 +2444,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _enc_local_calib_path(self) -> Path | None:
         """Locate the newest usable project-local calibration result.
 
-        Scans the working dir and project root for calib_step*.json files and
-        returns the most recently modified one that loads as a valid intensity
-        (step-3) result. Files without intensity_levels (step-1/step-2 outputs)
-        are skipped so the encoder never auto-loads an unusable calibration.
+        Scans the working dir, project root, and src/calib_data (the default
+        output dir) for calib_step*.json files and returns the most recently
+        modified one that loads as a valid intensity (step-3) result. Files
+        without intensity_levels (step-1/step-2 outputs) are skipped so the
+        encoder never auto-loads an unusable calibration.
         """
-        search_dirs = [Path.cwd(), Path(__file__).resolve().parents[3]]
+        search_dirs = [
+            Path.cwd(),
+            Path(__file__).resolve().parents[3],
+            self._default_calib_dir(),
+        ]
         matches: dict[Path, float] = {}
         for directory in search_dirs:
             try:
@@ -2482,23 +2490,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 return None
         return None
 
-    def _enc_update_channel_count(self) -> None:
-        pitch = self.enc_width_spin.value() + self.enc_pad_spin.value()
-        calib = self._enc_get_calib()
-        if calib is None or calib.intensity_levels is None:
-            self.enc_layout_status.setText(
-                f"Pitch = {pitch} px  —  no calibration available"
-            )
-            return
-        coords = np.asarray(calib.coordinates, dtype=float)
-        wls    = np.asarray(calib.wavelength,  dtype=float)
-        a, b   = np.polyfit(coords, wls, 1)
-        cx     = (self.enc_center_wl_spin.value() - b) / a
-        max_ch = int(min(cx - coords.min(), coords.max() - cx) / pitch)
-        self.enc_layout_status.setText(
-            f"pitch {pitch} px  |  max {max_ch} ch/side"
-        )
-
     def _enc_browse_calib(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open Calibration Result", "", "JSON Files (*.json)"
@@ -2514,53 +2505,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._enc_log(f"Loaded calibration override: {path}")
         self._enc_build_layout()
 
-    def _enc_center_gap(self) -> int | None:
-        """The optional widened centre dark pad (None = legacy gap_px pad)."""
-        if getattr(self, "enc_center_gap_check", None) is None:
-            return None
-        if not self.enc_center_gap_check.isChecked():
-            return None
-        return int(self.enc_center_gap_spin.value())
-
     def _enc_build_layout(self) -> None:
+        """Load the channel structure verbatim from the Step 3b/3c calibration.
+
+        The scanned grid already encodes every layout decision (target centre,
+        pitch, guard skips), so the encoder takes the calibration rows as the
+        channels directly instead of re-tiling its own geometry. Only the
+        window/gap split is not recorded in the file; the width is assumed
+        ``pitch - 5`` (the Step-3c default gap).
+        """
         calib = self._enc_get_calib()
         if calib is None or calib.intensity_levels is None:
             self.enc_layout_status.setText(
-                "No calibration available. Run Step 3 or load a result file."
-            )
-            return
-
-        # compute max channels from calibrated range
-        coords = np.asarray(calib.coordinates, dtype=float)
-        wls    = np.asarray(calib.wavelength,  dtype=float)
-        a, b   = np.polyfit(coords, wls, 1)
-        cx     = (self.enc_center_wl_spin.value() - b) / a
-        pitch  = self.enc_width_spin.value() + self.enc_pad_spin.value()
-        n_ch   = int(min(cx - coords.min(), coords.max() - cx) / pitch)
-        if n_ch < 1:
-            self.enc_layout_status.setText(
-                "Pitch too large — no channels fit on both sides of the centre wavelength."
+                "No calibration available. Run Step 3c or load a result file."
             )
             return
 
         try:
-            layout = build_channel_layout(
-                calib,
-                n_channels=n_ch,
-                channel_width_px=self.enc_width_spin.value(),
-                gap_px=self.enc_pad_spin.value(),
-                center_gap_px=self._enc_center_gap(),
-                center_wl=self.enc_center_wl_spin.value(),
-            )
+            layout = channel_layout_from_calibration(calib)
         except Exception as exc:
             self.enc_layout_status.setText(f"Layout error: {exc}")
-            return
-
-        placed = layout.n_channels
-        if placed < 1:
-            self.enc_layout_status.setText(
-                "No channels fit between the centre and the dark guard bands."
-            )
             self.enc_generate_button.setEnabled(False)
             return
 
@@ -2570,16 +2534,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.enc_use_optimized_lut.setEnabled(False)
         self._enc_populate_val_table(layout)
         self._edge_sync_layout(layout)
-        dropped = "" if placed == n_ch else f" ({n_ch - placed} dropped at guard bands)"
+        gap = layout.pitch_px - layout.channel_width_px
         self.enc_layout_status.setText(
-            f"{placed} ch/side{dropped}  |  pitch {layout.pitch_px} px  |  "
-            f"pad {layout.pitch_px - layout.channel_width_px} px"
+            f"{layout.n_channels} ch/side  |  centre {layout.center_wl:.4f} nm "
+            f"(px {layout.center_x:.1f})  |  pitch {layout.pitch_px} px  |  "
+            f"width {layout.channel_width_px} px (assumed gap {gap} px)"
         )
         self.enc_generate_button.setEnabled(True)
         self._enc_log(
-            f"Layout built: {placed} channels/side, width "
-            f"{layout.channel_width_px} px, padding {layout.pitch_px - layout.channel_width_px} px. "
-            "Edit values in the table, then Generate & Preview."
+            f"Layout loaded from calibration: {layout.n_channels} channels/side "
+            f"around {layout.center_wl:.4f} nm, pitch {layout.pitch_px} px, "
+            f"width {layout.channel_width_px} px. Edit values in the table, "
+            "then Generate & Preview."
         )
 
     def _enc_populate_val_table(self, layout: ChannelLayout) -> None:
@@ -3696,7 +3662,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.qt_calib_s2_edit, "Open Step 2 calibration", json_filt)))
         src_v.addWidget(self.qt_calib_s12_row)
 
-        # layout geometry, used only when building from files
+        # layout geometry, used only for the coarse Step 1+2 tiling (a Step 3
+        # file already carries the measured grid and is loaded verbatim)
         self.qt_calib_params = QtWidgets.QWidget()
         pv = QtWidgets.QHBoxLayout(self.qt_calib_params)
         pv.setContentsMargins(0, 0, 0, 0)
@@ -3884,9 +3851,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self.qt_calib_mode.currentIndex()
         self.qt_calib_s3_row.setVisible(mode == 1)
         self.qt_calib_s12_row.setVisible(mode == 2)
-        file_mode = mode in (1, 2)
-        self.qt_calib_params.setVisible(file_mode)
-        self.qt_calib_build_btn.setVisible(file_mode)
+        self.qt_calib_params.setVisible(mode == 2)
+        self.qt_calib_build_btn.setVisible(mode in (1, 2))
         if mode == 0:
             self.qt_calib_label.setText(
                 "Using the layout built on the TPA Encoding page."
@@ -3928,7 +3894,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self, calib: CalibrationResult, *,
         center_wl: float, channel_width_px: int, gap_px: int,
     ) -> ChannelLayout:
-        """Build a channel layout from a calibration, sizing n_channels to fit."""
+        """Tile a coarse layout from a synthetic Step 1+2 calibration.
+
+        Only for the quick-test mode with no Step 3 data: a Step-2 map has no
+        measured channel grid to load, so the geometry is tiled here. Any real
+        Step-3b/3c result is loaded verbatim via
+        :func:`channel_layout_from_calibration` instead.
+        """
         if calib is None or calib.intensity_levels is None:
             raise ValueError("calibration has no intensity data")
         coords = np.asarray(calib.coordinates, dtype=float)
@@ -3960,6 +3932,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     raise ValueError(
                         "that file has no intensity_levels — it is not a Step 3 result"
                     )
+                # the measured grid IS the layout: load it verbatim, no re-tiling
+                layout = channel_layout_from_calibration(calib)
             elif mode == 2:
                 p1 = self.qt_calib_s1_edit.text().strip()
                 p2 = self.qt_calib_s2_edit.text().strip()
@@ -3970,14 +3944,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 calib = self._synth_calib_from_min_max(
                     load_calibration_result(p1), load_calibration_result(p2)
                 )
+                layout = self._layout_from_calib(
+                    calib,
+                    center_wl=self.qt_calib_center.value(),
+                    channel_width_px=self.qt_calib_width.value(),
+                    gap_px=self.qt_calib_pad.value(),
+                )
             else:
                 return
-            layout = self._layout_from_calib(
-                calib,
-                center_wl=self.qt_calib_center.value(),
-                channel_width_px=self.qt_calib_width.value(),
-                gap_px=self.qt_calib_pad.value(),
-            )
         except Exception as exc:
             self.qt_layout = None
             self.qt_calib_label.setText(f"Layout error: {exc}")
@@ -5924,13 +5898,15 @@ class MainWindow(QtWidgets.QMainWindow):
         fit = None if result is None else result.fit
         if fit is None or not fit.valid:
             return
-        self.enc_center_wl_spin.setValue(fit.center_wl_nm)
-        self._enc_build_layout()
         self.tpa_center_status.setText(
-            f"Applied {fit.center_wl_nm:.4f} nm to the TPA Encoding layout."
+            f"Fitted centre {fit.center_wl_nm:.4f} nm — the encoding layout is "
+            "read verbatim from the Step 3c calibration, so re-run Step 3c "
+            "with this target centre to shift the channels."
         )
         self._enc_log(
-            f"TPA centre scan applied fitted centre {fit.center_wl_nm:.4f} nm."
+            f"TPA centre scan fitted {fit.center_wl_nm:.4f} nm. The encoding "
+            "layout comes from the Step 3c calibration; re-run Step 3c with "
+            "this target centre to re-centre the channels."
         )
 
     # ===================== Scope (RTO6) page =========================
@@ -7355,16 +7331,14 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError("region end must be >= region start")
         return (start, end)
 
-    def _resolve_output_path(self, text: str, default_name: str) -> Path:
+    def _resolve_output_path(self, text: str, step: int | str, suffix: str = ".json") -> Path:
+        """An explicit path is used as-is; blank saves to the default calib dir."""
         text = text.strip()
         if text:
             return Path(text)
-        suffix = Path(default_name).suffix or ".json"
-        handle = tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, prefix="santec_calib_", delete=False
-        )
-        handle.close()
-        return Path(handle.name)
+        out_dir = self._default_calib_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir / self._default_calib_name(step, suffix)
 
     def _resolve_step_input(self, step: int | str) -> CalibrationResult:
         widgets = self.step_widgets[step]
@@ -7505,9 +7479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             levels = self._step_levels(1)
         except ValueError as exc:
             return self._reject_calibration(exc)
-        out_path = self._resolve_output_path(
-            self.step_widgets[1]["out"].text(), "calib_step1.json"
-        )
+        out_path = self._resolve_output_path(self.step_widgets[1]["out"].text(), 1)
         controller = self._controller()
         self._log(f"Step 1 started: {len(levels)} levels")
 
@@ -7542,13 +7514,12 @@ class MainWindow(QtWidgets.QMainWindow):
             peak_nm = self.step_widgets[2]["peak_nm"].value() or None
             stride = self.step_widgets[2]["stride"].value()
             sweep_nm = self.step_widgets[2]["sweep_nm"].value() or None
+            min_wl = self.step_widgets[2]["min_wl"].value() or None
             max_wl = self.step_widgets[2]["max_wl"].value() or None
             region = self._step_region(2)
         except ValueError as exc:
             return self._reject_calibration(exc)
-        out_path = self._resolve_output_path(
-            self.step_widgets[2]["out"].text(), "calib_step2.json"
-        )
+        out_path = self._resolve_output_path(self.step_widgets[2]["out"].text(), 2)
         controller = self._controller()
         self._log(f"Step 2 started: window {window} px")
 
@@ -7557,7 +7528,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 osa, controller, [], settings, seed,
                 window_size=window, peak_half_window_nm=peak_nm, region=region,
                 coordinate_stride=stride,
-                sweep_span_nm=sweep_nm, max_peak_wavelength_nm=max_wl,
+                sweep_span_nm=sweep_nm, min_peak_wavelength_nm=min_wl,
+                max_peak_wavelength_nm=max_wl,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_path)
@@ -7589,11 +7561,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 stride = 1
         except ValueError as exc:
             return self._reject_calibration(exc)
-        out_json = self._resolve_output_path(
-            self.step_widgets[3]["out"].text(), "calib_step3.json"
-        )
+        out_json = self._resolve_output_path(self.step_widgets[3]["out"].text(), 3)
         out_csv = self._resolve_output_path(
-            self.step_widgets[3]["out_csv"].text(), "calibration.csv"
+            self.step_widgets[3]["out_csv"].text(), 3, ".csv"
         )
         controller = self._controller()
         daq.configure_monitor(daq_settings)
@@ -7642,16 +7612,11 @@ class MainWindow(QtWidgets.QMainWindow):
             pad = widgets["pad"].value()
             n_channels = widgets["count"].value()
             guard_bands = self._step3c_guard_bands()
-            region = self._step_region("3c")
             daq_settings = self._step3_daq_settings("3c")
         except ValueError as exc:
             return self._reject_calibration(exc)
-        out_json = self._resolve_output_path(
-            widgets["out"].text(), "calib_step3c.json"
-        )
-        out_csv = self._resolve_output_path(
-            widgets["out_csv"].text(), "calibration_step3c.csv"
-        )
+        out_json = self._resolve_output_path(widgets["out"].text(), "3c")
+        out_csv = self._resolve_output_path(widgets["out_csv"].text(), "3c", ".csv")
         controller = self._controller()
         daq.configure_monitor(daq_settings)
         read_timeout = max(30.0, daq_settings.duration * 3.0 + 10.0)
@@ -7694,8 +7659,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             result = intensity_calibration_daq(
                 daq, controller, levels, grid_seed,
-                window_size=window, region=region,
-                read_timeout=read_timeout,
+                window_size=window, read_timeout=read_timeout,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(result, out_json)
@@ -7736,11 +7700,9 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return self._reject_calibration(exc)
 
-        out_json = self._resolve_output_path(
-            self.fast_channel_json_edit.text(), "calib_fast_channels.json"
-        )
+        out_json = self._resolve_output_path(self.fast_channel_json_edit.text(), "3b")
         out_csv = self._resolve_output_path(
-            self.fast_channel_csv_edit.text(), "calibration_fast_channels.csv"
+            self.fast_channel_csv_edit.text(), "3b", ".csv"
         )
         controller = self._controller()
         pitch_px = channel_width + gap_px
@@ -8102,6 +8064,7 @@ class MainWindow(QtWidgets.QMainWindow):
             peak_nm = self.step_widgets[2]["peak_nm"].value() or None
             stride2 = self.step_widgets[2]["stride"].value()
             sweep_nm2 = self.step_widgets[2]["sweep_nm"].value() or None
+            min_wl2 = self.step_widgets[2]["min_wl"].value() or None
             max_wl2 = self.step_widgets[2]["max_wl"].value() or None
             region2 = self._step_region(2)
             s3 = self._step_settings(3)
@@ -8114,11 +8077,11 @@ class MainWindow(QtWidgets.QMainWindow):
             region3 = self._step_region(3)
         except ValueError as exc:
             return self._reject_calibration(exc)
-        out1 = self._resolve_output_path(self.step_widgets[1]["out"].text(), "calib_step1.json")
-        out2 = self._resolve_output_path(self.step_widgets[2]["out"].text(), "calib_step2.json")
-        out3 = self._resolve_output_path(self.step_widgets[3]["out"].text(), "calib_step3.json")
+        out1 = self._resolve_output_path(self.step_widgets[1]["out"].text(), 1)
+        out2 = self._resolve_output_path(self.step_widgets[2]["out"].text(), 2)
+        out3 = self._resolve_output_path(self.step_widgets[3]["out"].text(), 3)
         out_csv = self._resolve_output_path(
-            self.step_widgets[3]["out_csv"].text(), "calibration.csv"
+            self.step_widgets[3]["out_csv"].text(), 3, ".csv"
         )
         controller = self._controller()
         self._log("Run all started (steps 1 -> 2 -> 3)")
@@ -8138,7 +8101,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 osa, controller, [], s2, seed,
                 window_size=window2, peak_half_window_nm=peak_nm, region=region2,
                 coordinate_stride=stride2,
-                sweep_span_nm=sweep_nm2, max_peak_wavelength_nm=max_wl2,
+                sweep_span_nm=sweep_nm2, min_peak_wavelength_nm=min_wl2,
+                max_peak_wavelength_nm=max_wl2,
                 stop_event=stop_event, progress_callback=report,
             )
             save_calibration_result(wl_result, out2)

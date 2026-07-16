@@ -174,8 +174,9 @@ def measure_phase_sweep(
     ``frac``/``single_beam_bg`` are forwarded to :func:`.tpa_phase.fit_result`:
     ``frac=None`` (default) keeps the unconstrained closed-form fit; a number
     locks ``a:b`` to the step-6 ``eta_ref:eta_tgt`` ratio and floats a shared
-    scale boxed to ``+/- frac``.  ``single_beam_bg`` additionally folds in both
-    pairs' step-6 single-beam response as a fixed background.
+    scale boxed to ``+/- frac`` (``frac=0`` pins ``a``/``b`` to the step-6 etas
+    exactly).  ``single_beam_bg`` additionally folds in both pairs' step-6
+    single-beam response as a fixed background.
     """
     n = layout.n_channels
     for name, idx in (("tgt_index", tgt_index), ("ref_index", ref_index)):

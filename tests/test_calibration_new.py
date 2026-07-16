@@ -799,6 +799,56 @@ class CalibrationNewTests(unittest.TestCase):
         )
         np.testing.assert_allclose(result.wavelength, 771.0, atol=1e-6)
 
+    def test_wavelength_calibration_min_peak_excludes_artifact(self) -> None:
+        wavelengths = np.asarray([769.0, 770.0, 771.0, 772.0, 773.0])
+        # real peak at 772 nm; a stronger fixed artifact sits at 769 nm
+        peak = [5.0, 0.1, 0.5, 1.0, 0.5]
+        traces = [
+            make_trace(wavelengths, [0, 0, 0, 0, 0]),
+            make_trace(wavelengths, [1, 1, 1, 1, 1]),
+        ] + [make_trace(wavelengths, peak) for _ in range(4)]
+        seed = CalibrationResult(
+            wavelength=np.asarray([]),
+            coordinates=np.asarray([]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([], dtype=int),
+        )
+
+        # control: without the floor the artifact wins the peak search
+        result = wavelength_calibration(
+            FakeOSA([make_trace(wavelengths, t.powers.tolist()) for t in traces]),
+            FakeSLM(size=(5, 2)),
+            [], MeasurementSettings(), seed,
+            window_size=2, peak_half_window_nm=1.0,
+        )
+        self.assertLess(float(result.wavelength[0]), 769.5)
+
+        result = wavelength_calibration(
+            FakeOSA(traces),
+            FakeSLM(size=(5, 2)),
+            [], MeasurementSettings(), seed,
+            window_size=2, peak_half_window_nm=1.0,
+            min_peak_wavelength_nm=769.5,
+        )
+        np.testing.assert_allclose(result.wavelength, 772.0, atol=1e-6)
+
+    def test_wavelength_calibration_rejects_inverted_peak_bounds(self) -> None:
+        seed = CalibrationResult(
+            wavelength=np.asarray([]),
+            coordinates=np.asarray([]),
+            max_level=100,
+            min_level=0,
+            level_range=np.asarray([], dtype=int),
+        )
+        with self.assertRaises(ValueError):
+            wavelength_calibration(
+                FakeOSA([]), FakeSLM(size=(5, 2)),
+                [], MeasurementSettings(), seed,
+                window_size=2,
+                min_peak_wavelength_nm=780.0, max_peak_wavelength_nm=775.0,
+            )
+
     def test_wavelength_calibration_floors_weak_reference(self) -> None:
         wavelengths = np.asarray([769.0, 770.0, 771.0, 772.0, 773.0])
         # the bright reference carries no light at 773 nm; the signal noise

@@ -328,6 +328,7 @@ def wavelength_calibration(
     region: tuple[int, int] | None = None,
     coordinate_stride: int = 1,
     sweep_span_nm: float | None = None,
+    min_peak_wavelength_nm: float | None = None,
     max_peak_wavelength_nm: float | None = None,
     outlier_policy: OutlierRemeasurePolicy | None = None,
     stop_event: threading.Event | None = None,
@@ -360,10 +361,10 @@ def wavelength_calibration(
     and are interpolated onto each narrow grid. None (default) uses the wide
     span everywhere.
 
-    ``max_peak_wavelength_nm`` excludes trace samples above that wavelength
-    from the peak search, e.g. to mask a fixed leakage artifact the SLM never
-    modulates (light falling outside the active area). None (default) searches
-    the whole trace.
+    ``min_peak_wavelength_nm`` / ``max_peak_wavelength_nm`` exclude trace
+    samples below / above that wavelength from the peak search, e.g. to mask a
+    fixed leakage artifact the SLM never modulates (light falling outside the
+    active area). None (default) leaves that end of the trace unclipped.
 
     ``outlier_policy`` enables post-sweep auto-remeasurement: after the sweep, a
     linear coordinate->wavelength fit flags points whose residual exceeds
@@ -384,11 +385,20 @@ def wavelength_calibration(
         sweep_value = float(sweep_span_nm)
         if not sweep_value > 0:
             raise ValueError("sweep_span_nm must be positive when provided")
+    min_peak = None
+    if min_peak_wavelength_nm is not None:
+        min_peak = float(min_peak_wavelength_nm)
+        if not np.isfinite(min_peak):
+            raise ValueError("min_peak_wavelength_nm must be finite")
     max_peak = None
     if max_peak_wavelength_nm is not None:
         max_peak = float(max_peak_wavelength_nm)
         if not np.isfinite(max_peak):
             raise ValueError("max_peak_wavelength_nm must be finite")
+    if min_peak is not None and max_peak is not None and min_peak >= max_peak:
+        raise ValueError(
+            "min_peak_wavelength_nm must be below max_peak_wavelength_nm"
+        )
     min_level = _level_value(calibration_results.min_level, "min_level")
     max_level = _level_value(calibration_results.max_level, "max_level")
     region_lo, region_hi = _resolve_scan_region(region, slm_width, window_size)
@@ -438,6 +448,8 @@ def wavelength_calibration(
                 reference_power,
                 denominator_scale=denominator_scale,
             )
+        if min_peak is not None:
+            normalized[trace_wavelengths < min_peak] = 0.0
         if max_peak is not None:
             normalized[trace_wavelengths > max_peak] = 0.0
         wavelength, _, strength = local_peak_centroid(
@@ -472,7 +484,7 @@ def wavelength_calibration(
                 raise ValueError(
                     f"anchor window at x={a_start} shows no clear peak "
                     f"(normalized strength {anchor_strength:.3g}); check the "
-                    "scan region, OSA settings, and max_peak_wavelength_nm"
+                    "scan region, OSA settings, and min/max_peak_wavelength_nm"
                 )
             anchor_wavelengths[a_start] = anchor_wl
             _report(
@@ -829,9 +841,10 @@ def build_channel_calibration_grid(
 
     ``center_gap_px`` widens the central dark pad to at least that many pixels
     (first offset ``ceil((width + center_gap_px)/2)`` instead of half a pitch).
-    It MUST match the ``center_gap_px`` used by
-    :func:`slm_module.encoding.build_channel_layout`, otherwise the measured
-    coordinates will not coincide with the encoding layout's channel centers.
+    The measured coordinates ARE the encoding layout's channel centers: the
+    encoder loads the result verbatim via
+    :func:`slm_module.encoding.channel_layout_from_calibration`, so the grid
+    designed here is the single source of the channel geometry.
     ``None`` keeps the legacy half-pitch placement.
 
     When ``center_coordinate`` is supplied, the linear wavelength map is shifted

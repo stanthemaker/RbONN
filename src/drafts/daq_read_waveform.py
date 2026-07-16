@@ -47,21 +47,21 @@ DEVICE = "Dev1"
 CHANNEL = _DEFAULTS.channel
 
 F_CUT = _DEFAULTS.f_cut                  # detector 3 dB bandwidth (Hz)
-# F_CUT = 1
 FILTER_ORDER = _DEFAULTS.filter_order    # digital Butterworth low-pass order
 SAMPLE_RATE_HZ = _DEFAULTS.sample_rate
+# SAMPLE_RATE_HZ = 1_000
 # DURATION_S = _DEFAULTS.duration
-DURATION_S = 10
+DURATION_S = 5
 # Input range is quantized: the board only offers +/-0.1, 0.2, 0.5, 1, 2, 5, 10 V
 # and rounds any request UP to the next one -- +/-0.1 V is the most sensitive.
-MIN_VAL_V = _DEFAULTS.min_val
-MAX_VAL_V = _DEFAULTS.max_val
-# MAX_VAL_V = 1
-# MIN_VAL_V = -1
+# MIN_VAL_V = _DEFAULTS.min_val
+# MAX_VAL_V = _DEFAULTS.max_val
+MAX_VAL_V = 0.1
+MIN_VAL_V = -0.1
 # Our transimpedance amplifier outputs a NEGATIVE voltage for positive light, so
 # every read is inverted to recover a positive light signal (more light -> more
 # positive volts).
-INVERT = False
+INVERT = True
 # Leading guard discarded after filtering: the raw acquisition settles and the
 # zero-phase low-pass anchors its output to the first sample, so the first
 # ``SETTLE_CYCLES / f_cut`` seconds are a turn-on transient, not steady state.

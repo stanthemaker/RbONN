@@ -56,7 +56,7 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
 
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
-from slm_module.encoding import build_channel_layout  # noqa: E402
+from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 from slm_module.tpa_pair import (  # noqa: E402
     ChannelPairGrid,
     PairFit,
@@ -72,11 +72,11 @@ from slm_module.tpa_pair import (  # noqa: E402
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"  # data directory: inputs + outputs live here
 
-PAIR_INDICES = [1,3]                           # near (cols 660/680) + far (cols 600/740)
+PAIR_INDICES = [1,3,4,5]                           # near (cols 660/680) + far (cols 600/740)
 SWEEP_MIN = 0.1                                # min per-side intensity in the ramp (0..1)
 SWEEP_MAX = 1.0                                 # max per-side intensity in the ramp (0..1)
 N_SWEEP_POINTS = 10                              # points per 1-D curve (x-only / w-only / cross)
-IN_STEP3 = CALIB_PATH / "calib_step3_0712.json"    # Step 3 calib (near pair 0 + far pair 3)
+IN_STEP3 = CALIB_PATH / "calib_step3b_0714_1534.json"    # Step 3 calib (near pair 0 + far pair 3)
 
 SLM_DISPLAY_NO = None           # None -> auto-detect the LCOS-SLM display (like the GUI's Detect)
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch (USB link)
@@ -89,8 +89,8 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
-T_SINGLE_S = 4.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
-T_BOTH_S = 2.0                  # both beams on (the bright cross points) (s)
+T_SINGLE_S = 5.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
+T_BOTH_S = 3.0                  # both beams on (the bright cross points) (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 
@@ -217,14 +217,17 @@ def _load_layout():
     """Load the Step-3 calibration -> channel layout, validating PAIR_INDICES.
 
     Shared by the fit run and the meas-only run: both need the same layout and the
-    same in-range check on the configured pair indices.
+    same in-range check on the configured pair indices.  The Step-3b/3c rows ARE
+    the channels, so the layout is loaded verbatim (the same
+    ``channel_layout_from_calibration`` the GUI encoding page uses) -- no
+    re-tiling, so pair indices here mean the same thing as in the UI.
     """
     if not IN_STEP3.is_file():
         raise FileNotFoundError(
             f"Step-3 calibration not found: {IN_STEP3}\n"
             f"(CALIB_PATH is the calib_data directory; IN_STEP3 is the JSON in it.)"
         )
-    layout = build_channel_layout(load_calibration_result(IN_STEP3))
+    layout = channel_layout_from_calibration(load_calibration_result(IN_STEP3))
     for pi in PAIR_INDICES:
         if not (0 <= pi < layout.n_channels):
             raise ValueError(

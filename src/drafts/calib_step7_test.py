@@ -1,12 +1,26 @@
 """Manual smoke test: calibrate each pair's comb phase (dPhi_comb) vs a reference.
 
 Not a pytest test (no mocks, needs real hardware) -- run it directly.  Two
-invocations, no flags:
+invocations:
 
     python src/drafts/calib_step7_test.py            # COLLECT: sweep each target
                                                      #   pair, write a raw CSV
     python src/drafts/calib_step7_test.py some.csv   # REFIT:   fit dPhi_comb from an
                                                      #   existing CSV, offline (no hw)
+
+A REFIT also writes a combined ``calib_step7_result_*.json`` (the step-3 +
+step-6 payloads carried over from ``IN_STEP6`` plus the fitted ``{Phi_k}``
+spectrum) -- the single input downstream consumers read (e.g. the step-8
+random-input forward-model check, ``calib_step8_test.py``).
+
+On a REFIT, ``--bounded`` / ``--fix`` pick how the step-6 amplitudes enter the
+fit (give both flags to run both methods back to back and print a comparison
+table; no flag defaults to ``--bounded``, the previous behaviour):
+
+* ``--bounded`` -- ``a:b`` locked to the step-6 ``eta_ref:eta_tgt`` ratio, one
+  shared scale ``s`` floats, boxed to ``+/-BOUND_FRAC`` about 1.
+* ``--fix``     -- ``a`` and ``b`` PINNED to the step-6 etas exactly (``s = 1``
+  fixed); only ``dPhi_comb`` and the residual dark ``d`` float.
 
 Add ``--flip`` to either invocation when the photodiode/DAQ reads inverted (more
 light -> more negative volts): it negates the raw ``voltage_mean_v`` and its
@@ -41,10 +55,11 @@ The fit (in :mod:`slm_module.tpa_phase`).  Every point is reduced to
 
     Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb) + step-6 background + d
 
-with ``a`` := reference amplitude and ``b`` := target amplitude.  ``a`` and ``b``
-are pinned to the step-6 ``eta_ref:eta_tgt`` ratio (only a shared gain ``s`` floats,
-boxed to ``+/-BOUND_FRAC``), and each pair's step-6 single-beam response is folded
-in as a FIXED background so the fringe need not absorb the single-beam ramp.
+with ``a`` := reference amplitude and ``b`` := target amplitude, both taken from
+step 6 -- either ratio-locked with a boxed shared gain ``s`` (``--bounded``) or
+pinned outright at the etas (``--fix``, ``s = 1``).  Each pair's step-6
+single-beam response is folded in as a FIXED background either way, so the
+fringe need not absorb the single-beam ramp.
 
 Each point is one fixed-duration ``daq_module`` acquisition like step 6 (the
 same ``DAQController.monitor_cycle`` read the GUI pipeline uses): ``T_SINGLE_S``
@@ -78,13 +93,14 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
 
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
-from slm_module.encoding import build_channel_layout  # noqa: E402
+from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 from slm_module.tpa_phase import (  # noqa: E402
     PhaseFit,
     PhaseResult,
     load_pair_models,
     load_phase_csv,
     phi_half,
+    save_comb_phase_json,
 )
 
 # ---- Edit these to match your setup ----
@@ -96,7 +112,7 @@ TGT_INDICES = [3, 4, 5]                            # target pairs measured vs th
 # the raw Step-3 calibration under "step3" (-> channel layout) and every fitted
 # pair under "step6" (-> eta + single-beam background), so the reference + all
 # targets come from this single file -- no separate step-3 import.
-IN_STEP6 = CALIB_PATH / "calib_step6_result_0712_0019.json"  # pairs 1 (ref) + 3,4,5 (targets)
+IN_STEP6 = CALIB_PATH / "calib_step6_result_0715_1714.json"  # pairs 1 (ref) + 3,4,5 (targets)
 
 # ---- The target sweep ----
 # Reference fully on (x_r = w_r = 1); the target's two channels swept TOGETHER
@@ -124,11 +140,11 @@ T_BOTH_S = 3.0                   # sweep points: reference + target on (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 
-# Amplitude handling for the dPhi_comb fit.  None -> unconstrained closed-form
-# fit; a number LOCKS the ratio a:b (= eta_ref:eta_tgt) from step 6 and floats a
-# single shared scale s boxed to +/- this fraction about 1 (1.0 == s in [0, 2]),
-# so a and b cannot diverge -- only a common gain drift between step 6 and 7 is
-# allowed.  report()/make_plot() flag when s hits its box.
+# Amplitude handling for the --bounded dPhi_comb fit: LOCK the ratio a:b
+# (= eta_ref:eta_tgt) from step 6 and float a single shared scale s boxed to
+# +/- this fraction about 1 (1.0 == s in [0, 2]), so a and b cannot diverge --
+# only a common gain drift between step 6 and 7 is allowed.  report()/make_plot()
+# flag when s hits its box.  The --fix method ignores this (s pinned at 1).
 BOUND_FRAC = 1.0
 
 # Fold in the step-6 single-beam response as a FIXED background.  The reference is
@@ -155,7 +171,7 @@ def load_layout():
             f"{IN_STEP6} has no embedded 'step3' calibration; point IN_STEP6 at "
             f"a combined step-6 result (calib_step6_test.save_combined_json)"
         )
-    layout = build_channel_layout(calibration_result_from_dict(step3))
+    layout = channel_layout_from_calibration(calibration_result_from_dict(step3))
     for name, idx in [("REF_INDEX", REF_INDEX)] + [("TGT_INDICES", k) for k in TGT_INDICES]:
         if not (0 <= idx < layout.n_channels):
             raise ValueError(
@@ -189,17 +205,23 @@ def _sigma(value: float, err: float) -> float:
 
 def _bound_note(value: float, eta: float, frac: float, at_bound: bool) -> str:
     """Deviation from the step-6 eta plus an '[AT +/-100% BOUND]' warning tag."""
+    if frac == 0:
+        return "  (pinned to eta)"
     dev = (value / eta - 1.0) * 100.0 if eta else float("nan")
     tag = f"  [AT +/-{frac*100:.0f}% BOUND]" if at_bound else ""
     return f"  ({dev:+.0f}% vs eta {eta*1e3:.4f}){tag}"
 
 
 def report(fit: PhaseFit, tgt: int, ref: int) -> None:
-    """Print dPhi_comb (rad + deg), the ratio-locked amplitudes a/b and fit quality."""
+    """Print dPhi_comb (rad + deg), the a/b handling and fit quality."""
     print("Model:  Y = s^2 (a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb - pi + theta))")
     print("            [both target channels swept together; theta the shared panel phase]")
-    print("            + step6 single-beam + d     "
-          f"(a:b locked to step-6 eta ratio; scale s boxed +/-{fit.bound_frac*100:.0f}%)")
+    if fit.bound_frac == 0:
+        print("            + step6 single-beam + d     "
+              "(a, b PINNED to the step-6 etas; s = 1 fixed)")
+    else:
+        print("            + step6 single-beam + d     "
+              f"(a:b locked to step-6 eta ratio; scale s boxed +/-{fit.bound_frac*100:.0f}%)")
     print(f"Pair {tgt} vs reference {ref}  (value +/- error, Birge-scaled):")
     print(f"  dPhi_comb = {fit.dphi_comb:+.4f} +/- {fit.dphi_comb_err:.4f} rad"
           f"   ( {fit.dphi_comb_deg:+.2f} +/- {np.degrees(fit.dphi_comb_err):.2f} deg )")
@@ -265,6 +287,8 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     ax2.legend(loc="upper right", fontsize=8)
 
     bflag = ("  [a@bound]" if fit.a_at_bound else "") + ("  [b@bound]" if fit.b_at_bound else "")
+    mode = ("a,b pinned (s=1)" if fit.bound_frac == 0
+            else f"s boxed $\\pm${fit.bound_frac*100:.0f}%")
     txt = (
         f"$\\Delta\\Phi_{{comb}}$ = {fit.dphi_comb_deg:+.2f} $\\pm$ "
         f"{np.degrees(fit.dphi_comb_err):.2f} deg  "
@@ -272,7 +296,7 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
         f"a = {fit.a*1e3:.3f} ($\\eta$ {fit.eta_ref*1e3:.3f}), "
         f"b = {fit.b*1e3:.3f} ($\\eta$ {fit.eta_tgt*1e3:.3f}) mV$^{{1/2}}${bflag}\n"
         f"d = {fit.offset*1e3:+.3f} mV  (should be $\\approx$0)\n"
-        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})"
+        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})  [{mode}]"
     )
     ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
@@ -346,7 +370,27 @@ def _flip_meas_csv(path) -> Path:
     return dst
 
 
-def fit_csv(path, *, flip: bool = False) -> None:
+# Refit method -> the `frac` handed to load_phase_csv (flags --bounded / --fix)
+METHODS = {
+    "bounded": BOUND_FRAC,   # a:b ratio locked, shared scale s boxed +/-BOUND_FRAC
+    "fix": 0.0,              # a, b pinned to the step-6 etas exactly (s = 1 fixed)
+}
+
+
+def _compare_methods(fits: dict[tuple[int, str], PhaseFit], pairs, methods) -> None:
+    """Side-by-side dPhi_comb per method (same CSV, same step-6 models)."""
+    print("\n=== Method comparison ===")
+    for k in pairs:
+        for m in methods:
+            f = fits[(k, m)]
+            s = f.a / f.eta_ref if f.eta_ref else float("nan")
+            stxt = "s=1 (pinned)" if f.bound_frac == 0 else f"s={s:.3f}"
+            print(f"pair {k}  {m:<7}: dPhi_comb = {f.dphi_comb_deg:+7.2f} +/- "
+                  f"{np.degrees(f.dphi_comb_err):5.2f} deg   {stxt:<12}  "
+                  f"chi2/dof={f.chi2_red:.2f}")
+
+
+def fit_csv(path, *, flip: bool = False, methods: tuple[str, ...] = ("bounded",)) -> None:
     """Re-fit an already-recorded CSV offline (no hardware).
 
     Needs two inputs: this CSV plus the combined step-6 JSON (``IN_STEP6``) for
@@ -355,9 +399,18 @@ def fit_csv(path, *, flip: bool = False) -> None:
     REF_INDEX -- so every target present (that has a step-6 model) is fit separately
     against the reference and gets its own refit PNG.
 
+    ``methods`` picks how the step-6 amplitudes enter (:data:`METHODS`):
+    ``"bounded"`` floats the shared scale ``s`` boxed to ``+/-BOUND_FRAC``;
+    ``"fix"`` pins ``a``/``b`` to the etas exactly (``s = 1``).  Each requested
+    method runs on every target (PNG suffixed with the method name); with more
+    than one, a comparison table is printed at the end.
+
     ``flip`` handles an inverted photodiode/DAQ read: it writes a sign-flipped
     sibling CSV (:func:`_flip_meas_csv`, negating ``voltage_mean_v`` + ``dark_v``)
     and re-fits that instead, so the fitted fringe is the positive light signal.
+
+    Every fitted (pair, method) is persisted into ONE combined
+    ``calib_step7_result_*.json`` (:func:`tpa_phase.save_comb_phase_json`).
     """
     if flip:
         path = _flip_meas_csv(path)
@@ -370,20 +423,34 @@ def fit_csv(path, *, flip: bool = False) -> None:
             f"no fittable target in {path}: found targets {targets}, but have "
             f"step-6 models only for {sorted(models)} (reference is pair {REF_INDEX})"
         )
-    print(f"Fitting pair(s) {fittable} vs reference {REF_INDEX} from {path}")
+    print(f"Fitting pair(s) {fittable} vs reference {REF_INDEX} from {path} "
+          f"(method(s): {', '.join(methods)})")
+    fits: dict[tuple[int, str], PhaseFit] = {}
     for k in fittable:
-        print(f"\n=== Re-fit: pair {k} vs reference {REF_INDEX} ===")
-        result = load_phase_csv(path, models[k], models[REF_INDEX],
-                                frac=BOUND_FRAC, single_beam_bg=SINGLE_BEAM_BG,
-                                only_tgt=k)
-        dts = result.per_trial_darks()
-        drift = f" +/- {dts.std(ddof=1)*1e3:.4f} drift" if dts.size > 1 else ""
-        print(f"Loaded {result.trial.size} rows, "
-              f"dark = {result.dark*1e3:.4f}{drift} mV")
-        report(result.fit, result.tgt_index, result.ref_index)
-        plot_path = OUT_DIR / f"calib_step7_pair{k}_refit.png"
-        make_plot(result.fit, result.tgt_index, plot_path)
-        print(f"Plot saved to {plot_path}")
+        for method in methods:
+            print(f"\n=== Re-fit [{method}]: pair {k} vs reference {REF_INDEX} ===")
+            result = load_phase_csv(path, models[k], models[REF_INDEX],
+                                    frac=METHODS[method], single_beam_bg=SINGLE_BEAM_BG,
+                                    only_tgt=k)
+            dts = result.per_trial_darks()
+            drift = f" +/- {dts.std(ddof=1)*1e3:.4f} drift" if dts.size > 1 else ""
+            print(f"Loaded {result.trial.size} rows, "
+                  f"dark = {result.dark*1e3:.4f}{drift} mV")
+            report(result.fit, result.tgt_index, result.ref_index)
+            plot_path = OUT_DIR / f"calib_step7_pair{k}_refit_{method}.png"
+            make_plot(result.fit, result.tgt_index, plot_path)
+            print(f"Plot saved to {plot_path}")
+            fits[(k, method)] = result.fit
+    if len(methods) > 1:
+        _compare_methods(fits, fittable, methods)
+    # Persist the fitted spectrum {Phi_k} as ONE combined JSON (step3 + step6
+    # carried over verbatim from IN_STEP6) -- the single input for downstream
+    # consumers (e.g. the step-8 random-input forward-model check).
+    out_json = OUT_DIR / f"calib_step7_result_{time.strftime('%m%d_%H%M')}.json"
+    save_comb_phase_json(fits, IN_STEP6, out_json, ref_index=REF_INDEX,
+                         csv_path=str(Path(path).resolve()),
+                         single_beam_bg=SINGLE_BEAM_BG)
+    print(f"\nCombined step-7 result (step3 + step6 + step7) saved to {out_json}")
 
 
 # ======================================================================
@@ -563,10 +630,14 @@ def measure_only(*, flip: bool = False) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     flip = "--flip" in argv     # inverted DAQ read -> negate voltage_mean_v + dark_v
+    # refit method flag(s): --bounded / --fix (both -> run both + comparison table)
+    methods = tuple(m for m in METHODS if f"--{m}" in argv)
     positional = [a for a in argv if not a.startswith("-")]
     if positional:              # a CSV path -> offline refit, no hardware
-        fit_csv(positional[0], flip=flip)
+        fit_csv(positional[0], flip=flip, methods=methods or ("bounded",))
     else:                       # no arg -> collect a fresh sweep (drives the SLM/DAQ)
+        if methods:
+            print("Note: --bounded/--fix only affect a REFIT; collecting raw data now.")
         measure_only(flip=flip)
     return 0
 

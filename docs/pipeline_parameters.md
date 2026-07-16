@@ -32,8 +32,10 @@ wl_map (Step 1+2)  →  intensity (Step 3)  →  tpa_center  →  pair_eta (Step
 | `wl_map` | — | — | `wl_map` | osa, slm |
 | `intensity` | `wl_map` | — | `intensity_calib` | osa, slm |
 | `tpa_center` | `intensity_calib` | — | `center_fit` | monitor, slm |
-| `pair_eta` | `intensity_calib` | `center_fit` | `pair_etas` | monitor, slm |
-| `comb_phase` | `intensity_calib`, `pair_etas` | `center_fit` | `comb_phase` | monitor, slm |
+| `pair_eta` | `intensity_calib` | — | `pair_etas` | monitor, slm |
+| `comb_phase` | `intensity_calib`, `pair_etas` | — | `comb_phase` | monitor, slm |
+
+> `center_fit` 现在是**诊断输出**：下游 stage 不再消费它（layout 直接从 Step-3 通道网格原样加载，见 §2.1）。要把通道移到拟合出的共振中心，用它作为新的 `center_wl` 重跑 `intensity`（Step 3）。
 
 ### 1.2 两个重要保证
 
@@ -48,7 +50,7 @@ wl_map (Step 1+2)  →  intensity (Step 3)  →  tpa_center  →  pair_eta (Step
 
 ### 2.1 `LayoutConfig` —— 通道几何（[pipeline.py:153](../src/slm_module/pipeline.py#L153)）
 
-描述在 778 nm 附近怎么在 SLM 上摆放对称的 x/w 通道对。**measurement 和 encoding 两边都用它**，所以两边永远一致。
+描述在 778 nm 附近怎么在 SLM 上摆放对称的 x/w 通道对。**这些几何参数只用于设计测量网格**（Step 3 的 `build_channel_calibration_grid` 和 tpa_center 扫描）；消费 Step-3 结果的 stage（`pair_eta` / `comb_phase`）通过 `LayoutConfig.build_layout` → `channel_layout_from_calibration` 把校准文件的行**原样**当作通道加载——不重新排布、不吸附最近坐标，编码驱动的永远是实际测过的那些通道。文件里唯一没记录的是 window/gap 的划分，用配置的 `gap_px` 恢复：`width = pitch − gap_px`。
 
 | 参数 | 默认 | 含义 |
 |------|------|------|
@@ -80,9 +82,8 @@ wl_map (Step 1+2)  →  intensity (Step 3)  →  tpa_center  →  pair_eta (Step
 | `stages` | — | `StagePlan` 列表，实际要跑哪些 stage、各自的 config/输入/输出 |
 | `layout` | `LayoutConfig()` | 上面的通道几何 |
 | `col_ratio` | None | 每列的编码 taper（幅度整形）。TPA 三个 stage 编码 pattern 时透传，保证校准时的通道形状 = 部署时的形状。None = 平顶带 |
-| `use_center_fit` | True | 是否把有效的 `tpa_center` 拟合结果喂给下游做 layout 中心。见下 |
 
-> **`use_center_fit` 的作用**（[pipeline.py:511](../src/slm_module/pipeline.py#L511) `ctx.center_wl`）：`pair_eta` 和 `comb_phase` 建 layout 时要一个中心波长。如果 `use_center_fit=True` 且提供了一个 `valid` 的 `center_fit`，就用测出来的 TPA 共振中心（`fit.center_wl_nm`）；否则退回 `layout.center_wl`（778）。这让整个 x/w 排布对齐到**真正的双光子共振**而不是名义中心。
+> 旧字段 `use_center_fit` 已移除：`pair_eta` / `comb_phase` 不再按某个中心波长重建 layout，而是把 Step-3 通道网格原样加载（§2.1）。要对齐真正的双光子共振，把 `tpa_center` 拟合出的中心作为新 `center_wl` 重跑 Step 3。
 
 ### 2.4 `OutlierRemeasurePolicy` —— 离群点自动复测（[outliers.py:26](../src/slm_module/calibration/outliers.py#L26)）
 
@@ -110,6 +111,7 @@ None（默认）= 关闭。
 | `window_size` | 8 | Step 2 亮窗宽度（像素）。窗越宽信号越强但波长分辨率越粗 |
 | `coordinate_stride` | 1 | **Step 2 提速**：每隔 N 列才测一次，其余列由拟合曲线补出（见 §3.3） |
 | `sweep_span_nm` | None | **Step 2 再提速**：先用宽 span 测区域两端两个锚点，线性预测其余各列波长，再用这个窄 span（如 1 nm）重定中心逐点测量（见 §3.4）。None = 全程宽 span |
+| `min_peak_wavelength_nm` | None（GUI 默认 775） | 寻峰时忽略低于此波长的样本，屏蔽光源谱带以下的伪峰。None = 不屏蔽 |
 | `max_peak_wavelength_nm` | None | 寻峰时忽略高于此波长的样本，屏蔽 SLM 未调制的固定漏光伪峰（本装置 ~781.7 nm → 设 ≈781.5）。None = 不屏蔽 |
 | `peak_half_window_nm` | None | 峰值质心的 ± 波长窗（nm）。给了就按物理 nm 宽度取质心，与 OSA 采样密度无关；None 用固定样本数 |
 | `region` | None | `(x_start, x_end)` 只扫这段 SLM 列。光源只照亮部分孔径时有用（如 6 nm 脉冲打在 20 nm 孔径上）。None = 全宽 |
@@ -241,7 +243,7 @@ Step 2: 窗起始 0,20,40,...,1180 + 锚点1192 → 约 61 次测量 (而非 ~11
 读数(mV): 777.95→2.1, ..., 778.01→3.8(峰), ..., 778.05→2.4
 测量次数: 1 trial × 11 点 × 2(含背景) = 22 次 monitor 读
 拟合: 二次曲线峰在 778.012 ± 0.004 nm → center_fit.valid=True
-下游: use_center_fit=True 时, pair_eta/comb_phase 用 778.012 建 layout
+下游: center_fit 是诊断输出; 要对齐 778.012, 以它为 center_wl 重跑 Step 3 (下游 layout 原样加载测量网格)
 ```
 
 ---
@@ -272,7 +274,7 @@ Y = η²·(x·w) + a_x·x + q_x·x² + a_w·w + q_w·w² + d
 
 ### 6.2 算法流程
 
-1. 建 layout（中心用 `ctx.center_wl`，即可能来自 `tpa_center`）。
+1. 建 layout：把 `intensity_calib` 的通道行原样加载（`channel_layout_from_calibration`，见 §2.1）。
 2. `sweep = [0] + linspace(sweep_min, sweep_max, n_points)`（前置 0 提供 x=0/w=0 轴点，用来钉住单光子项）。
 3. 对每个 pair × 每个网格点 × 每个 trial：只点亮该 pair 的 x/w 通道 → 读 monitor。
 4. 每个 (x,w) cell 跨 trials 求均值/SEM → 加权最小二乘拟合 → `η ± err`（χ²/dof>1 时 Birge 放大误差）。
@@ -319,14 +321,14 @@ cross   (1, r)      x 固定=1, w 扫        共 n_points 点 ← 唯一 x·w≠
 | `n_trials` | 10 | 整个扫描重复几遍 |
 | `repeats` | 1 | 每次 monitor 读内部平均次数 |
 | `settle` | 0.15 | 换 pattern 后等待秒数 |
-| `bound_frac` | 1.0 | 拟合约束：数字 = 把 a:b 锁到 Step 6 的 η_ref:η_tgt 比、共享尺度限制在 ±frac；**None = 无约束闭式拟合** |
+| `bound_frac` | 1.0 | 拟合约束：数字 = 把 a:b 锁到 Step 6 的 η_ref:η_tgt 比、共享尺度限制在 ±frac；**0 = a、b 完全钉死在 Step 6 η（s=1，只拟合 dPhi_comb 和 d）；None = 无约束闭式拟合** |
 | `single_beam_bg` | True | 把两个 pair 的 Step 6 单光子响应作为固定背景折进拟合 |
 | `measure_dark` | True | 测 all-off 暗读数做逐行扣除（漂移抑制） |
 | `dark_per_trial` | True | 每个 trial 开头都重测一次暗（跟踪慢漂移）；False = 全程只在开头测一次 |
 
 ### 7.2 算法流程
 
-1. 建 layout + 从 `pair_etas` 取出 target/reference 的 `PairModel`（含 η、单光子系数）。
+1. 建 layout（同 §6.2：原样加载 `intensity_calib` 的通道行）+ 从 `pair_etas` 取出 target/reference 的 `PairModel`（含 η、单光子系数）。
 2. `build_phase_sweep`：target 对称驱动 `φ^x=φ^w=φ` 扫 `[phi_start, phi_stop]`，参考固定在 `ref_phase_deg`。生成 `(x_t,w_t,x_r,w_r)` 强度元组，`x=sin²(φ/2)`。
 3. 对每个 trial（可选先测暗）× 每个 drive 点：只点亮 target+reference → 读 monitor → 存行（含该 trial 的 dark）。
 4. `fit_result`：拟合 `Y = |a·e^{iΦ_r} + b·e^{iΦ_t}|²`-型条纹，解出 `dphi_comb`（wrap 到 (−π,π]），受 `frac` / `single_beam_bg` 控制。
@@ -358,7 +360,6 @@ from slm_module.calibration.outliers import OutlierRemeasurePolicy
 
 request = PipelineRequest(
     layout=LayoutConfig(n_channels=20, channel_width_px=15, gap_px=5, center_wl=778.0),
-    use_center_fit=True,
     stages=[
         StagePlan("wl_map", WlMapConfig(
             region=(0, 1200), coordinate_stride=20,     # ← 提速: 每 20 列测一次
@@ -379,16 +380,14 @@ request = PipelineRequest(
 
         StagePlan("pair_eta", PairEtaConfig(
             sweep_min=0.3, sweep_max=1.0, n_points=5, reduced_points=True, n_trials=5,
-        ), inputs={"intensity_calib": InputSpec("memory"),
-                   "center_fit": InputSpec("memory")},
+        ), inputs={"intensity_calib": InputSpec("memory")},
            output_path="out/pair_eta.json",
            extra_outputs={"csv": "out/pair_eta.csv"}),
 
         StagePlan("comb_phase", CombPhaseConfig(
             ref_index=0, tgt_indices=[3, 7], sweep_points=15, n_trials=10,
         ), inputs={"intensity_calib": InputSpec("memory"),
-                   "pair_etas": InputSpec("memory"),
-                   "center_fit": InputSpec("memory")},
+                   "pair_etas": InputSpec("memory")},
            output_path="out/comb_phase.json"),
     ],
 )
@@ -402,8 +401,7 @@ print(outcome.summaries)   # 每个 stage 一行结果摘要
 
 ```python
 StagePlan("pair_eta", PairEtaConfig(...),
-    inputs={"intensity_calib": InputSpec("file", path="out/intensity.json"),
-            "center_fit":       InputSpec("file", path="out/center.json")},
+    inputs={"intensity_calib": InputSpec("file", path="out/intensity.json")},
     output_path="out/pair_eta.json")
 ```
 
