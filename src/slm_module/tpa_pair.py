@@ -183,12 +183,21 @@ def average_cells(
     return xs, ws, ys, sem
 
 
-def fit_cells(x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray) -> PairFit:
+def fit_cells(
+    x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray,
+    *, drop_q: bool = False,
+) -> PairFit:
     """Weighted least-squares fit of averaged cells to the TPA model.
 
     Errors are Birge-scaled by ``sqrt(chi2/dof)`` when chi2/dof > 1 so unmodeled
     reproducibility scatter inflates the reported uncertainties.  ``eta`` is
     recovered as ``sqrt(b)`` with propagated error ``b_err/(2*sqrt(b))``.
+
+    ``drop_q=True`` drops the ``q_x``/``q_w`` saturation columns and fits the
+    purely linear background ``Y = b*(x*w) + a_x*x + a_w*w + d`` (the a's then
+    carry the full single-beam slopes, with no a<->q split).  The q entries stay
+    in ``params`` pinned to ``(0.0, 0.0)`` so downstream report/plot/JSON code
+    sees the usual keys.
     """
     x = np.asarray(x, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -196,6 +205,11 @@ def fit_cells(x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray) -> P
     sem = np.asarray(sem, dtype=float)
 
     A = design_matrix(x, w)
+    names: tuple[str, ...] = PARAMS
+    if drop_q:
+        keep = [i for i, n in enumerate(PARAMS) if n not in ("q_x", "q_w")]
+        A = A[:, keep]
+        names = tuple(PARAMS[i] for i in keep)
     Aw = A / sem[:, None]
     coeffs, *_ = np.linalg.lstsq(Aw, y / sem, rcond=None)
     cov = np.linalg.inv(Aw.T @ Aw)
@@ -207,7 +221,10 @@ def fit_cells(x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray) -> P
     birge = max(1.0, np.sqrt(chi2_red))
     errs = np.sqrt(np.diag(cov)) * birge
 
-    params = {name: (float(v), float(e)) for name, v, e in zip(PARAMS, coeffs, errs)}
+    params = {name: (float(v), float(e)) for name, v, e in zip(names, coeffs, errs)}
+    if drop_q:
+        params["q_x"] = (0.0, 0.0)
+        params["q_w"] = (0.0, 0.0)
 
     b, b_err = params["b"]
     if b > 0:
@@ -226,12 +243,12 @@ def fit_cells(x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray) -> P
     )
 
 
-def fit_grid(grid: ChannelPairGrid) -> PairFit:
+def fit_grid(grid: ChannelPairGrid, *, drop_q: bool = False) -> PairFit:
     """Average a pair's raw trials into cells, fit them, and store the fit."""
     xs, ws, ys, sem = average_cells(
         grid.trial, grid.x, grid.w, grid.voltage_mean_v, grid.voltage_sem_v
     )
-    grid.fit = fit_cells(xs, ws, ys, sem)
+    grid.fit = fit_cells(xs, ws, ys, sem, drop_q=drop_q)
     return grid.fit
 
 

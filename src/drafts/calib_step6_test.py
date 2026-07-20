@@ -6,12 +6,17 @@ Not a pytest test (no mocks, needs real hardware) -- run it directly::
     python drafts/calib_step6_test.py --meas       # raw meas CSV only: sweep + record, no fit
     python drafts/calib_step6_test.py some.csv     # re-fit an existing CSV offline
     python drafts/calib_step6_test.py some.csv --flip  # re-fit sign-flipped (inverted read)
+    python drafts/calib_step6_test.py some.csv --no-q  # re-fit without the q saturation terms
 
 ``--flip`` applies to a REFIT only (the measure path always records the raw
 signal): when the photodiode/DAQ reads inverted (more light -> more negative
 volts) it negates the loaded ``voltage_mean_v`` in memory (every row incl. the
 (0,0) dark) and re-fits, so the fitted Y = eta^2*(x*w) + ... + d is the positive
 light signal.  Nothing is written back -- the raw CSV on disk is untouched.
+
+``--no-q`` (also refit only) drops the q_x/q_w saturation terms and fits the
+purely linear background Y = eta^2*(x*w) + a_x*x + a_w*w + d, so a_x and a_w
+carry the full single-beam slopes with no a<->q split.
 
 For channel pair ``PAIR_INDEX`` (x[PAIR_INDEX], w[PAIR_INDEX]) this walks the
 reduced 1-D calibration curves built by ``tpa_pair.build_pair_points`` -- one
@@ -43,7 +48,6 @@ embeds the input Step-3 calibration JSON alongside every fitted pair result.
 from __future__ import annotations
 
 import json
-import random
 import sys
 import time
 from pathlib import Path
@@ -89,8 +93,8 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
-T_SINGLE_S = 5.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
-T_BOTH_S = 3.0                  # both beams on (the bright cross points) (s)
+T_SINGLE_S = 10.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
+T_BOTH_S = 5.0                  # both beams on (the bright cross points) (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 
@@ -100,42 +104,93 @@ def _sigma(value: float, err: float) -> float:
 
 
 def report(fit: PairFit) -> None:
-    """Print eta, the single-beam terms, the dark offset and the fit quality."""
+    """Print eta, the single-beam terms, the dark offset, the fit quality and
+    the per-cell residual table (the same residuals ``make_plot`` graphs)."""
     p = fit.params
-    print("Model:  Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d")
+    no_q = p["q_x"][1] == 0.0 and p["q_w"][1] == 0.0   # q pinned to zero -> --no-q fit
+    if no_q:
+        print("Model:  Y = eta^2*(x*w) + a_x*x + a_w*w + d   (q terms dropped)")
+    else:
+        print("Model:  Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d")
     print("Fitted parameters (value +/- error, Birge-scaled):")
     print(f"  eta = {fit.eta:.4e} +/- {fit.eta_err:.3e}   ({_sigma(fit.eta, fit.eta_err):.1f} sigma)")
     print(f"  a_x = {p['a_x'][0]:.4e} +/- {p['a_x'][1]:.3e}   ({_sigma(*p['a_x']):.1f} sigma)")
     print(f"  a_w = {p['a_w'][0]:.4e} +/- {p['a_w'][1]:.3e}   ({_sigma(*p['a_w']):.1f} sigma)")
     print(f"  d   = {p['d'][0]*1e3:.4f} +/- {p['d'][1]*1e3:.4f} mV   ({_sigma(*p['d']):.1f} sigma)")
-    print(f"  (nuisance saturation terms: q_x = {p['q_x'][0]:.3e} +/- {p['q_x'][1]:.2e} , "
-          f"q_w = {p['q_w'][0]:.3e} +/- {p['q_w'][1]:.2e} )")
+    if not no_q:
+        print(f"  (nuisance saturation terms: q_x = {p['q_x'][0]:.3e} +/- {p['q_x'][1]:.2e} , "
+              f"q_w = {p['q_w'][0]:.3e} +/- {p['q_w'][1]:.2e} )")
     print(f"  chi2/dof = {fit.chi2_red:.2f}  (dof={fit.dof})  -> Birge x{fit.birge:.2f} "
           f"on errors ;  R^2 = {fit.r2:.4f}")
+    _report_residuals(fit)
+
+
+def _line_tag(xv: float, wv: float) -> str:
+    """Which reduced-sweep line a cell belongs to (see ``build_pair_points``)."""
+    if xv == 0.0 and wv == 0.0:
+        return "dark"
+    if wv == 0.0:
+        return "x-only"
+    if xv == 0.0:
+        return "w-only"
+    return "cross"
+
+
+def _report_residuals(fit: PairFit) -> None:
+    """Per-cell residual table (measured - fitted model), text only.
+
+    Rows are grouped by sweep line (dark, x-only, w-only, cross) and sorted by
+    level within each line; ``resid/sem`` is the pull each cell contributes to
+    chi2.  Closes with the RMS residual and the worst cell.
+    """
+    res = fit.residuals
+    line_order = {"dark": 0, "x-only": 1, "w-only": 2, "cross": 3}
+    idx = sorted(
+        range(res.size),
+        key=lambda i: (line_order[_line_tag(fit.x[i], fit.w[i])], fit.x[i], fit.w[i]),
+    )
+    print("  Residuals (measured - fitted model, per averaged cell):")
+    print("    line      x     w    meas(mV)   fit(mV)  resid(mV)  resid/sem")
+    for i in idx:
+        print(f"    {_line_tag(fit.x[i], fit.w[i]):<7} {fit.x[i]:5.2f} {fit.w[i]:5.2f} "
+              f"{fit.y[i]*1e3:9.4f} {fit.y_pred[i]*1e3:9.4f} {res[i]*1e3:9.4f} "
+              f"{res[i]/fit.sem[i]:9.1f}")
+    rms = float(np.sqrt(np.mean(res**2)))
+    i_w = int(np.argmax(np.abs(res)))
+    print(f"  residual RMS = {rms*1e3:.4f} mV ; worst = {res[i_w]*1e3:+.4f} mV "
+          f"({_line_tag(fit.x[i_w], fit.w[i_w])} x={fit.x[i_w]:.2f} w={fit.w[i_w]:.2f})")
 
 
 def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
-    """Measured data with the fitted TPA *model curve* overlaid.
+    """One three-panel figure per pair: background, TPA cross term, residuals.
 
-    The model ``Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d`` is a
-    2-D surface, so this shows it as 1-D slices: Y vs w at each fixed x level
-    (left) and Y vs x at each fixed w level (right).  Every slice is a smooth
-    *quadratic* curve evaluated from the fitted parameters over a fine grid --
-    not a straight line between points -- overlaid on the trial-averaged
-    measurements (with SEM error bars).  Curves are colored by the held-fixed
-    level so the full surface is legible in two panels.
+    Left -- the quasi-linear single-beam lines: the x-only (w=0) and w-only
+    (x=0) measured points with the fitted background curves ``a*r + q*r^2 + d``
+    overlaid (linear-dominated; q is the small saturation bend).  The shared
+    (0,0) dark point anchors both lines at d.
 
-    Writes a headless PNG to ``path``; if ``path`` is None, opens the figure in
-    an interactive window instead (the offline refit uses this to eyeball a
-    single random pair without writing any file).
+    Middle -- the TPA cross term, linear in the intensity product: the
+    cross-line (x=1, w=r) measurements minus the *fitted* single-beam
+    background ``a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d``, plotted vs the
+    product x*w with the fitted line ``eta^2*(x*w)`` overlaid.  x and w are
+    commanded INTENSITIES; eta multiplies the field amplitude, hence the
+    eta^2 coefficient (see :mod:`slm_module.tpa_pair`).  Error bars are the
+    per-cell SEMs only (background-parameter uncertainty is not propagated --
+    this is an eyeball plot; the printed report carries the real errors).
+
+    Right -- residual pulls: (measured - full model) / SEM for every averaged
+    cell (same numbers as the printed residual table) vs the swept level,
+    colored by sweep line, with the +/-1 sigma band shaded (same pull style
+    as the step-7 plot).
+
+    Writes a single three-panel PNG to ``path``; if ``path`` is None, opens
+    the figure in an interactive window instead.
     """
     import matplotlib
 
     if path is not None:
         matplotlib.use("Agg")  # headless: write a PNG rather than open a window
     import matplotlib.pyplot as plt
-    from matplotlib import cm
-    from matplotlib.colors import Normalize
 
     x, w = fit.x, fit.w
     y, sem = fit.y, fit.sem
@@ -146,71 +201,99 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
     a_w, q_w = p["a_w"][0], p["q_w"][0]
     d = p["d"][0]
 
-    def model(xx: np.ndarray, ww: np.ndarray) -> np.ndarray:
-        """Fitted TPA response Y(x, w) (b = eta^2)."""
+    def background(xx: np.ndarray, ww: np.ndarray) -> np.ndarray:
+        """Everything except the TPA cross term (the quasi-linear part)."""
         xx = np.asarray(xx, dtype=float)
         ww = np.asarray(ww, dtype=float)
-        return b * (xx * ww) + a_x * xx + q_x * xx**2 + a_w * ww + q_w * ww**2 + d
+        return a_x * xx + q_x * xx**2 + a_w * ww + q_w * ww**2 + d
 
-    def _norm(levels: np.ndarray) -> Normalize:
-        lo, hi = float(levels.min()), float(levels.max())
-        return Normalize(vmin=lo, vmax=hi if hi > lo else lo + 1e-9)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-
-    # --- left: Y vs w, one fitted quadratic per fixed x level (colored by x) ---
-    x_levels = np.unique(x)
-    w_fine = np.linspace(0.0, float(w.max()), 200)
-    norm_x = _norm(x_levels)
-    for xl in x_levels:
-        color = cm.viridis(norm_x(xl))
-        m = x == xl
-        order = np.argsort(w[m])
-        ax1.plot(w_fine, model(xl, w_fine) * 1e3, "-", color=color, lw=1.4, zorder=2)
-        ax1.errorbar(w[m][order] * 1.0, y[m][order] * 1e3, yerr=sem[m][order] * 1e3,
+    # --- left: single-beam lines + their quasi-linear fits -------------------
+    for label, m, level, curve, color in (
+        ("x-only (w=0)", w == 0, x, lambda r: background(r, 0.0), "tab:blue"),
+        ("w-only (x=0)", x == 0, w, lambda r: background(0.0, r), "tab:orange"),
+    ):
+        r_fine = np.linspace(0.0, float(level[m].max()), 200)
+        ax1.plot(r_fine, curve(r_fine) * 1e3, "-", color=color, lw=1.4, zorder=2)
+        order = np.argsort(level[m])
+        ax1.errorbar(level[m][order], y[m][order] * 1e3, yerr=sem[m][order] * 1e3,
                      fmt="o", color=color, ms=5, capsize=2, lw=0.8,
-                     mec="k", mew=0.3, zorder=3)
-    ax1.set_xlabel("w  (per-side level)")
+                     mec="k", mew=0.3, zorder=3, label=label)
+    no_q = p["q_x"][1] == 0.0 and p["q_w"][1] == 0.0   # q pinned to zero -> --no-q fit
+    if no_q:
+        txt1 = f"a_x = {a_x:.3g}\na_w = {a_w:.3g}\nd = {d*1e3:.3f} mV"
+        title1 = "Single-beam background -- linear fits  Y = a$\\,$r + d"
+    else:
+        txt1 = (
+            f"a_x = {a_x:.3g}   q_x = {q_x:.3g}\n"
+            f"a_w = {a_w:.3g}   q_w = {q_w:.3g}\n"
+            f"d = {d*1e3:.3f} mV"
+        )
+        title1 = "Single-beam background -- quasi-linear fits  Y = a$\\,$r + q$\\,$r$^2$ + d"
+    ax1.text(0.03, 0.97, txt1, transform=ax1.transAxes, va="top",
+             bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
+    ax1.set_xlabel("per-side level r")
     ax1.set_ylabel("Voltage (mV)")
-    ax1.set_title("Y vs w  (curves = fitted model, colored by x)")
-    sm_x = cm.ScalarMappable(norm=norm_x, cmap="viridis")
-    sm_x.set_array([])
-    fig.colorbar(sm_x, ax=ax1).set_label("x level")
+    ax1.set_title(title1)
+    ax1.legend(loc="lower right", fontsize=8)
 
-    # --- right: Y vs x, one fitted quadratic per fixed w level (colored by w) ---
-    w_levels = np.unique(w)
-    x_fine = np.linspace(0.0, float(x.max()), 200)
-    norm_w = _norm(w_levels)
-    for wl in w_levels:
-        color = cm.plasma(norm_w(wl))
-        m = w == wl
-        order = np.argsort(x[m])
-        ax2.plot(x_fine, model(x_fine, wl) * 1e3, "-", color=color, lw=1.4, zorder=2)
-        ax2.errorbar(x[m][order] * 1.0, y[m][order] * 1e3, yerr=sem[m][order] * 1e3,
-                     fmt="o", color=color, ms=5, capsize=2, lw=0.8,
-                     mec="k", mew=0.3, zorder=3)
-    ax2.set_xlabel("x  (per-side level)")
-    ax2.set_title("Y vs x  (curves = fitted model, colored by w)")
-    sm_w = cm.ScalarMappable(norm=norm_w, cmap="plasma")
-    sm_w.set_array([])
-    fig.colorbar(sm_w, ax=ax2).set_label("w level")
-
-    txt = (
+    # --- middle: cross line minus fitted background = the linear TPA term ----
+    mc = (x > 0) & (w > 0)                     # cross line: the only x*w != 0 cells
+    prod = x[mc] * w[mc]                       # intensity product (x = 1 here)
+    y_sub = y[mc] - background(x[mc], w[mc])
+    p_fine = np.linspace(0.0, float(prod.max()), 200)
+    ax2.plot(p_fine, b * p_fine * 1e3, "-", color="tab:green", lw=1.4, zorder=2,
+             label="fit  $\\eta^2\\,(x\\,w)$")
+    order = np.argsort(prod)
+    ax2.errorbar(prod[order], y_sub[order] * 1e3, yerr=sem[mc][order] * 1e3,
+                 fmt="o", color="tab:green", ms=5, capsize=2, lw=0.8,
+                 mec="k", mew=0.3, zorder=3, label="cross (x=1) $-$ fitted background")
+    ax2.axhline(0.0, color="0.6", lw=0.7, zorder=1)
+    txt2 = (
         f"eta = {fit.eta:.3g} $\\pm$ {fit.eta_err:.2g}  "
         f"({_sigma(fit.eta, fit.eta_err):.0f}$\\sigma$)\n"
-        f"a_x = {a_x:.3g}   a_w = {a_w:.3g}\n"
-        f"d   = {d*1e3:.3f} mV\n"
+        f"$\\eta^2$ = {b:.3g}\n"
         f"R$^2$ = {fit.r2:.3f}   $\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})"
     )
-    ax1.text(0.03, 0.97, txt, transform=ax1.transAxes, va="top",
+    ax2.text(0.03, 0.97, txt2, transform=ax2.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
+    ax2.set_xlabel("x$\\,$w  (intensity product; x = 1 on this line)")
+    ax2.set_ylabel("Voltage $-$ background (mV)")
+    ax2.set_title("TPA cross term -- linear in the intensity product")
+    ax2.legend(loc="lower right", fontsize=8)
 
-    fig.suptitle("TPA pair fit -- model curves vs measured data", fontsize=11)
+    # --- right: residual pulls with the +/-1 sigma band ----------------------
+    res = fit.residuals
+    pulls = res / sem
+    ax3.axhspan(-1, 1, color="tab:blue", alpha=0.12, label="$\\pm1\\sigma$")
+    ax3.axhline(0, color="gray", ls="--", lw=1, zorder=1)
+    for label, m, lvl, color in (
+        ("dark", (x == 0) & (w == 0), x, "k"),
+        ("x-only (w=0)", (w == 0) & (x > 0), x, "tab:blue"),
+        ("w-only (x=0)", (x == 0) & (w > 0), w, "tab:orange"),
+        ("cross (x=1, vs w)", (x > 0) & (w > 0), w, "tab:green"),
+    ):
+        ax3.scatter(lvl[m], pulls[m], c=color, s=40, edgecolor="k", lw=0.4,
+                    zorder=3, label=label)
+    rms = float(np.sqrt(np.mean(res**2)))
+    txt3 = (
+        f"RMS = {rms*1e3:.4f} mV\n"
+        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (dof={fit.dof})"
+    )
+    ax3.text(0.03, 0.97, txt3, transform=ax3.transAxes, va="top",
+             bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
+    ax3.set_xlabel("swept level r")
+    ax3.set_ylabel("Pull = residual / SEM")
+    ax3.set_title("Fit residuals per averaged cell  (pulls)")
+    ax3.legend(loc="lower right", fontsize=8)
+
     fig.tight_layout()
-    if path is not None:
-        fig.savefig(path, dpi=150)
-    else:
+    if path is None:
         plt.show()
+        return
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def _load_layout():
@@ -296,26 +379,34 @@ def sweep_and_fit() -> None:
         print(f"Plot saved to {plot_path}")
 
 
-def fit_csv(path: str | Path, *, flip: bool = False) -> None:
+def fit_csv(path: str | Path, *, flip: bool = False, no_q: bool = False) -> None:
     """Re-fit an already-recorded pair-grid CSV offline (no hardware).
 
     Writes the same combined ``calib_step6_result_MMDD_HHMM.json`` (input Step-3
     calib + every fitted pair) as the hardware run; the timestamp keeps a refit
-    from clobbering earlier results.  No PNGs are written -- instead one random
-    fitted pair's model plot is shown interactively to eyeball the refit.
+    from clobbering earlier results.  Every fitted pair also gets the same
+    single three-panel PNG as the hardware run (quasi-linear background,
+    linear TPA cross term, residual pulls), saved next to the JSON.
 
     ``flip`` handles an inverted photodiode/DAQ read (more light -> more negative
     volts): the loaded ``voltage_mean_v`` is negated in memory on every row (incl.
     the (0,0) dark) and each pair is re-fit, so Y = eta^2*(x*w) + ... + d comes out
     as the positive light signal.  Nothing is written back -- the raw CSV on disk
     is untouched, and the spreads (std/SEM) are magnitudes so they stay as read.
+
+    ``no_q`` drops the q_x/q_w saturation terms from the model (see the module
+    docstring): Y = eta^2*(x*w) + a_x*x + a_w*w + d.
     """
     result = load_tpa_pair_csv(path)
     if flip:
         for grid in result.channels:
             grid.voltage_mean_v = -grid.voltage_mean_v   # inverted read (same channel)
-            fit_grid(grid)                               # re-fit the negated data
-        print("Flip: negated voltage_mean_v in memory and re-fit (inverted read).")
+        print("Flip: negated voltage_mean_v in memory (inverted read).")
+    if flip or no_q:
+        for grid in result.channels:                     # re-fit negated / q-dropped
+            fit_grid(grid, drop_q=no_q)
+    if no_q:
+        print("No-q: dropped q_x/q_w -> Y = eta^2*(x*w) + a_x*x + a_w*w + d.")
     n_axis = int(sum(
         int(((c.fit.x == 0) | (c.fit.w == 0)).sum()) for c in result.channels if c.fit
     ))
@@ -329,11 +420,12 @@ def fit_csv(path: str | Path, *, flip: bool = False) -> None:
     save_combined_json(result, json_path)
     print(f"\nSaved Step-3 calib + Step-6 fits -> {json_path}")
 
-    fitted = [c for c in result.channels if c.fit is not None]
-    if fitted:
-        c = random.choice(fitted)
-        print(f"\nShowing fit for pair {c.index} (random of {len(fitted)} fitted)")
-        make_plot(c.fit)
+    for c in result.channels:
+        if c.fit is None:
+            continue
+        plot_path = json_path.with_name(f"calib_step6_pair{c.index}_{stamp}.png")
+        make_plot(c.fit, plot_path)
+        print(f"Plot saved to {plot_path}")
 
 
 def _read_point(daq, x_val: float, w_val: float) -> tuple[float, float, float, float]:
@@ -443,11 +535,12 @@ def measure_only() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    flags = {"--meas", "-m", "--flip"}
+    flags = {"--meas", "-m", "--flip", "--no-q"}
     flip = "--flip" in argv               # refit only: negate voltage_mean_v (inverted read)
+    no_q = "--no-q" in argv               # refit only: drop the q_x/q_w saturation terms
     positional = [a for a in argv if a not in flags]
     if positional:                       # a CSV path -> offline re-fit, no hardware
-        fit_csv(positional[0], flip=flip)
+        fit_csv(positional[0], flip=flip, no_q=no_q)
         return 0
     if any(a in ("--meas", "-m") for a in argv):   # raw meas CSV only: sweep + record, no fit
         measure_only()

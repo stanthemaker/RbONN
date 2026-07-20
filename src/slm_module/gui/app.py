@@ -18,6 +18,12 @@ import matplotlib
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from daq_module.controller import DAQController, DAQMonitorSettings
+from heater_module.controller import (
+    HeaterCycle,
+    PID_DEFAULTS as HEATER_PID_DEFAULTS,
+    StaircaseSettings,
+    TC300Controller,
+)
 from osa_module.controller import MeasurementSettings, OSAController
 from osa_module.driver import OSAError
 from scope_module.controller import (
@@ -415,6 +421,7 @@ class MainWindow(QtWidgets.QMainWindow):
     monitor_sample = QtCore.pyqtSignal(object)
     daq_monitor_sample = QtCore.pyqtSignal(object)
     hold_progress = QtCore.pyqtSignal(int, int)
+    heater_sample = QtCore.pyqtSignal(object)
 
     def __init__(
         self,
@@ -480,6 +487,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._daqmon_stds: list[float] = []
         self._daqmon_sems: list[float] = []
         self.hold_stop_event: threading.Event | None = None
+        # Heater (Thorlabs TC300B): one serial link, so at most one background
+        # loop (ramp or read-only monitor) owns it at a time.
+        self.heater_controller: TC300Controller | None = None
+        self.heater_stop_event: threading.Event | None = None
+        self._heater_disconnect_pending = False
+        self._heater_times: dict[int, list[float]] = {1: [], 2: []}
+        self._heater_temps: dict[int, list[float]] = {1: [], 2: []}
+        self._heater_volts: dict[int, list[float]] = {1: [], 2: []}
 
         self.setWindowTitle("Santec SLM Control")
         self.resize(1280, 840)
@@ -500,6 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.monitor_sample.connect(self._on_monitor_sample)
         self.daq_monitor_sample.connect(self._on_daq_monitor_sample)
         self.hold_progress.connect(self._on_hold_progress)
+        self.heater_sample.connect(self._on_heater_sample)
 
         # Live OSA monitor: measure() notifies the bridge from the worker
         # thread; the queued signal repaints the viewer page and the dock for
@@ -565,6 +581,8 @@ class MainWindow(QtWidgets.QMainWindow):
              "Live OSA spectrum viewer: single / continuous sweeps with settings"),
             ("\N{BAR CHART}  DAQ Monitor",
              "Live continuous strip-chart readout of the NI-DAQ analog input"),
+            ("\N{THERMOMETER}  Heater",
+             "Thorlabs TC300B: staircase ramp/hold + live temperature monitor"),
         )
         for label, tooltip in nav_items:
             item = QtWidgets.QListWidgetItem(label)
@@ -584,6 +602,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack.addWidget(self._build_quick_test_page())
         self.stack.addWidget(self._build_osa_viewer_page())
         self.stack.addWidget(self._build_daq_monitor_page())
+        self.stack.addWidget(self._build_heater_page())
 
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
@@ -729,6 +748,27 @@ class MainWindow(QtWidgets.QMainWindow):
         dql.addWidget(self.daq_status_label, 0, 4)
         dql.setColumnStretch(1, 1)
         page.layout().addWidget(daq)
+
+        # ---- Heater (Thorlabs TC300B) ----
+        heater = self._panel("Heater (Thorlabs TC300B)")
+        htl = QtWidgets.QGridLayout(heater)
+        self.heater_port_edit = QtWidgets.QLineEdit("COM3")
+        self.heater_port_edit.setPlaceholderText("TC300 serial port (e.g. COM3)")
+        self.heater_connect_button = QtWidgets.QPushButton("Connect Heater")
+        self.heater_connect_button.clicked.connect(self._connect_heater)
+        self.heater_disconnect_button = QtWidgets.QPushButton("Disconnect")
+        self.heater_disconnect_button.setProperty("variant", "ghost")
+        self.heater_disconnect_button.setEnabled(False)
+        self.heater_disconnect_button.clicked.connect(self._disconnect_heater)
+        self.heater_status_label = QtWidgets.QLabel("Heater: closed")
+        self._set_status(self.heater_status_label, "Heater: closed", "off")
+        htl.addWidget(QtWidgets.QLabel("Port"), 0, 0)
+        htl.addWidget(self.heater_port_edit, 0, 1)
+        htl.addWidget(self.heater_connect_button, 0, 2)
+        htl.addWidget(self.heater_disconnect_button, 0, 3)
+        htl.addWidget(self.heater_status_label, 0, 4)
+        htl.setColumnStretch(1, 1)
+        page.layout().addWidget(heater)
 
         # ---- shared status log ----
         self.log_box = QtWidgets.QPlainTextEdit()
@@ -5996,6 +6036,385 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_task("Disconnect DAQ", daq.disconnect)
         self._sync_monitor_source()
 
+    # ===================== Heater (Thorlabs TC300B) =====================
+    def _connect_heater(self) -> None:
+        port = self.heater_port_edit.text().strip()
+        if not port:
+            self._log("Enter the heater serial port first")
+            return
+        self.heater_connect_button.setEnabled(False)
+
+        def connect() -> tuple[TC300Controller, str]:
+            heater = TC300Controller(port=port)
+            heater.connect()
+            return heater, heater.identify()
+
+        self._run_task("Connect heater", connect,
+                       self._on_heater_connected, self._on_heater_error)
+
+    def _on_heater_connected(self, payload: tuple[TC300Controller, str]) -> None:
+        heater, identity = payload
+        self.heater_controller = heater
+        self._set_status(self.heater_status_label, "Heater: open", "ok")
+        self.heater_connect_button.setEnabled(False)
+        self.heater_disconnect_button.setEnabled(True)
+        self._log(f"Heater connected: {identity.strip()}")
+        self._heater_refresh_buttons()
+        if hasattr(self, "heater_page_status"):
+            self.heater_page_status.setText(
+                "Heater connected. Choose channels + target, then Ramp & Hold "
+                "(cold start) or Monitor (watch a running hold)."
+            )
+
+    def _on_heater_error(self, _error: str) -> None:
+        self._set_status(self.heater_status_label, "Heater: error", "error")
+        self.heater_connect_button.setEnabled(True)
+
+    def _disconnect_heater(self) -> None:
+        # A running loop owns the serial link; stop it first and defer the actual
+        # close to when the loop unwinds (its finally may still disable channels).
+        if self.heater_stop_event is not None:
+            self._heater_disconnect_pending = True
+            self.heater_stop_event.set()
+            self._set_status(self.heater_status_label, "Heater: stopping…", "off")
+            if hasattr(self, "heater_page_status"):
+                self.heater_page_status.setText("Stopping the heater loop, then disconnecting…")
+            return
+        self._heater_do_disconnect()
+
+    def _heater_do_disconnect(self) -> None:
+        heater = self.heater_controller
+        self.heater_controller = None
+        self._heater_disconnect_pending = False
+        self._set_status(self.heater_status_label, "Heater: closed", "off")
+        self.heater_connect_button.setEnabled(True)
+        self.heater_disconnect_button.setEnabled(False)
+        self._heater_refresh_buttons()
+        if heater is not None:
+            self._run_task("Disconnect heater", heater.disconnect)
+
+    # ------------------------------------------------------------ heater page
+    def _build_heater_page(self) -> QtWidgets.QWidget:
+        """Dedicated page: TC300B staircase ramp/hold + live temperature monitor.
+
+        Mirrors ``src/drafts/heat_controller.py`` -- the same watchdog-safe
+        staircase, adaptive step and tuned hold PID -- but driven interactively
+        with a live numeric readout. Connect the heater on the Connections
+        page first. The 79.5 C hold needs a constant-voltage DC base heater on
+        the block (see the tooltip); without it the trim heater rails and
+        limit-cycles.
+        """
+        page = self._page_shell("Heater")
+        subtitle = QtWidgets.QLabel(
+            "Thorlabs TC300B temperature control. <b>Ramp &amp; Hold</b> climbs to the "
+            "target in watchdog-safe steps then holds, showing the live temperature; "
+            "<b>Monitor</b> watches read-only without touching the drive. Connect the "
+            "heater on the Connections page first."
+        )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        page.layout().addWidget(subtitle)
+
+        # --- setpoint / staircase / PID parameters ---
+        self.heater_cfg = self._panel("Setpoint, staircase & PID")
+        grid = QtWidgets.QGridLayout(self.heater_cfg)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+
+        self.heater_ch1_check = QtWidgets.QCheckBox("CH1")
+        self.heater_ch1_check.setChecked(True)
+        self.heater_ch2_check = QtWidgets.QCheckBox("CH2")
+        self.heater_ch2_check.setChecked(True)
+        ch_row = QtWidgets.QHBoxLayout()
+        ch_row.addWidget(self.heater_ch1_check)
+        ch_row.addWidget(self.heater_ch2_check)
+        ch_row.addStretch(1)
+        ch_wrap = QtWidgets.QWidget()
+        ch_wrap.setLayout(ch_row)
+
+        def dspin(lo, hi, val, dec, step, suffix, tip=""):
+            s = QtWidgets.QDoubleSpinBox()
+            s.setRange(lo, hi)
+            s.setDecimals(dec)
+            s.setSingleStep(step)
+            s.setValue(val)
+            if suffix:
+                s.setSuffix(suffix)
+            if tip:
+                s.setToolTip(tip)
+            return s
+
+        pid = HEATER_PID_DEFAULTS.get(1, {"kp": 0.5, "ti": 20.0, "td": 2.0})
+        self.heater_target = dspin(0.0, 200.0, StaircaseSettings.target, 2, 0.5, " \N{DEGREE SIGN}C",
+                                   "Final hold target")
+        self.heater_step = dspin(0.2, 20.0, StaircaseSettings.step, 1, 0.5, " \N{DEGREE SIGN}C",
+                                 "Max staircase step above current temperature")
+        self.heater_rest = dspin(0.0, 30.0, StaircaseSettings.rest, 1, 0.5, " s",
+                                 "Calm dwell at a landing before the next step")
+        self.heater_railmax = dspin(2.0, 22.0, StaircaseSettings.railmax, 1, 1.0, " s",
+                                    "Continuous railed seconds before an emergency EN=0 rest "
+                                    "(keep < ~23 s no-load watchdog)")
+        self.heater_period = dspin(0.1, 5.0, StaircaseSettings.period, 1, 0.1, " s",
+                                   "Loop / sample period")
+        self.heater_kp = dspin(0.0, 100.0, pid["kp"], 2, 0.05, "", "Proportional gain")
+        self.heater_ti = dspin(0.0, 200.0, pid["ti"], 2, 1.0, " s", "Integral time (larger = gentler)")
+        self.heater_td = dspin(0.0, 100.0, pid["td"], 2, 0.5, " s", "Derivative time")
+
+        self.heater_vmax_check = QtWidgets.QCheckBox("Cap VMAX")
+        self.heater_vmax_check.setToolTip("Cap the max drive voltage (unchecked = device max)")
+        self.heater_vmax = dspin(1.0, 24.0, 24.0, 1, 0.5, " V", "Voltage cap when enabled")
+        self.heater_vmax.setEnabled(False)
+        self.heater_vmax_check.toggled.connect(self.heater_vmax.setEnabled)
+
+        self.heater_keep_enabled = QtWidgets.QCheckBox("Leave channels enabled on stop")
+        self.heater_keep_enabled.setToolTip(
+            "Keep the hold running after Stop/Disconnect. The TC300 holds "
+            "autonomously once the link closes, so the block stays hot."
+        )
+        self.heater_history = QtWidgets.QSpinBox()
+        self.heater_history.setRange(10, 100_000)
+        self.heater_history.setValue(1200)
+        self.heater_history.setToolTip("How many recent points to keep on the chart")
+
+        rows = [
+            ("Channels", ch_wrap, "Target", self.heater_target, "Max step", self.heater_step),
+            ("Rest", self.heater_rest, "Rail max", self.heater_railmax, "Period", self.heater_period),
+            ("KP", self.heater_kp, "TI", self.heater_ti, "TD", self.heater_td),
+            (None, self.heater_vmax_check, None, self.heater_vmax, "History", self.heater_history),
+        ]
+        for r, cells in enumerate(rows):
+            for c in range(0, 6, 2):
+                label, widget = cells[c], cells[c + 1]
+                if label is not None:
+                    grid.addWidget(QtWidgets.QLabel(label), r, c)
+                grid.addWidget(widget, r, c + 1)
+        grid.addWidget(self.heater_keep_enabled, 4, 0, 1, 4)
+        grid.setColumnStretch(6, 1)
+        page.layout().addWidget(self.heater_cfg)
+
+        # --- live per-channel numeric readout ---
+        self.heater_readout = QtWidgets.QLabel("\N{EM DASH}")
+        self.heater_readout.setAlignment(QtCore.Qt.AlignCenter)
+        self.heater_readout.setStyleSheet(
+            "font-size: 20px; font-weight: 600; color: #88c0d0; padding: 6px;"
+        )
+        page.layout().addWidget(self._panel_with_widget("Live readout", self.heater_readout))
+
+        # --- controls ---
+        ctrl = QtWidgets.QHBoxLayout()
+        self.heater_run_button = QtWidgets.QPushButton("Ramp & Hold")
+        self.heater_run_button.clicked.connect(self._heater_ramp)
+        self.heater_monitor_button = QtWidgets.QPushButton("Monitor")
+        self.heater_monitor_button.setToolTip("Read-only live monitor (does not change the drive)")
+        self.heater_monitor_button.clicked.connect(self._heater_monitor)
+        self.heater_stop_button = QtWidgets.QPushButton("Stop")
+        self.heater_stop_button.setProperty("variant", "danger")
+        self.heater_stop_button.setEnabled(False)
+        self.heater_stop_button.clicked.connect(self._heater_stop)
+        self.heater_disable_button = QtWidgets.QPushButton("Disable now")
+        self.heater_disable_button.setProperty("variant", "ghost")
+        self.heater_disable_button.setToolTip("Force EN=0 on the selected channels (drive off)")
+        self.heater_disable_button.clicked.connect(self._heater_disable_now)
+        self.heater_save_button = QtWidgets.QPushButton("Save CSV…")
+        self.heater_save_button.setProperty("variant", "ghost")
+        self.heater_save_button.setEnabled(False)
+        self.heater_save_button.clicked.connect(self._heater_save)
+        for b in (self.heater_run_button, self.heater_monitor_button, self.heater_stop_button,
+                  self.heater_disable_button, self.heater_save_button):
+            ctrl.addWidget(b)
+        ctrl.addStretch(1)
+        page.layout().addLayout(ctrl)
+
+        self.heater_page_status = QtWidgets.QLabel("Idle. Connect the heater on the Connections page.")
+        self.heater_page_status.setWordWrap(True)
+        page.layout().addWidget(self.heater_page_status)
+
+        page.layout().addStretch(1)
+        self._heater_refresh_buttons()
+        return page
+
+    def _heater_selected_channels(self) -> list[int]:
+        chs = []
+        if self.heater_ch1_check.isChecked():
+            chs.append(1)
+        if self.heater_ch2_check.isChecked():
+            chs.append(2)
+        return chs
+
+    def _heater_settings(self) -> StaircaseSettings:
+        return StaircaseSettings(
+            target=self.heater_target.value(),
+            step=self.heater_step.value(),
+            rest=self.heater_rest.value(),
+            railmax=self.heater_railmax.value(),
+            vmax=self.heater_vmax.value() if self.heater_vmax_check.isChecked() else None,
+            period=self.heater_period.value(),
+        )
+
+    def _heater_pid_map(self, channels: list[int]) -> dict[int, dict[str, float]]:
+        pid = {"kp": self.heater_kp.value(), "ti": self.heater_ti.value(),
+               "td": self.heater_td.value()}
+        return {ch: dict(pid) for ch in channels}
+
+    def _heater_ready(self) -> TC300Controller | None:
+        heater = self.heater_controller
+        if heater is None or not heater.is_connected:
+            self._log("Connect the heater first (Connections page)")
+            self.heater_page_status.setText("Connect the heater on the Connections page first.")
+            return None
+        return heater
+
+    def _heater_has_data(self) -> bool:
+        return any(self._heater_times[ch] for ch in (1, 2))
+
+    def _heater_refresh_buttons(self) -> None:
+        connected = self.heater_controller is not None
+        running = self.heater_stop_event is not None
+        self.heater_run_button.setEnabled(connected and not running)
+        self.heater_monitor_button.setEnabled(connected and not running)
+        self.heater_disable_button.setEnabled(connected and not running)
+        self.heater_stop_button.setEnabled(connected and running)
+        self.heater_cfg.setEnabled(not running)   # freeze params while a loop runs
+        self.heater_save_button.setEnabled(not running and self._heater_has_data())
+
+    def _heater_reset_history(self) -> None:
+        for ch in (1, 2):
+            self._heater_times[ch] = []
+            self._heater_temps[ch] = []
+            self._heater_volts[ch] = []
+        self.heater_readout.setText("\N{EM DASH}")
+
+    def _heater_ramp(self) -> None:
+        heater = self._heater_ready()
+        if heater is None:
+            return
+        channels = self._heater_selected_channels()
+        if not channels:
+            self.heater_page_status.setText("Select at least one channel.")
+            return
+        settings = self._heater_settings()
+        pid_map = self._heater_pid_map(channels)
+        disable_on_exit = not self.heater_keep_enabled.isChecked()
+        stop_event = threading.Event()
+        self.heater_stop_event = stop_event
+        self._heater_reset_history()
+        self._heater_refresh_buttons()
+        chlbl = "+".join(f"CH{c}" for c in channels)
+        self.heater_page_status.setText(f"Ramping {chlbl} to {settings.target:.2f} \N{DEGREE SIGN}C…")
+
+        def work() -> dict[str, Any]:
+            heater.run_staircase(
+                channels, settings, pid_map=pid_map,
+                sample_cb=self.heater_sample.emit,
+                stop_event=stop_event, disable_on_exit=disable_on_exit,
+            )
+            return {"mode": "ramp", "kept_enabled": not disable_on_exit}
+
+        self._run_task("Heater ramp", work, self._heater_run_done, self._heater_run_error)
+
+    def _heater_monitor(self) -> None:
+        heater = self._heater_ready()
+        if heater is None:
+            return
+        channels = self._heater_selected_channels() or [1, 2]
+        period = self.heater_period.value()
+        stop_event = threading.Event()
+        self.heater_stop_event = stop_event
+        self._heater_reset_history()
+        self._heater_refresh_buttons()
+        chlbl = "+".join(f"CH{c}" for c in channels)
+        self.heater_page_status.setText(f"Monitoring {chlbl} (read-only)…")
+
+        def work() -> dict[str, Any]:
+            heater.monitor(
+                channels, sample_cb=self.heater_sample.emit,
+                stop_event=stop_event, period=period,
+            )
+            return {"mode": "monitor"}
+
+        self._run_task("Heater monitor", work, self._heater_run_done, self._heater_run_error)
+
+    def _heater_stop(self) -> None:
+        if self.heater_stop_event is not None:
+            self.heater_stop_event.set()
+            self.heater_page_status.setText("Stopping…")
+
+    def _heater_disable_now(self) -> None:
+        heater = self._heater_ready()
+        if heater is None:
+            return
+        channels = self._heater_selected_channels() or [1, 2]
+
+        def work() -> dict[str, Any]:
+            for ch in channels:
+                heater.disable(ch)
+            return {"channels": channels}
+
+        self._run_task("Heater disable", work,
+                       lambda _p: self.heater_page_status.setText(
+                           "Selected channels disabled (drive off)."))
+
+    def _heater_run_done(self, payload: dict[str, Any]) -> None:
+        self.heater_stop_event = None
+        self._heater_refresh_buttons()
+        n = sum(len(self._heater_times[ch]) for ch in (1, 2))
+        if (payload or {}).get("kept_enabled"):
+            self.heater_page_status.setText(
+                f"Stopped — channels left enabled (still holding). {n} points recorded.")
+        else:
+            self.heater_page_status.setText(f"Stopped. {n} points recorded.")
+        if self._heater_disconnect_pending:
+            self._heater_do_disconnect()
+
+    def _heater_run_error(self, _error: str) -> None:
+        self.heater_stop_event = None
+        self._heater_refresh_buttons()
+        self.heater_page_status.setText("Heater loop failed (see Status log).")
+        if self._heater_disconnect_pending:
+            self._heater_do_disconnect()
+
+    def _on_heater_sample(self, cycle: HeaterCycle) -> None:
+        """Append one live cycle and redraw (GUI thread, via heater_sample)."""
+        keep = int(self.heater_history.value())
+        parts = []
+        for ch in sorted(cycle.channels):
+            s = cycle.channels[ch]
+            self._heater_times[ch].append(cycle.elapsed)
+            self._heater_temps[ch].append(s.temp if s.temp is not None else float("nan"))
+            self._heater_volts[ch].append(s.volt)
+            if len(self._heater_times[ch]) > keep:
+                self._heater_times[ch] = self._heater_times[ch][-keep:]
+                self._heater_temps[ch] = self._heater_temps[ch][-keep:]
+                self._heater_volts[ch] = self._heater_volts[ch][-keep:]
+            tstr = f"{s.temp:.3f}" if s.temp is not None else "\N{EN DASH}"
+            cstr = f"{s.curr:.0f}" if s.curr is not None else "\N{EN DASH}"
+            parts.append(f"CH{ch}  {tstr} \N{DEGREE SIGN}C   {s.volt:.2f} V   {cstr} mA")
+        err = cycle.err or "0"
+        if err not in ("", "0"):
+            parts.append(f"ERR={err}")
+        self.heater_readout.setText("      ".join(parts))
+
+    def _heater_save(self) -> None:
+        if not self._heater_has_data():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save heater monitor log", "heater_monitor.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            import csv
+
+            with open(path, "w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["channel", "elapsed_s", "temp_C", "volt_V"])
+                for ch in (1, 2):
+                    for t, temp, volt in zip(self._heater_times[ch], self._heater_temps[ch],
+                                             self._heater_volts[ch]):
+                        writer.writerow([ch, f"{t:.3f}", f"{temp:.6g}", f"{volt:.6g}"])
+            self._log(f"Saved heater monitor log → {path}")
+        except Exception as exc:
+            self._log(f"Save failed: {exc}")
+
     # ===================== DAQ live monitor page ========================
     def _build_daq_monitor_page(self) -> QtWidgets.QWidget:
         """Dedicated page: stream the DAQ analog input continuously.
@@ -8819,6 +9238,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.monitor_stop_event.set()
         if self.daq_monitor_stop_event is not None:
             self.daq_monitor_stop_event.set()
+        if self.heater_stop_event is not None:
+            self.heater_stop_event.set()
         if self.scope_controller is not None:
             try:
                 self.scope_controller.disconnect()
@@ -8831,6 +9252,12 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.daq_controller = None
+        if self.heater_controller is not None:
+            try:
+                self.heater_controller.disconnect()
+            except Exception:
+                pass
+            self.heater_controller = None
         super().closeEvent(event)
 
     def _apply_style(self) -> None:
