@@ -80,7 +80,7 @@ from slm_module.tpa_phase import (  # noqa: E402
 CALIB_PATH = REPO_ROOT / "src/calib_data"          # data directory: inputs + outputs live here
 
 # The ONE input: a combined step-7 result JSON (calib_step7_test.py REFIT output).
-IN_STEP7 = CALIB_PATH / "calib_step7_result_0715_1756.json"
+IN_STEP7 = CALIB_PATH / "calib_step7_result_0722_1511.json"  # pairs 3+5 (pair-3 v=0.3 glitch row dropped; pair 7 excluded)
 
 CHANNELS = [1, 3, 5]        # pairs driven together; each needs a step-6 model, and a
                             # step-7 phase unless it IS the reference pair (Phi = 0)
@@ -373,13 +373,13 @@ def analyze(channels, xs, ws, dark_v, mean_v, sem_v, models, phases,
           f"rms = {rms_s*1e3:.4f} mV   "
           "(collapse vs alpha-scaled => amplitude drift, phases fine)")
 
-    make_plot(channels, y, sem_v, pred, inc, pull, alpha, chi2_red, chi2_red_a,
+    make_plot(channels, y, sem_v, pred, pull, alpha, chi2_red, chi2_red_a,
               pred_s=pred_s, chi2_red_s=chi2_red_s,
               method=method, path=png_path)
     print(f"  Plot saved to {png_path}")
 
 
-def make_plot(channels, y, sem, pred, inc, pull, alpha, chi2_red, chi2_red_a,
+def make_plot(channels, y, sem, pred, pull, alpha, chi2_red, chi2_red_a,
               *, pred_s=None, chi2_red_s=None, method: str, path) -> None:
     """Model curve (points sorted by predicted Y) + per-point pulls.
 
@@ -402,8 +402,6 @@ def make_plot(channels, y, sem, pred, inc, pull, alpha, chi2_red, chi2_red_a,
     if pred_s is not None:
         ax1.plot(rank, pred_s[order] * 1e3, "--", color="tab:green", lw=1.2,
                  zorder=2, label=r"per-pair scaled ($s_k$ refit)")
-    ax1.plot(rank, inc[order] * 1e3, ":", color="gray", lw=1.3, zorder=1,
-             label="incoherent (no cross terms)")
     ax1.errorbar(rank, y[order] * 1e3, yerr=sem[order] * 1e3, fmt="o", ms=3.5,
                  color="tab:orange", ecolor="lightgray", elinewidth=0.8, capsize=1.5,
                  zorder=3, label="measured")

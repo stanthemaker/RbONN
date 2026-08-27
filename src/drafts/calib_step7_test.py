@@ -106,13 +106,13 @@ from slm_module.tpa_phase import (  # noqa: E402
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"          # data directory: inputs + outputs live here
 REF_INDEX = 1                                      # common reference pair (Phi = 0)
-TGT_INDICES = [3, 4, 5]                            # target pairs measured vs the reference
+TGT_INDICES = [3, 5, 7]                            # target pairs measured vs the reference
 
 # The ONE input: a combined step-6 result JSON (save_combined_json).  It embeds
 # the raw Step-3 calibration under "step3" (-> channel layout) and every fitted
 # pair under "step6" (-> eta + single-beam background), so the reference + all
 # targets come from this single file -- no separate step-3 import.
-IN_STEP6 = CALIB_PATH / "calib_step6_result_0715_1714.json"  # pairs 1 (ref) + 3,4,5 (targets)
+IN_STEP6 = CALIB_PATH / "calib_step6_result_0722_1336.json"  # pairs 1 (ref) + 3,4,5 (targets)
 
 # ---- The target sweep ----
 # Reference fully on (x_r = w_r = 1); the target's two channels swept TOGETHER

@@ -1,0 +1,2 @@
+timestamp,elapsed_min,daq_mean_mV,daq_sem_mV,osa_peak_wl_nm,osa_peak_uW,spectrum_csv
+2026-08-26T17:59:41,0.00,9.816768,0.000323,777.544,6364.41524,spec_0826_180002.csv
