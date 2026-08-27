@@ -1,19 +1,26 @@
-"""Long-term monitor: DAQ filtered mean + OSA spectrum every 15 minutes.
+"""Long-term monitor: DAQ filtered mean + 2400 resistance + OSA spectrum every 15 minutes.
 
 Each cycle takes the same DAQ reading as ``python src/drafts/daq_read_waveform.py``
-(via :func:`daq_read_waveform.measure`: sign inversion, digital low-pass,
-settle-guard drop, ``n_eff`` SEM) and one OSA sweep with the live-viewer
-parameters (778 nm center, 8 nm span, HIGH2, 1001 points, 10 uW ref, linear W).
+(sign inversion, digital low-pass, settle-guard drop, ``n_eff`` SEM), one
+resistance reading from the Keithley 2400 over GPIB, and one OSA sweep with the
+live-viewer parameters (778 nm center, 8 nm span, HIGH3, 1001 points, 8 uW ref,
+linear W).
 
 Per cycle it appends one row to a master CSV under ``src/calib_data``::
 
-    timestamp, elapsed_min, daq_mean_mV, daq_sem_mV,
+    timestamp, elapsed_min, daq_mean_mV, daq_sem_mV, ohm_Ohm,
     osa_peak_wl_nm, osa_peak_uW, spectrum_csv
 
 and saves the full OSA spectrum to its own CSV inside a run folder next to the
-master file.  DAQ and OSA are measured independently: if one fails that cycle
-its columns are left blank and the loop keeps going.  The OSA connection is
-opened fresh every cycle so a dropped TCP link never kills an overnight run.
+master file.  Read the run back with ``plot_osa_monitor.py``.
+
+The cycle loop, CSV logging and per-instrument failure isolation live in
+:mod:`monitor_lib`: DAQ, 2400 and OSA are measured independently, so if one
+fails that cycle its columns are left blank and the loop keeps going.  The OSA
+and 2400 connections are opened fresh every cycle so a dropped link never kills
+an overnight run, and the 2400 output is ON only for the ~1 s of its reading, so
+the DUT is not driven (or self-heated) between cycles.  Set ``K2400_RESOURCE``
+to ``None`` to run without the 2400.
 
 Needs real hardware.  Runs until Ctrl+C::
 
@@ -21,9 +28,7 @@ Needs real hardware.  Runs until Ctrl+C::
 """
 from __future__ import annotations
 
-import csv
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -35,9 +40,31 @@ if str(REPO_SRC) not in sys.path:
 
 from osa_module.controller import MeasurementSettings, OSAController, TraceData  # noqa: E402
 
-from daq_read_waveform import measure as daq_measure  # noqa: E402
+from keithley_2400_read_ohm import fmt_ohm  # noqa: E402
+from monitor_lib import (  # noqa: E402
+    OUT_DIR,
+    Probe,
+    RunLog,
+    columns_for,
+    daq_measure,
+    read_ohm_2400,
+    run_monitor,
+)
 
+PREFIX = "daq_osa_monitor"
 INTERVAL_S = 15 * 60
+
+# DAQ: analog input carrying the TIA signal.  Every other acquisition knob
+# (rate, window, range, cutoffs, inversion) comes from daq_read_waveform.py.
+DAQ_CHANNEL = "ai0"
+
+# Keithley 2400 (see keithley_2400_read_ohm.py for the knobs); None skips it.
+K2400_RESOURCE: str | None = "GPIB0::21::INSTR"
+K2400_FOUR_WIRE = False
+K2400_NPLC = 10.0                    # slowest integration = quietest reading (~0.2 s)
+K2400_CURRENT: float | None = None   # None -> auto ohms; else source this many amps
+K2400_COMPLIANCE = 21.0              # manual ohms only: voltage limit (V)
+K2400_TIMEOUT_S = 10.0
 
 OSA_HOST = "192.168.1.11"
 OSA_PORT = 10001
@@ -52,93 +79,62 @@ OSA_SETTINGS = MeasurementSettings(
     reference_level="8uW",
 )
 
-OUT_DIR = Path(__file__).resolve().parents[1] / "calib_data"
+
+def read_daq() -> tuple[list, str]:
+    """Filtered mean and its SEM on ``DAQ_CHANNEL``, in mV."""
+    (mean_v, sem_v), = daq_measure([DAQ_CHANNEL])
+    mean_mv = round(abs(mean_v) * 1000.0, 6)
+    sem_mv = round(sem_v * 1000.0, 6)
+    return [mean_mv, sem_mv], f"daq mean={mean_mv:.4f} mV sem={sem_mv:.4f} mV"
 
 
-def read_osa(spectra_dir: Path) -> tuple[float, float, Path]:
-    """One sweep -> (peak wavelength nm, peak power uW, saved spectrum path)."""
+def read_ohm() -> tuple[list, str]:
+    """One 2400 resistance reading, or a blank cell when the 2400 is disabled."""
+    if K2400_RESOURCE is None:
+        return [""], ""
+    ohm = read_ohm_2400(
+        K2400_RESOURCE,
+        four_wire=K2400_FOUR_WIRE,
+        nplc=K2400_NPLC,
+        current=K2400_CURRENT,
+        compliance=K2400_COMPLIANCE,
+        timeout_s=K2400_TIMEOUT_S,
+    )
+    return [ohm], f"R={fmt_ohm(ohm)}"
+
+
+def read_osa(spectra_dir: Path) -> tuple[list, str]:
+    """One sweep: peak wavelength / peak power, and the full trace to its own CSV."""
     with OSAController(host=OSA_HOST, port=OSA_PORT) as osa:
         trace: TraceData = osa.measure(OSA_SETTINGS, averages=OSA_AVERAGES)
     peak = int(np.argmax(trace.powers))
     peak_wl_nm = float(trace.wavelengths_nm[peak])
     peak_uw = float(trace.powers[peak]) * 1e6  # linear W -> uW
-    spec_csv = spectra_dir / f"spec_{datetime.now():%m%d_%H%M%S}.csv"
+    stamp = datetime.now().strftime("%m%d_%H%M%S")
+    spec_csv = spectra_dir / f"spec_{stamp}.csv"
+    dup = 1
+    while spec_csv.exists():  # the name is second-granular: never clobber a sweep
+        spec_csv = spectra_dir / f"spec_{stamp}_{dup}.csv"
+        dup += 1
     trace.to_csv(spec_csv)
-    return peak_wl_nm, peak_uw, spec_csv
+    return (
+        [peak_wl_nm, peak_uw, spec_csv.name],
+        f"osa peak={peak_uw:.1f} uW @ {peak_wl_nm:.4f} nm",
+    )
 
 
 def main() -> None:
-    stamp = datetime.now().strftime("%m%d_%H%M")
-    out_csv = OUT_DIR / f"daq_osa_monitor_{stamp}.csv"
-    spectra_dir = OUT_DIR / f"daq_osa_monitor_{stamp}"
-    spectra_dir.mkdir(parents=True, exist_ok=True)
-
-    with out_csv.open("w", newline="") as f:
-        csv.writer(f).writerow(
-            [
-                "timestamp",
-                "elapsed_min",
-                "daq_mean_mV",
-                "daq_sem_mV",
-                "osa_peak_wl_nm",
-                "osa_peak_uW",
-                "spectrum_csv",
-            ]
-        )
-
-    print(f"measuring every {INTERVAL_S / 60:g} min until Ctrl+C")
-    print(f"log      -> {out_csv}")
-    print(f"spectra  -> {spectra_dir}")
-
-    t0 = time.monotonic()
-    cycle = 0
-    try:
-        while True:
-            now = datetime.now()
-            elapsed_min = (time.monotonic() - t0) / 60.0
-
-            daq_mean_mv: float | str = ""
-            daq_sem_mv: float | str = ""
-            try:
-                mean_v, sem_v = daq_measure()
-                daq_mean_mv = round(abs(mean_v) * 1000.0, 6)
-                daq_sem_mv = round(sem_v * 1000.0, 6)
-                daq_txt = f"daq mean={daq_mean_mv:.4f} mV sem={daq_sem_mv:.4f} mV"
-            except Exception as exc:
-                daq_txt = f"daq FAILED ({exc})"
-
-            peak_wl: float | str = ""
-            peak_uw: float | str = ""
-            spec_name = ""
-            try:
-                peak_wl, peak_uw, spec_csv = read_osa(spectra_dir)
-                spec_name = spec_csv.name
-                osa_txt = f"osa peak={peak_uw:.1f} uW @ {peak_wl:.4f} nm"
-            except Exception as exc:
-                osa_txt = f"osa FAILED ({exc})"
-
-            with out_csv.open("a", newline="") as f:
-                csv.writer(f).writerow(
-                    [
-                        now.isoformat(timespec="seconds"),
-                        f"{elapsed_min:.2f}",
-                        daq_mean_mv,
-                        daq_sem_mv,
-                        peak_wl,
-                        peak_uw,
-                        spec_name,
-                    ]
-                )
-
-            cycle += 1
-            print(f"[{now:%m-%d %H:%M:%S}] cycle {cycle:3d}  {daq_txt}  |  {osa_txt}")
-
-            # sleep to the next slot on the 15-min grid (never drifts with
-            # measurement duration; if a cycle overran, fire immediately)
-            next_due = t0 + cycle * INTERVAL_S
-            time.sleep(max(0.0, next_due - time.monotonic()))
-    except KeyboardInterrupt:
-        print(f"\nstopped after {cycle} cycles; log -> {out_csv}")
+    ohm_src = "no 2400" if K2400_RESOURCE is None else f"2400 @ {K2400_RESOURCE}"
+    probes = [
+        Probe(f"DAQ {DAQ_CHANNEL}", ("daq_mean_mV", "daq_sem_mV"), read_daq),
+        Probe(ohm_src, ("ohm_Ohm",), read_ohm),
+        # bound late: the run folder only exists once RunLog has made it
+        Probe("OSA", ("osa_peak_wl_nm", "osa_peak_uW", "spectrum_csv"),
+              lambda: read_osa(log.run_dir)),
+    ]
+    log = RunLog.create(PREFIX, columns_for(probes), out_dir=OUT_DIR, with_run_dir=True)
+    run_monitor(probes, interval_s=INTERVAL_S, log=log,
+                extra_banner=[f"spectra  -> {log.run_dir}"])
 
 
 if __name__ == "__main__":

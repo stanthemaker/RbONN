@@ -52,7 +52,8 @@ from daq_module import DAQMonitorSettings, NIDAQDriver, lowpass  # noqa: E402
 # board (see NI-MAX).
 _DEFAULTS = DAQMonitorSettings()
 DEVICE = "Dev1"
-CHANNEL = _DEFAULTS.channel
+CHANNEL = "ai0"
+# CHANNEL = _DEFAULTS.channel
 # Hardware vs digital cutoff: F_CUT_HW is the analog low-pass already in the
 # signal chain (detector/TIA 3 dB bandwidth) -- it sets the true noise
 # bandwidth of what reaches the DAQ.  F_CUT_DIG is the software Butterworth
