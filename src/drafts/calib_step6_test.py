@@ -28,6 +28,9 @@ line per fit term rather than the full 2-D grid, ``N_SWEEP_POINTS`` points each:
   * one shared dark (0, 0) point anchors the offset d
 
 with every other channel held off, recording the DAQ reading at each point.
+The points run in REVERSE build order -- brightest first: (x=1, w=1) opens
+each pair's sweep (so a dead/blocked signal shows on the first point) and
+the shared dark (0, 0) point closes it.  Order does not affect the fit.
 
 Each point is one fixed-duration ``daq_module`` acquisition (the same
 ``DAQController.monitor_cycle`` read the GUI pipeline uses): acquisition time
@@ -76,11 +79,11 @@ from slm_module.tpa_pair import (  # noqa: E402
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"  # data directory: inputs + outputs live here
 
-PAIR_INDICES = [1,3,4,5]                           # near (cols 660/680) + far (cols 600/740)
+PAIR_INDICES = [1,3,5,7]                          
 SWEEP_MIN = 0.1                                # min per-side intensity in the ramp (0..1)
 SWEEP_MAX = 1.0                                 # max per-side intensity in the ramp (0..1)
 N_SWEEP_POINTS = 10                              # points per 1-D curve (x-only / w-only / cross)
-IN_STEP3 = CALIB_PATH / "calib_step3b_0714_1534.json"    # Step 3 calib (near pair 0 + far pair 3)
+IN_STEP3 = CALIB_PATH / "calib_step3b_0721_1615.json"    # Step 3 calib (near pair 0 + far pair 3)
 
 SLM_DISPLAY_NO = None           # None -> auto-detect the LCOS-SLM display (like the GUI's Detect)
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch (USB link)
@@ -93,7 +96,7 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
-T_SINGLE_S = 10.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
+T_SINGLE_S = 8.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
 T_BOTH_S = 5.0                  # both beams on (the bright cross points) (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
@@ -342,9 +345,11 @@ def sweep_and_fit() -> None:
     layout = _load_layout()
 
     sweep = build_sweep(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)  # ramp recorded on result
-    points = build_pair_points(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)
-    print(f"Reduced sweep: {len(points)} points/pair "
-          f"(x-only + w-only + cross @ {N_SWEEP_POINTS} each + dark)")
+    # reversed: brightest first -- (1, 1) opens the sweep so a dead/blocked
+    # signal is visible on the very first point; the shared dark ends the run
+    points = build_pair_points(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)[::-1]
+    print(f"Reduced sweep: {len(points)} points/pair, brightest first "
+          f"(cross @ x=1 desc -> w-only desc -> x-only desc -> dark)")
     slm = connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
     daq = connect_daq(device=DAQ_DEVICE, channel=DAQ_CHANNEL,
                       t_both=T_BOTH_S, t_single=T_SINGLE_S)
@@ -508,9 +513,10 @@ def measure_only() -> None:
     layout = _load_layout()
 
     sweep = build_sweep(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)   # recorded on the result
-    points = build_pair_points(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)
-    print(f"Meas (no fit): {len(points)} points/pair "
-          f"(x-only + w-only + cross @ {N_SWEEP_POINTS} each + dark), pairs {list(PAIR_INDICES)}")
+    # reversed: brightest first, same order as sweep_and_fit (dark point last)
+    points = build_pair_points(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS)[::-1]
+    print(f"Meas (no fit): {len(points)} points/pair, brightest first "
+          f"(cross @ x=1 desc -> w-only desc -> x-only desc -> dark), pairs {list(PAIR_INDICES)}")
     slm = connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
     daq = connect_daq(device=DAQ_DEVICE, channel=DAQ_CHANNEL,
                       t_both=T_BOTH_S, t_single=T_SINGLE_S)
