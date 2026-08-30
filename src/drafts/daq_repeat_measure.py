@@ -2,7 +2,7 @@
 
 Runs the exact same acquisition + processing chain as
 ``python src/drafts/daq_read_waveform.py`` (same module-level constants: sign
-inversion, digital low-pass at ``F_CUT_DIG``, settle-guard drop, ``n_eff``
+inversion, digital low-pass at ``F_CUT_DIG``, settle-guard drop, mean/std
 statistics) via :func:`daq_read_waveform.measure`, but repeats it ``N_RUNS``
 times back to back.  Each run prints its ``filtered: mean=... mV`` line; all
 runs are saved to a timestamped CSV under ``src/calib_data`` and summarized
@@ -37,15 +37,15 @@ def main() -> None:
     means_mv: list[float] = []
     rows: list[tuple[int, float, float]] = []
     for i in range(1, N_RUNS + 1):
-        mean_v, sem_v = measure()
-        mean_mv, sem_mv = abs(mean_v) * 1000.0, sem_v * 1000.0
+        mean_v, std_v = measure()
+        mean_mv, std_mv = abs(mean_v) * 1000.0, std_v * 1000.0
         means_mv.append(mean_mv)
-        rows.append((i, mean_mv, sem_mv))
-        print(f"run {i:2d}/{N_RUNS}  filtered: mean={mean_mv:.4f} mV, sem={sem_mv:.4f} mV")
+        rows.append((i, mean_mv, std_mv))
+        print(f"run {i:2d}/{N_RUNS}  filtered: mean={mean_mv:.4f} mV, std={std_mv:.4f} mV")
 
     with out_csv.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["run", "filtered_mean_mV", "filtered_sem_mV"])
+        writer.writerow(["run", "filtered_mean_mV", "filtered_std_mV"])
         writer.writerows(rows)
 
     m = np.asarray(means_mv)

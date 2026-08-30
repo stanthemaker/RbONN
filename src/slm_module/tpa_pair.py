@@ -23,8 +23,10 @@ The measurement is instrument-agnostic: it drives an SLM (``get_slm_info`` +
 ``MonitorSample`` and caching the raw waveform on ``last_values``).  Each grid
 point is read ONCE over a long fixed window -- T_single (``x == 0 or w == 0``,
 the weak single-beam and dark points) or T_both (both beams on) on the DAQ --
-and weighted by the instrument-reported SEM; the per-parameter errors are
-Birge-scaled when chi2/dof > 1 so the reported eta uncertainty is honest.
+and weighted by the instrument-reported trace STD.  The std is used as measured,
+undivided by any effective-N: the low-passed samples are correlated, so a
+standard error of the mean derived from them would claim an uncertainty far
+below the scatter actually seen between repeats.
 
 Raw rows are persisted as a CSV (one row per grid point; the ``trial`` column
 is kept so multi-trial CSVs from older runs still load) matching the
@@ -70,16 +72,13 @@ class PairFit:
 
     eta: float
     eta_err: float
-    params: dict[str, tuple[float, float]]   # name -> (value, Birge-scaled err)
-    chi2_red: float
-    dof: int
-    birge: float
+    params: dict[str, tuple[float, float]]   # name -> (value, err)
     r2: float
     # averaged-cell arrays the fit ran on (kept for plotting)
     x: np.ndarray = field(repr=False)
     w: np.ndarray = field(repr=False)
     y: np.ndarray = field(repr=False)
-    sem: np.ndarray = field(repr=False)
+    std: np.ndarray = field(repr=False)
     y_pred: np.ndarray = field(repr=False)
     residuals: np.ndarray = field(repr=False)
 
@@ -99,8 +98,7 @@ class ChannelPairGrid:
     x: np.ndarray = field(repr=False)
     w: np.ndarray = field(repr=False)
     voltage_mean_v: np.ndarray = field(repr=False)
-    voltage_std_v: np.ndarray = field(repr=False)   # raw low-passed trace std (diagnostic)
-    voltage_sem_v: np.ndarray = field(repr=False)    # SEM of the mean -> the fit weight
+    voltage_std_v: np.ndarray = field(repr=False)   # low-passed trace std -> the fit weight
     fit: PairFit | None = None
 
 
@@ -135,63 +133,64 @@ def average_cells(
     x: np.ndarray,
     w: np.ndarray,
     y: np.ndarray,
-    sem: np.ndarray | None = None,
+    std: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Average repeated trials per (x, w) cell -> x, w, y, sem arrays.
+    """Average repeated trials per (x, w) cell -> x, w, y, std arrays.
 
-    ``sem`` (returned) is the standard error of the mean across trials for a cell
-    (std/sqrt(n)) when it was measured more than once.  A cell measured only
-    once has no across-trial spread, so it falls back to the recorded per-point
-    SEM ``sem`` (the DAQ's reported standard error of the mean stored alongside
-    each row) when available -- that is the real per-point uncertainty and keeps
-    the weighted fit meaningful even with ``n_trials == 1`` (otherwise every cell
-    would be floored to a bogus 1.0 V, flattening the fit).  A cell with neither
-    repeats nor a recorded SEM is floored to the median positive sem so the
-    weighted fit never divides by zero/NaN.
+    ``std`` (returned) is the across-trial standard deviation for a cell when it
+    was measured more than once -- the spread as measured, NOT divided by
+    sqrt(n).  A cell measured only once has no across-trial spread, so it falls
+    back to the recorded per-point ``std`` (the instrument's reported trace
+    spread stored alongside each row) when available -- that keeps the weighted
+    fit meaningful even with ``n_trials == 1`` (otherwise every cell would be
+    floored to a bogus 1.0 V, flattening the fit).  A cell with neither repeats
+    nor a recorded std is floored to the median positive std so the weighted fit
+    never divides by zero/NaN.
     """
     ycells: dict[tuple[float, float], list[float]] = defaultdict(list)
     scells: dict[tuple[float, float], list[float]] = defaultdict(list)
-    sem_arr = np.asarray(sem, dtype=float) if sem is not None else None
+    std_arr = np.asarray(std, dtype=float) if std is not None else None
     for idx, (cx, cw, cy) in enumerate(zip(np.asarray(x), np.asarray(w), np.asarray(y))):
         key = (float(cx), float(cw))
         ycells[key].append(float(cy))
-        if sem_arr is not None:
-            scells[key].append(float(sem_arr[idx]))
+        if std_arr is not None:
+            scells[key].append(float(std_arr[idx]))
 
-    cx_out, cw_out, cy_out, csem_out = [], [], [], []
+    cx_out, cw_out, cy_out, cstd_out = [], [], [], []
     for (cx, cw), vals in sorted(ycells.items()):
         arr = np.asarray(vals, dtype=float)
         cx_out.append(cx)
         cw_out.append(cw)
         cy_out.append(arr.mean())
         if arr.size > 1:
-            csem_out.append(arr.std(ddof=1) / np.sqrt(arr.size))   # across-trial spread
+            cstd_out.append(arr.std(ddof=1))                        # across-trial spread
         else:
-            rec = np.asarray(scells[(cx, cw)], dtype=float)         # recorded per-point SEM
+            rec = np.asarray(scells[(cx, cw)], dtype=float)         # recorded per-point std
             rec = rec[np.isfinite(rec) & (rec > 0)]
-            csem_out.append(float(rec.mean()) if rec.size else np.nan)
+            cstd_out.append(float(rec.mean()) if rec.size else np.nan)
 
     xs = np.asarray(cx_out)
     ws = np.asarray(cw_out)
     ys = np.asarray(cy_out)
-    sem = np.asarray(csem_out)
+    std = np.asarray(cstd_out)
 
-    # Floor missing/degenerate errors so weighting never divides by zero/NaN.
-    finite = sem[np.isfinite(sem) & (sem > 0)]
+    # Floor missing/degenerate spreads so weighting never divides by zero/NaN.
+    finite = std[np.isfinite(std) & (std > 0)]
     floor = float(np.median(finite)) if finite.size else 1.0
-    sem = np.where(np.isfinite(sem) & (sem > 0), sem, floor)
-    return xs, ws, ys, sem
+    std = np.where(np.isfinite(std) & (std > 0), std, floor)
+    return xs, ws, ys, std
 
 
 def fit_cells(
-    x: np.ndarray, w: np.ndarray, y: np.ndarray, sem: np.ndarray,
+    x: np.ndarray, w: np.ndarray, y: np.ndarray, std: np.ndarray,
     *, drop_q: bool = False,
 ) -> PairFit:
     """Weighted least-squares fit of averaged cells to the TPA model.
 
-    Errors are Birge-scaled by ``sqrt(chi2/dof)`` when chi2/dof > 1 so unmodeled
-    reproducibility scatter inflates the reported uncertainties.  ``eta`` is
-    recovered as ``sqrt(b)`` with propagated error ``b_err/(2*sqrt(b))``.
+    Cells are weighted by ``1/std`` and the parameter errors come straight from
+    the weighted covariance -- there is no chi2/dof goodness-of-fit number and
+    no Birge rescaling of the errors.  ``eta`` is recovered as ``sqrt(b)`` with
+    propagated error ``b_err/(2*sqrt(b))``.
 
     ``drop_q=True`` drops the ``q_x``/``q_w`` saturation columns and fits the
     purely linear background ``Y = b*(x*w) + a_x*x + a_w*w + d`` (the a's then
@@ -202,7 +201,7 @@ def fit_cells(
     x = np.asarray(x, dtype=float)
     w = np.asarray(w, dtype=float)
     y = np.asarray(y, dtype=float)
-    sem = np.asarray(sem, dtype=float)
+    std = np.asarray(std, dtype=float)
 
     A = design_matrix(x, w)
     names: tuple[str, ...] = PARAMS
@@ -210,16 +209,13 @@ def fit_cells(
         keep = [i for i, n in enumerate(PARAMS) if n not in ("q_x", "q_w")]
         A = A[:, keep]
         names = tuple(PARAMS[i] for i in keep)
-    Aw = A / sem[:, None]
-    coeffs, *_ = np.linalg.lstsq(Aw, y / sem, rcond=None)
+    Aw = A / std[:, None]
+    coeffs, *_ = np.linalg.lstsq(Aw, y / std, rcond=None)
     cov = np.linalg.inv(Aw.T @ Aw)
 
     y_pred = A @ coeffs
     residuals = y - y_pred
-    dof = max(len(y) - len(coeffs), 1)
-    chi2_red = float(np.sum((residuals / sem) ** 2) / dof)
-    birge = max(1.0, np.sqrt(chi2_red))
-    errs = np.sqrt(np.diag(cov)) * birge
+    errs = np.sqrt(np.diag(cov))
 
     params = {name: (float(v), float(e)) for name, v, e in zip(names, coeffs, errs)}
     if drop_q:
@@ -237,18 +233,17 @@ def fit_cells(
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
     return PairFit(
-        eta=eta, eta_err=eta_err, params=params,
-        chi2_red=chi2_red, dof=dof, birge=birge, r2=r2,
-        x=x, w=w, y=y, sem=sem, y_pred=y_pred, residuals=residuals,
+        eta=eta, eta_err=eta_err, params=params, r2=r2,
+        x=x, w=w, y=y, std=std, y_pred=y_pred, residuals=residuals,
     )
 
 
 def fit_grid(grid: ChannelPairGrid, *, drop_q: bool = False) -> PairFit:
     """Average a pair's raw trials into cells, fit them, and store the fit."""
-    xs, ws, ys, sem = average_cells(
-        grid.trial, grid.x, grid.w, grid.voltage_mean_v, grid.voltage_sem_v
+    xs, ws, ys, std = average_cells(
+        grid.trial, grid.x, grid.w, grid.voltage_mean_v, grid.voltage_std_v
     )
-    grid.fit = fit_cells(xs, ws, ys, sem, drop_q=drop_q)
+    grid.fit = fit_cells(xs, ws, ys, std, drop_q=drop_q)
     return grid.fit
 
 
@@ -264,18 +259,14 @@ def recompute_fits(result: TPAPairResult) -> TPAPairResult:
 
 def _read_mean_std(
     monitor, timeout: float = 30.0, single: bool = False
-) -> tuple[float, float, float]:
-    """One averaged reading, its raw trace std, and the per-point SEM of the mean.
+) -> tuple[float, float]:
+    """One averaged reading and its trace std -> ``(mean, std)``.
 
-    Returns ``(mean, std, sem)``.  ``std`` is the raw (low-passed) trace spread,
-    kept for diagnostics; ``sem`` is the standard error of the mean and is what
-    the fit weights by.  The DAQ path reports ``sample.sem`` directly (spread
-    divided by the effective independent-sample count ``2 * duration * f_cut``);
-    monitors that don't report one (e.g. the scope) fall back to the raw-waveform
-    std on ``last_values`` for both.  ``single`` marks a weak point -- at most
-    one beam on (``x == 0 or w == 0``, including the all-off dark): the DAQ
-    reads it over its longer T_single window (``single_duration``); the scope
-    ignores the flag.
+    ``std`` is the (low-passed) trace spread the monitor reports and is what the
+    fit weights by; monitors that don't report one fall back to the raw-waveform
+    std on ``last_values``.  ``single`` marks a weak point -- at most one beam on
+    (``x == 0 or w == 0``, including the all-off dark): the DAQ reads it over its
+    longer T_single window (``single_duration``); the scope ignores the flag.
     """
     sample = monitor.monitor_cycle(timeout=timeout, single=single)
     if sample is None:
@@ -288,12 +279,7 @@ def _read_mean_std(
         else (float(np.std(waveform)) if waveform is not None and np.size(waveform) > 1
               else 0.0)
     )
-    sem = getattr(sample, "sem", None)
-    if sem is not None and np.isfinite(sem):
-        sem_v = float(sem)                                     # SEM of the mean (DAQ)
-    else:
-        sem_v = std_v                                          # scope: no effective-N -> raw std
-    return mean_v, std_v, sem_v
+    return mean_v, std_v
 
 
 def build_sweep(sweep_min: float, sweep_max: float, n_points: int) -> np.ndarray:
@@ -415,10 +401,8 @@ def measure_pair_grids(
             if settle:
                 time.sleep(settle)
             single = x_val == 0.0 or w_val == 0.0       # at most one beam on
-            mean_v, std_v, sem_v = _read_mean_std(
-                monitor, read_timeout, single=single
-            )
-            rows[i].append((0, x_val, w_val, mean_v, std_v, sem_v))
+            mean_v, std_v = _read_mean_std(monitor, read_timeout, single=single)
+            rows[i].append((0, x_val, w_val, mean_v, std_v))
             step += 1
             if progress_callback is not None:
                 progress_callback(
@@ -450,7 +434,6 @@ def measure_pair_grids(
             w=np.array([r[2] for r in data], dtype=float),
             voltage_mean_v=np.array([r[3] for r in data], dtype=float),
             voltage_std_v=np.array([r[4] for r in data], dtype=float),
-            voltage_sem_v=np.array([r[5] for r in data], dtype=float),
         )
         fit_grid(grid)
         channels.append(grid)
@@ -475,19 +458,18 @@ def measure_pair_grids(
 
 _CSV_HEADER = [
     "trial", "pair_index", "x", "w", "product",
-    "voltage_mean_v", "voltage_std_v", "voltage_sem_v", "sem_ratio",
+    "voltage_mean_v", "voltage_std_v", "std_ratio",
 ]
 
 
 def write_tpa_pair_csv(result: TPAPairResult, path: str | Path) -> str:
     """Raw rows: one line per (trial, pair, grid point).  Round-trips via load.
 
-    ``voltage_std_v`` is the raw low-passed trace spread (diagnostic);
-    ``voltage_sem_v`` is the standard error of the mean the fit weights by; and
-    ``sem_ratio`` = sem/|mean| is derived per row for at-a-glance measurement
-    quality (recomputed on load, so :func:`load_tpa_pair_csv` ignores it).  With
-    per-point durations the std and sem are not related by a single fixed
-    ``n_eff``, so both are recorded explicitly.
+    ``voltage_std_v`` is the low-passed trace spread the fit weights by, and
+    ``std_ratio`` = std/|mean| is derived per row for at-a-glance measurement
+    quality (recomputed on load, so :func:`load_tpa_pair_csv` ignores it).
+    Legacy CSVs carrying the retired ``voltage_sem_v``/``sem_ratio`` columns
+    still load -- those columns are simply ignored.
     """
     out = Path(path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -495,14 +477,13 @@ def write_tpa_pair_csv(result: TPAPairResult, path: str | Path) -> str:
         writer = csv.writer(f)
         writer.writerow(_CSV_HEADER)
         for grid in result.channels:
-            for t, x, w, mean_v, std_v, sem_v in zip(
-                grid.trial, grid.x, grid.w, grid.voltage_mean_v,
-                grid.voltage_std_v, grid.voltage_sem_v,
+            for t, x, w, mean_v, std_v in zip(
+                grid.trial, grid.x, grid.w, grid.voltage_mean_v, grid.voltage_std_v,
             ):
-                ratio = abs(sem_v / mean_v) if mean_v else float("inf")
+                ratio = abs(std_v / mean_v) if mean_v else float("inf")
                 writer.writerow(
                     [int(t), grid.index, f"{x:.6g}", f"{w:.6g}", f"{x*w:.6g}",
-                     f"{mean_v:.9g}", f"{std_v:.9g}", f"{sem_v:.9g}", f"{ratio:.6g}"]
+                     f"{mean_v:.9g}", f"{std_v:.9g}", f"{ratio:.6g}"]
                 )
     result.csv_path = str(out)
     return str(out)
@@ -518,12 +499,11 @@ def load_tpa_pair_csv(
     Wavelengths are recovered from ``layout`` when supplied (the CSV carries only
     x/w/voltage), otherwise left as NaN.
     """
-    grouped: dict[int, list[tuple[int, float, float, float, float, float]]] = defaultdict(list)
+    grouped: dict[int, list[tuple[int, float, float, float, float]]] = defaultdict(list)
     with open(Path(path), newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             idx = int(float(row["pair_index"]))
-            std_v = float(row.get("voltage_std_v", "nan") or "nan")
-            sem_v = float(row["voltage_sem_v"])  # the fit weight; every CSV records it
+            std_v = float(row["voltage_std_v"])  # the fit weight; every CSV records it
             grouped[idx].append(
                 (
                     int(float(row.get("trial", 0))),
@@ -531,7 +511,6 @@ def load_tpa_pair_csv(
                     float(row["w"]),
                     float(row["voltage_mean_v"]),
                     std_v,
-                    sem_v,
                 )
             )
 
@@ -560,7 +539,6 @@ def load_tpa_pair_csv(
             trial=trials, x=xs, w=ws,
             voltage_mean_v=np.array([r[3] for r in data], dtype=float),
             voltage_std_v=np.array([r[4] for r in data], dtype=float),
-            voltage_sem_v=np.array([r[5] for r in data], dtype=float),
         )
         fit_grid(grid)
         channels.append(grid)
@@ -586,9 +564,6 @@ def save_tpa_pair_json(result: TPAPairResult, path: str | Path) -> str:
             "eta": fit.eta,
             "eta_err": fit.eta_err,
             "params": {k: {"value": v[0], "err": v[1]} for k, v in fit.params.items()},
-            "chi2_red": fit.chi2_red,
-            "dof": fit.dof,
-            "birge": fit.birge,
             "r2": fit.r2,
         }
 

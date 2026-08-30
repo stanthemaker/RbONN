@@ -25,7 +25,7 @@ def plot_fringe(fig, fit, tgt: int) -> None:
     ax1, ax2 = fig.subplots(1, 2)
 
     dphi = np.degrees(fit.dphi_slm)             # theta2 - 180 deg
-    pulls = fit.residuals / fit.sem
+    pulls = fit.residuals / fit.std
 
     # smooth model over the reachable half turn theta2 in [0, 180] deg
     th = np.radians(np.linspace(0.0, 180.0, 400))
@@ -36,7 +36,7 @@ def plot_fringe(fig, fit, tgt: int) -> None:
              + fit.bg0 + fit.bg1 * g + fit.bg2 * g**2 + fit.offset)
     ax1.plot(np.degrees(dslm), model * 1e3, "-", color="tab:blue", lw=1.6,
              label=r"fit: $a^2+b^2\sin^4+2ab\sin^2\cos+\mathrm{sb}(\theta_2)$")
-    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.sem * 1e3, fmt="o", ms=5,
+    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.std * 1e3, fmt="o", ms=5,
                  color="tab:orange", ecolor="lightgray", elinewidth=1,
                  capsize=2, zorder=3, label="measured (dark-subtracted)")
     ax1.set_xlabel(r"$\Delta\Phi_{SLM} = \theta_2 - 180^\circ$  (deg)")
@@ -48,8 +48,8 @@ def plot_fringe(fig, fit, tgt: int) -> None:
     ax2.axhline(0, color="gray", ls="--", lw=1)
     ax2.scatter(dphi, pulls, c="tab:red", s=40, edgecolor="k", lw=0.4)
     ax2.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax2.set_ylabel("Pull = residual / SEM")
-    ax2.set_title(f"Pulls  ($\\chi^2$/dof = {fit.chi2_red:.2f})")
+    ax2.set_ylabel("Pull = residual / std")
+    ax2.set_title("Pulls")
     ax2.legend(loc="upper right", fontsize=8)
 
     bflag = (("  [a@bound]" if fit.a_at_bound else "")
@@ -61,7 +61,7 @@ def plot_fringe(fig, fit, tgt: int) -> None:
         f"a = {fit.a*1e3:.3f} ($\\eta$ {fit.eta_ref*1e3:.3f}), "
         f"b = {fit.b*1e3:.3f} ($\\eta$ {fit.eta_tgt*1e3:.3f}) mV$^{{1/2}}${bflag}\n"
         f"d = {fit.offset*1e3:+.3f} mV  (should be $\\approx$0)\n"
-        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})"
+        f"R$^2$ = {fit.r2:.4f}"
     )
     ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
@@ -88,8 +88,8 @@ def plot_report(fig, result, tgt: int, ref: int, *, subtitle: str = "") -> None:
     x_t, w_t, _x_r, _w_r, _, _ = _average_points(result)
     y_meas = fit.y
     y_pred = fit.y_pred
-    sem = fit.sem
-    pulls = fit.residuals / sem
+    std = fit.std
+    pulls = fit.residuals / std
     diag = np.abs(x_t - w_t) < 1e-6                     # phi^x = phi^w
     off = ~diag
     xw = x_t * w_t
@@ -101,7 +101,7 @@ def plot_report(fig, result, tgt: int, ref: int, *, subtitle: str = "") -> None:
     pad = 0.03 * ((lims[1] - lims[0]) or 1.0)
     lims = [lims[0] - pad, lims[1] + pad]
     ax1.plot(lims, lims, "--", color="gray", lw=1, label="ideal")
-    ax1.errorbar(y_meas * 1e3, y_pred * 1e3, xerr=sem * 1e3, fmt="none",
+    ax1.errorbar(y_meas * 1e3, y_pred * 1e3, xerr=std * 1e3, fmt="none",
                  ecolor="lightgray", elinewidth=1, zorder=1)
     sc = None
     if off.any():
@@ -132,8 +132,7 @@ def plot_report(fig, result, tgt: int, ref: int, *, subtitle: str = "") -> None:
         f"b = {fit.b*1e3:.3f} $\\pm$ {fit.b_err*1e3:.3f} mV$^{{1/2}}${bflag}\n"
         f"(boxed to $\\pm${fit.bound_frac*100:.0f}% of $\\eta$; "
         f"$\\eta_{{ref}}$={fit.eta_ref*1e3:.3f}, $\\eta_{{tgt}}$={fit.eta_tgt*1e3:.3f})\n"
-        f"d = {fit.offset*1e3:+.2f} mV  (should be $\\approx$0)\n"
-        f"$\\chi^2$/dof = {fit.chi2_red:.1f} (Birge x{fit.birge:.2f})"
+        f"d = {fit.offset*1e3:+.2f} mV  (should be $\\approx$0)"
     )
     ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
@@ -150,11 +149,13 @@ def plot_report(fig, result, tgt: int, ref: int, *, subtitle: str = "") -> None:
                     facecolor="none", edgecolor="tab:orange", lw=1.6,
                     label=r"diagonal ($\phi^x=\phi^w$)")
     ax2.set_xlabel("Predicted voltage, full model (mV)")
-    ax2.set_ylabel("Pull = residual / SEM")
-    ax2.set_title(f"Pulls  ($\\chi^2$/dof = {fit.chi2_red:.1f})")
+    ax2.set_ylabel("Pull = residual / std")
+    ax2.set_title("Pulls")
     ax2.legend(loc="upper left", fontsize=8)
 
-    ok = (fit.chi2_red < 3.0 and np.isfinite(fit.a) and fit.b > 0
+    # chi2/dof is gone with the SEM weighting; R^2 is the surviving
+    # goodness-of-fit number, gated loosely so only clearly bad fits reject.
+    ok = (fit.r2 > 0.9 and np.isfinite(fit.a) and fit.b > 0
           and abs(fit.offset) < 0.5 * fit.a**2)
     verdict = "model OK" if ok else "model REJECTED"
     head = f"TPA comb-phase fit: pair {tgt} vs pair {ref}"

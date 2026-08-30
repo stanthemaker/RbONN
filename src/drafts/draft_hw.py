@@ -8,11 +8,10 @@ each draft:
 * :func:`connect_daq` -- a :class:`daq_module.DAQController` configured for the
   fixed-window read scheme (``t_both`` when both beams are on, the longer
   ``t_single`` when at most one beam is on -- incl. all-off darks).  All other
-  acquisition parameters (1 kS/s, +/-0.1 V DIFF, 20 Hz low-pass, SEM over
-  ``n_eff = 2*T*f_cut``) are the :class:`~daq_module.DAQMonitorSettings`
-  defaults -- the values these drafts validated on hardware, now owned by
-  ``daq_module``.
-* :func:`read_point` -- one fixed-window averaged read -> ``(mean, std, sem)``.
+  acquisition parameters (1 kS/s, +/-0.1 V DIFF, 20 Hz low-pass) are the
+  :class:`~daq_module.DAQMonitorSettings` defaults -- the values these drafts
+  validated on hardware, now owned by ``daq_module``.
+* :func:`read_point` -- one fixed-window averaged read -> ``(mean, std)``.
 """
 from __future__ import annotations
 
@@ -104,24 +103,23 @@ def connect_daq(
 def read_point(
     daq: DAQController, *, single: bool = False, invert: bool = INVERT,
     timeout: float = 30.0,
-) -> tuple[float, float, float]:
-    """One fixed-window averaged read; return ``(mean, std, sem)`` in volts.
+) -> tuple[float, float]:
+    """One fixed-window averaged read; return ``(mean, std)`` in volts.
 
     ``single=True`` reads the longer T_single window -- at most one beam on
     (``x == 0 or w == 0``, incl. all-off darks; see ``DAQMonitorSettings``).
-    ``std`` is the low-passed trace spread, ``sem`` the standard error of the
-    mean over the effective independent-sample count ``2 * T * f_cut``.
+    ``std`` is the spread of the low-passed trace -- the one uncertainty these
+    drafts carry, undivided by any effective-N.
 
     With ``invert`` (default ``INVERT``) the mean is negated so the TIA's
-    negative-for-light output records as a positive light signal.  ``std`` and
-    ``sem`` are spreads and stay non-negative -- negating the trace leaves them
-    unchanged.
+    negative-for-light output records as a positive light signal.  ``std`` is a
+    spread and stays non-negative -- negating the trace leaves it unchanged.
     """
     sample = daq.monitor_cycle(timeout=timeout, single=single)
     if sample is None:
         raise RuntimeError("DAQ read aborted")
     mean = -float(sample.value) if invert else float(sample.value)
-    return mean, float(sample.std), float(sample.sem)
+    return mean, float(sample.std)
 
 
 __all__ = [

@@ -747,7 +747,7 @@ def _run_comb_phase(ctx: _Context, plan: StagePlan) -> Any:
             "b": fit.b,
             "a_at_bound": fit.a_at_bound,
             "b_at_bound": fit.b_at_bound,
-            "chi2_red": fit.chi2_red,
+            "r2": fit.r2,
             "csv": str(csv_path),
         }
 

@@ -11,10 +11,9 @@ SLM/DAQ wiring).
 
 Readings follow the step-6 convention: one fixed-window monitor read per
 point (the DAQ's T_both/T_single windows already average enough); ``std``
-is the raw low-passed trace spread (diagnostic) and ``sem`` the
-instrument-reported standard error of the mean when the sample carries one
-(DAQ), falling back to the trace std -- ``sem`` is what the fit weights by
-(see :func:`.tpa_phase._average_points`).
+is the low-passed trace spread the instrument reports (falling back to the
+raw-waveform std) and is what the fit weights by -- undivided by any
+effective-N (see :func:`.tpa_phase._average_points`).
 """
 from __future__ import annotations
 
@@ -104,12 +103,12 @@ ProgressCallback = Callable[["TPAPhaseProgress"], None]
 
 def _read_mean_std(
     monitor, timeout: float = 30.0, single: bool = False
-) -> tuple[float, float, float]:
-    """One averaged reading, its raw trace std, and the per-point SEM of the mean.
+) -> tuple[float, float]:
+    """One averaged reading and its trace std -> ``(mean, std)``.
 
-    Raises :class:`TPAPhaseAborted` when the monitor read is stopped.  ``sem``
-    is the instrument-reported standard error (low-passed, effective-N) when
-    the sample carries one, else the trace std -- matching the draft's
+    Raises :class:`TPAPhaseAborted` when the monitor read is stopped.  ``std``
+    is the instrument-reported (low-passed) trace spread when the sample
+    carries one, else the raw-waveform std -- matching the draft's
     ``_read_daq`` so pipeline and offline runs weight their fits the same way.
     ``single`` marks a weak point (here only the all-off dark): the DAQ reads
     it over its longer T_single window (``single_duration``); the scope
@@ -129,12 +128,7 @@ def _read_mean_std(
             else 0.0
         )
     )
-    sem = getattr(sample, "sem", None)
-    if sem is not None and np.isfinite(sem):
-        sem_v = float(sem)                                     # SEM of the mean (DAQ)
-    else:
-        sem_v = std_v                                          # scope: no effective-N -> raw std
-    return mean_v, std_v, sem_v
+    return mean_v, std_v
 
 
 def measure_phase_sweep(
@@ -227,8 +221,8 @@ def measure_phase_sweep(
     for x_t, w_t, x_r, w_r in drive:
         _check_stop()
         _display(x_t, w_t, x_r, w_r)
-        mean_v, std_v, sem_v = _read_mean_std(monitor, read_timeout)
-        rows.append((0, x_t, w_t, x_r, w_r, mean_v, std_v, sem_v, dark))
+        mean_v, std_v = _read_mean_std(monitor, read_timeout)
+        rows.append((0, x_t, w_t, x_r, w_r, mean_v, std_v, dark))
         step += 1
         if progress_callback is not None:
             dphi_slm = float(slm_phase_diff(x_t, w_t, x_r, w_r))
@@ -253,8 +247,7 @@ def measure_phase_sweep(
         w_r=np.array([r[4] for r in rows], dtype=float),
         voltage_mean_v=np.array([r[5] for r in rows], dtype=float),
         voltage_std_v=np.array([r[6] for r in rows], dtype=float),
-        voltage_sem_v=np.array([r[7] for r in rows], dtype=float),
-        dark_v=np.array([r[8] for r in rows], dtype=float),
+        dark_v=np.array([r[7] for r in rows], dtype=float),
         n_trials=1,
     )
     fit_result(result, tgt_model, ref_model, frac=frac, single_beam_bg=single_beam_bg)

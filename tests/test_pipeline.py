@@ -369,17 +369,17 @@ class PhaseReportRenderTests(unittest.TestCase):
         dphi_slm = theta - np.pi
         a, b, dphi_comb = 0.03, 0.02, 0.4
         y = a**2 + b**2 * g**2 + 2 * a * b * g * np.cos(dphi_slm + dphi_comb)
-        sem = np.full(n, 1e-5)
+        std = np.full(n, 1e-5)
         fit = PhaseFit(
             dphi_comb=dphi_comb, dphi_comb_err=0.02,
             a=a, a_err=1e-3, b=b, b_err=1e-3,
             amp=2 * a * b, amp_err=1e-4,
             offset=0.0, offset_err=1e-5,
-            chi2_red=1.1, dof=n - 3, birge=1.05, r2=0.99,
+            r2=0.99,
             eta_ref=a, eta_tgt=b, bound_frac=1.0,
             a_at_bound=False, b_at_bound=False,
             bg0=0.0, bg1=0.0, bg2=0.0,
-            dphi_slm=dphi_slm, g=g, y=y, sem=sem,
+            dphi_slm=dphi_slm, g=g, y=y, std=std,
             known=a**2 + b**2 * g**2, y_pred=y, residuals=np.zeros(n),
         )
         fig = Figure(figsize=(8, 4))
@@ -406,11 +406,11 @@ class CombPhaseJsonTests(unittest.TestCase):
             a=0.05, a_err=1e-3, b=0.048, b_err=1e-3,
             amp=2 * 0.05 * 0.048, amp_err=1e-4,
             offset=0.0, offset_err=1e-5,
-            chi2_red=1.0, dof=n - 3, birge=1.0, r2=0.99,
+            r2=0.99,
             eta_ref=0.05, eta_tgt=0.048, bound_frac=frac,
             a_at_bound=False, b_at_bound=False,
             bg0=0.0, bg1=0.0, bg2=0.0,
-            dphi_slm=arr, g=arr, y=arr, sem=np.ones(n),
+            dphi_slm=arr, g=arr, y=arr, std=np.ones(n),
             known=arr, y_pred=arr, residuals=arr,
         )
 

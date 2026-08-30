@@ -32,9 +32,8 @@ per-row ``dark_v`` (the SAME channel) so the fit's ``y = mean - dark`` becomes
 the positive light signal (= dark - |mean|).  On a REFIT it writes a sibling
 ``*_flipped.csv`` and fits that; on a COLLECT the values are negated as they are
 read, before the CSV is written -- so the automatic fit that follows does NOT
-negate them a second time.  The spreads (``voltage_std_v`` /
-``voltage_sem_v``) and ``sem_ratio`` (= |sem/mean|) are sign-independent and
-left untouched.
+negate them a second time.  The spread (``voltage_std_v``) and ``std_ratio``
+(= |std/mean|) are sign-independent and left untouched.
 
 What it measures.  Each target pair carries a fixed comb-phase offset ``dPhi_comb``
 relative to a common reference pair (the reference defines ``Phi = 0``).  Driving
@@ -71,7 +70,7 @@ same ``DAQController.monitor_cycle`` read the GUI pipeline uses): ``T_SINGLE_S``
 (5 s) for the all-off dark (near-zero signal needs the averaging) and
 ``T_BOTH_S`` (3 s) for the sweep points (the reference is fully on, so they
 are bright), low-passed at the ``DAQMonitorSettings`` bandwidth.  Every CSV row
-records the mean, its SEM and the SEM ratio (sem/|mean|).
+records the mean, its trace std and the std ratio (std/|mean|).
 
 Prereq: ONE combined step-6 result JSON (``calib_step6_test.save_combined_json``)
 is the only input -- it embeds the raw Step-3 calibration under ``"step3"``
@@ -139,7 +138,7 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  The all-off dark sits at zero signal, so it
 # gets the longer T_single window; sweep points always have the reference
 # fully on (bright, both pairs driven) and read T_both.  Every CSV row records
-# the per-point SEM (voltage_sem_v) and sem_ratio.
+# the per-point std (voltage_std_v) and std_ratio.
 T_SINGLE_S = 10.0                 # all-off dark (at most one beam on) (s)
 T_BOTH_S = 10.0                   # sweep points: reference + target on (s)
 
@@ -227,7 +226,7 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     else:
         print("            + step6 single-beam + d     "
               f"(a:b locked to step-6 eta ratio; scale s boxed +/-{fit.bound_frac*100:.0f}%)")
-    print(f"Pair {tgt} vs reference {ref}  (value +/- error, Birge-scaled):")
+    print(f"Pair {tgt} vs reference {ref}  (value +/- error):")
     print(f"  dPhi_comb = {fit.dphi_comb:+.4f} +/- {fit.dphi_comb_err:.4f} rad"
           f"   ( {fit.dphi_comb_deg:+.2f} +/- {np.degrees(fit.dphi_comb_err):.2f} deg )")
     print(f"  a (ref R_1)      = {fit.a*1e3:.4f} +/- {fit.a_err*1e3:.4f} mV^0.5"
@@ -237,8 +236,7 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     print(f"  fringe amp 2ab   = {fit.amp*1e3:.4f} +/- {fit.amp_err*1e3:.4f} mV")
     print(f"  residual dark d  = {fit.offset*1e3:+.4f} +/- {fit.offset_err*1e3:.4f} mV"
           f"   (should be ~0 after per-row dark subtraction)")
-    print(f"  chi2/dof = {fit.chi2_red:.2f}  (dof={fit.dof})  -> Birge x{fit.birge:.2f} "
-          f"on errors ;  R^2 = {fit.r2:.4f}")
+    print(f"  R^2 = {fit.r2:.4f}")
 
 
 def make_plot(fit: PhaseFit, tgt: int, path) -> None:
@@ -249,7 +247,7 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     import matplotlib.pyplot as plt
 
     dphi = np.degrees(fit.dphi_slm)             # dPhi_SLM at the measured points
-    pulls = fit.residuals / fit.sem
+    pulls = fit.residuals / fit.std
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -275,7 +273,7 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
              + bg_s + fit.offset)
     label = r"fit: $a^2+b^2\sin^4+2ab\sin^2\cos$"
     ax1.plot(np.degrees(dslm), model * 1e3, "-", color="tab:blue", lw=1.6, label=label)
-    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.sem * 1e3, fmt="o", ms=5, color="tab:orange",
+    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.std * 1e3, fmt="o", ms=5, color="tab:orange",
                  ecolor="lightgray", elinewidth=1, capsize=2, zorder=3,
                  label="measured (dark-subtracted)")
     ax1.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
@@ -287,8 +285,8 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     ax2.axhline(0, color="gray", ls="--", lw=1)
     ax2.scatter(dphi, pulls, c="tab:red", s=40, edgecolor="k", lw=0.4)
     ax2.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax2.set_ylabel("Pull = residual / SEM")
-    ax2.set_title(f"Pulls  ($\\chi^2$/dof = {fit.chi2_red:.2f})")
+    ax2.set_ylabel("Pull = residual / std")
+    ax2.set_title("Pulls")
     ax2.legend(loc="upper right", fontsize=8)
 
     bflag = ("  [a@bound]" if fit.a_at_bound else "") + ("  [b@bound]" if fit.b_at_bound else "")
@@ -301,7 +299,7 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
         f"a = {fit.a*1e3:.3f} ($\\eta$ {fit.eta_ref*1e3:.3f}), "
         f"b = {fit.b*1e3:.3f} ($\\eta$ {fit.eta_tgt*1e3:.3f}) mV$^{{1/2}}${bflag}\n"
         f"d = {fit.offset*1e3:+.3f} mV  (should be $\\approx$0)\n"
-        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})  [{mode}]"
+        f"R$^2$ = {fit.r2:.4f}  [{mode}]"
     )
     ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
@@ -340,8 +338,8 @@ def _flip_meas_csv(path) -> Path:
     raw ``voltage_mean_v`` and its per-row ``dark_v`` are negated -- both are the
     same channel, so the fit's ``y = mean - dark`` then yields the positive light
     signal (= dark - |mean|) with the residual dark still near zero.  Every other
-    column is copied through unchanged: the spreads (``voltage_std_v`` /
-    ``voltage_sem_v``) and ``sem_ratio`` (= |sem/mean|) are sign-independent.
+    column is copied through unchanged: the spread (``voltage_std_v``) and
+    ``std_ratio`` (= |std/mean|) are sign-independent.
     Mirrors the hand-made ``*_flipped.csv`` refit workflow.  Output lands next to
     the source as ``<stem>_flipped.csv``.
     """
@@ -392,7 +390,7 @@ def _compare_methods(fits: dict[tuple[int, str], PhaseFit], pairs, methods) -> N
             stxt = "s=1 (pinned)" if f.bound_frac == 0 else f"s={s:.3f}"
             print(f"pair {k}  {m:<7}: dPhi_comb = {f.dphi_comb_deg:+7.2f} +/- "
                   f"{np.degrees(f.dphi_comb_err):5.2f} deg   {stxt:<12}  "
-                  f"chi2/dof={f.chi2_red:.2f}")
+                  f"R^2={f.r2:.4f}")
 
 
 def fit_csv(path, *, flip: bool = False, methods: tuple[str, ...] = ("bounded",)) -> None:
@@ -477,7 +475,7 @@ def build_xw_sweep() -> list[tuple[float, float, float, float]]:
 _MEAS_CSV_HEADER = [
     "trial", "tgt_index", "ref_index",
     "phi_xt_deg", "phi_wt_deg", "x_t", "w_t", "x_r", "w_r",
-    "dark_v", "voltage_mean_v", "voltage_std_v", "voltage_sem_v", "sem_ratio",
+    "dark_v", "voltage_mean_v", "voltage_std_v", "std_ratio",
 ]
 
 
@@ -485,7 +483,7 @@ def write_meas_csv(results, path) -> str:
     """Write raw rows for one or more target pairs into a single CSV.
 
     Same column layout as :func:`tpa_phase.write_phase_csv` plus a trailing
-    ``sem_ratio`` (sem/|mean|) column, and concatenates several
+    ``std_ratio`` (std/|mean|) column, and concatenates several
     :class:`PhaseResult` objects so every row carries its own ``tgt_index`` (and
     the shared ``ref_index``) -- i.e. REF_INDEX and every TGT_INDICES entry are
     recorded in the file, per row.  Round-trips via
@@ -497,37 +495,36 @@ def write_meas_csv(results, path) -> str:
         writer = csv.writer(f)
         writer.writerow(_MEAS_CSV_HEADER)
         for result in results:
-            for t, x_t, w_t, x_r, w_r, dark_v, mean_v, std_v, sem_v in zip(
+            for t, x_t, w_t, x_r, w_r, dark_v, mean_v, std_v in zip(
                 result.trial, result.x_t, result.w_t, result.x_r, result.w_r,
                 result.dark_v, result.voltage_mean_v, result.voltage_std_v,
-                result.voltage_sem_v,
             ):
                 phi_xt = np.degrees(2.0 * float(phi_half(x_t)))
                 phi_wt = np.degrees(2.0 * float(phi_half(w_t)))
-                ratio = abs(sem_v / mean_v) if mean_v else float("inf")
+                ratio = abs(std_v / mean_v) if mean_v else float("inf")
                 writer.writerow(
                     [int(t), result.tgt_index, result.ref_index,
                      f"{phi_xt:.4g}", f"{phi_wt:.4g}",
                      f"{x_t:.6g}", f"{w_t:.6g}", f"{x_r:.6g}", f"{w_r:.6g}",
                      f"{dark_v:.9g}", f"{mean_v:.9g}", f"{std_v:.9g}",
-                     f"{sem_v:.9g}", f"{ratio:.6g}"]
+                     f"{ratio:.6g}"]
                 )
     return str(out)
 
 
-def _read_point(daq, x_t: float, w_t: float, x_r: float, w_r: float) -> tuple[float, float, float, float]:
-    """One fixed-duration DAQ read for a drive point; return ``(mean, std, sem, duration)``.
+def _read_point(daq, x_t: float, w_t: float, x_r: float, w_r: float) -> tuple[float, float, float]:
+    """One fixed-duration DAQ read for a drive point; return ``(mean, std, duration)``.
 
     Any channel on reads ``T_BOTH_S`` (sweep points are bright -- the reference
     is fully on); the all-off dark reads the DAQ's configured T_single window
-    (``T_SINGLE_S``).  Filtering and the SEM (over ``n_eff = 2 * duration *
-    f_cut``) happen inside ``DAQController.monitor_cycle`` -- the same read the
-    GUI pipeline uses.  ``std`` is the low-passed trace spread, so
-    ``sem = std / sqrt(n_eff)`` round-trips from the CSV.
+    (``T_SINGLE_S``).  Filtering happens inside ``DAQController.monitor_cycle``
+    -- the same read the GUI pipeline uses -- and ``std`` is the spread of that
+    low-passed trace, recorded verbatim in the CSV as the per-point sigma the
+    fit weights by.
     """
     single = not any(v > 0.0 for v in (x_t, w_t, x_r, w_r))
-    mean_v, std_v, sem_v = read_point(daq, single=single)
-    return mean_v, std_v, sem_v, (T_SINGLE_S if single else T_BOTH_S)
+    mean_v, std_v = read_point(daq, single=single)
+    return mean_v, std_v, (T_SINGLE_S if single else T_BOTH_S)
 
 
 def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> PhaseResult:
@@ -539,7 +536,7 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
 
     ``flip`` negates the raw mean and dark reads (inverted DAQ sign convention:
     more light -> more negative volts), so the CSV this writes already carries the
-    positive light signal; the spreads/SEM are magnitudes and stay as read.
+    positive light signal; the std is a magnitude and stays as read.
     """
     from slm_module.encoding import encode_to_pattern
 
@@ -560,7 +557,7 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
     step = 0
     rows: list[tuple] = []
     _display(0.0, 0.0, 0.0, 0.0)                     # all-off dark, once
-    dark_v, _, _, dur = _read_point(daq, 0.0, 0.0, 0.0, 0.0)
+    dark_v, _, dur = _read_point(daq, 0.0, 0.0, 0.0, 0.0)
     if flip:
         dark_v = -dark_v                             # inverted DAQ sign (same channel)
     step += 1
@@ -568,14 +565,14 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
           f"= {dark_v*1000:.4f} mV")
     for x_t, w_t, x_r, w_r in drive:
         _display(x_t, w_t, x_r, w_r)
-        mean_v, std_v, sem_v, dur = _read_point(daq, x_t, w_t, x_r, w_r)
+        mean_v, std_v, dur = _read_point(daq, x_t, w_t, x_r, w_r)
         if flip:
             mean_v = -mean_v
-        rows.append((0, x_t, w_t, x_r, w_r, mean_v, std_v, sem_v, dark_v))
+        rows.append((0, x_t, w_t, x_r, w_r, mean_v, std_v, dark_v))
         step += 1
-        ratio = abs(sem_v / mean_v) if mean_v else float("inf")
+        ratio = abs(std_v / mean_v) if mean_v else float("inf")
         print(f"[{step}/{total}] pair {k} x=w={x_t:.3f} ({dur:.0f}s) "
-              f"-> {mean_v*1000:.4f} mV sem ratio {ratio*100:.2f}%")
+              f"-> {mean_v*1000:.4f} mV std ratio {ratio*100:.2f}%")
 
     return PhaseResult(
         tgt_index=k, ref_index=REF_INDEX,
@@ -586,8 +583,7 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
         w_r=np.array([r[4] for r in rows], dtype=float),
         voltage_mean_v=np.array([r[5] for r in rows], dtype=float),
         voltage_std_v=np.array([r[6] for r in rows], dtype=float),
-        voltage_sem_v=np.array([r[7] for r in rows], dtype=float),
-        dark_v=np.array([r[8] for r in rows], dtype=float),
+        dark_v=np.array([r[7] for r in rows], dtype=float),
         n_trials=1,
     )
 

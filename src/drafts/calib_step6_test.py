@@ -42,8 +42,8 @@ bandwidth.  The weighted-least-squares fit of
     Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d
 
 and the CSV persistence live in :mod:`slm_module.tpa_pair` (the same code the
-GUI's Step 6 TPA tab uses); every CSV row records the mean, its SEM and the
-SEM ratio (sem/|mean|).
+GUI's Step 6 TPA tab uses); every CSV row records the mean, its trace std and
+the std ratio (std/|mean|).
 
 The result is written to a single ``calib_step6_result_MMDD_HHMM.json`` that
 embeds the input Step-3 calibration JSON alongside every fitted pair result.
@@ -95,7 +95,7 @@ DAQ_CHANNEL = "ai0"
 # Sample rate / range / low-pass bandwidth are the DAQMonitorSettings defaults
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
-# the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
+# the per-point std (voltage_std_v) and std_ratio -- the per-point sigma.
 T_SINGLE_S = 10.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
 T_BOTH_S = 10.0                  # both beams on (the bright cross points) (s)
 
@@ -115,7 +115,7 @@ def report(fit: PairFit) -> None:
         print("Model:  Y = eta^2*(x*w) + a_x*x + a_w*w + d   (q terms dropped)")
     else:
         print("Model:  Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d")
-    print("Fitted parameters (value +/- error, Birge-scaled):")
+    print("Fitted parameters (value +/- error):")
     print(f"  eta = {fit.eta:.4e} +/- {fit.eta_err:.3e}   ({_sigma(fit.eta, fit.eta_err):.1f} sigma)")
     print(f"  a_x = {p['a_x'][0]:.4e} +/- {p['a_x'][1]:.3e}   ({_sigma(*p['a_x']):.1f} sigma)")
     print(f"  a_w = {p['a_w'][0]:.4e} +/- {p['a_w'][1]:.3e}   ({_sigma(*p['a_w']):.1f} sigma)")
@@ -123,8 +123,7 @@ def report(fit: PairFit) -> None:
     if not no_q:
         print(f"  (nuisance saturation terms: q_x = {p['q_x'][0]:.3e} +/- {p['q_x'][1]:.2e} , "
               f"q_w = {p['q_w'][0]:.3e} +/- {p['q_w'][1]:.2e} )")
-    print(f"  chi2/dof = {fit.chi2_red:.2f}  (dof={fit.dof})  -> Birge x{fit.birge:.2f} "
-          f"on errors ;  R^2 = {fit.r2:.4f}")
+    print(f"  R^2 = {fit.r2:.4f}")
     _report_residuals(fit)
 
 
@@ -143,8 +142,8 @@ def _report_residuals(fit: PairFit) -> None:
     """Per-cell residual table (measured - fitted model), text only.
 
     Rows are grouped by sweep line (dark, x-only, w-only, cross) and sorted by
-    level within each line; ``resid/sem`` is the pull each cell contributes to
-    chi2.  Closes with the RMS residual and the worst cell.
+    level within each line; ``resid/std`` is each cell's normalised residual.
+    Closes with the RMS residual and the worst cell.
     """
     res = fit.residuals
     line_order = {"dark": 0, "x-only": 1, "w-only": 2, "cross": 3}
@@ -153,11 +152,11 @@ def _report_residuals(fit: PairFit) -> None:
         key=lambda i: (line_order[_line_tag(fit.x[i], fit.w[i])], fit.x[i], fit.w[i]),
     )
     print("  Residuals (measured - fitted model, per averaged cell):")
-    print("    line      x     w    meas(mV)   fit(mV)  resid(mV)  resid/sem")
+    print("    line      x     w    meas(mV)   fit(mV)  resid(mV)  resid/std")
     for i in idx:
         print(f"    {_line_tag(fit.x[i], fit.w[i]):<7} {fit.x[i]:5.2f} {fit.w[i]:5.2f} "
               f"{fit.y[i]*1e3:9.4f} {fit.y_pred[i]*1e3:9.4f} {res[i]*1e3:9.4f} "
-              f"{res[i]/fit.sem[i]:9.1f}")
+              f"{res[i]/fit.std[i]:9.1f}")
     rms = float(np.sqrt(np.mean(res**2)))
     i_w = int(np.argmax(np.abs(res)))
     print(f"  residual RMS = {rms*1e3:.4f} mV ; worst = {res[i_w]*1e3:+.4f} mV "
@@ -178,10 +177,10 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
     product x*w with the fitted line ``eta^2*(x*w)`` overlaid.  x and w are
     commanded INTENSITIES; eta multiplies the field amplitude, hence the
     eta^2 coefficient (see :mod:`slm_module.tpa_pair`).  Error bars are the
-    per-cell SEMs only (background-parameter uncertainty is not propagated --
+    per-cell stds only (background-parameter uncertainty is not propagated --
     this is an eyeball plot; the printed report carries the real errors).
 
-    Right -- residual pulls: (measured - full model) / SEM for every averaged
+    Right -- residual pulls: (measured - full model) / std for every averaged
     cell (same numbers as the printed residual table) vs the swept level,
     colored by sweep line, with the +/-1 sigma band shaded (same pull style
     as the step-7 plot).
@@ -196,7 +195,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
     import matplotlib.pyplot as plt
 
     x, w = fit.x, fit.w
-    y, sem = fit.y, fit.sem
+    y, std = fit.y, fit.std
 
     p = fit.params
     b = p["b"][0]
@@ -220,7 +219,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
         r_fine = np.linspace(0.0, float(level[m].max()), 200)
         ax1.plot(r_fine, curve(r_fine) * 1e3, "-", color=color, lw=1.4, zorder=2)
         order = np.argsort(level[m])
-        ax1.errorbar(level[m][order], y[m][order] * 1e3, yerr=sem[m][order] * 1e3,
+        ax1.errorbar(level[m][order], y[m][order] * 1e3, yerr=std[m][order] * 1e3,
                      fmt="o", color=color, ms=5, capsize=2, lw=0.8,
                      mec="k", mew=0.3, zorder=3, label=label)
     no_q = p["q_x"][1] == 0.0 and p["q_w"][1] == 0.0   # q pinned to zero -> --no-q fit
@@ -249,7 +248,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
     ax2.plot(p_fine, b * p_fine * 1e3, "-", color="tab:green", lw=1.4, zorder=2,
              label="fit  $\\eta^2\\,(x\\,w)$")
     order = np.argsort(prod)
-    ax2.errorbar(prod[order], y_sub[order] * 1e3, yerr=sem[mc][order] * 1e3,
+    ax2.errorbar(prod[order], y_sub[order] * 1e3, yerr=std[mc][order] * 1e3,
                  fmt="o", color="tab:green", ms=5, capsize=2, lw=0.8,
                  mec="k", mew=0.3, zorder=3, label="cross (x=1) $-$ fitted background")
     ax2.axhline(0.0, color="0.6", lw=0.7, zorder=1)
@@ -257,7 +256,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
         f"eta = {fit.eta:.3g} $\\pm$ {fit.eta_err:.2g}  "
         f"({_sigma(fit.eta, fit.eta_err):.0f}$\\sigma$)\n"
         f"$\\eta^2$ = {b:.3g}\n"
-        f"R$^2$ = {fit.r2:.3f}   $\\chi^2$/dof = {fit.chi2_red:.2f} (Birge x{fit.birge:.2f})"
+        f"R$^2$ = {fit.r2:.3f}"
     )
     ax2.text(0.03, 0.97, txt2, transform=ax2.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
@@ -268,7 +267,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
 
     # --- right: residual pulls with the +/-1 sigma band ----------------------
     res = fit.residuals
-    pulls = res / sem
+    pulls = res / std
     ax3.axhspan(-1, 1, color="tab:blue", alpha=0.12, label="$\\pm1\\sigma$")
     ax3.axhline(0, color="gray", ls="--", lw=1, zorder=1)
     for label, m, lvl, color in (
@@ -280,14 +279,11 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
         ax3.scatter(lvl[m], pulls[m], c=color, s=40, edgecolor="k", lw=0.4,
                     zorder=3, label=label)
     rms = float(np.sqrt(np.mean(res**2)))
-    txt3 = (
-        f"RMS = {rms*1e3:.4f} mV\n"
-        f"$\\chi^2$/dof = {fit.chi2_red:.2f} (dof={fit.dof})"
-    )
+    txt3 = f"RMS = {rms*1e3:.4f} mV"
     ax3.text(0.03, 0.97, txt3, transform=ax3.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
     ax3.set_xlabel("swept level r")
-    ax3.set_ylabel("Pull = residual / SEM")
+    ax3.set_ylabel("Pull = residual / std")
     ax3.set_title("Fit residuals per averaged cell  (pulls)")
     ax3.legend(loc="lower right", fontsize=8)
 
@@ -397,7 +393,7 @@ def fit_csv(path: str | Path, *, flip: bool = False, no_q: bool = False) -> None
     volts): the loaded ``voltage_mean_v`` is negated in memory on every row (incl.
     the (0,0) dark) and each pair is re-fit, so Y = eta^2*(x*w) + ... + d comes out
     as the positive light signal.  Nothing is written back -- the raw CSV on disk
-    is untouched, and the spreads (std/SEM) are magnitudes so they stay as read.
+    is untouched, and the std is a magnitude so it stays as read.
 
     ``no_q`` drops the q_x/q_w saturation terms from the model (see the module
     docstring): Y = eta^2*(x*w) + a_x*x + a_w*w + d.
@@ -433,19 +429,18 @@ def fit_csv(path: str | Path, *, flip: bool = False, no_q: bool = False) -> None
         print(f"Plot saved to {plot_path}")
 
 
-def _read_point(daq, x_val: float, w_val: float) -> tuple[float, float, float, float]:
-    """One fixed-duration DAQ read for a grid point; return ``(mean, std, sem, duration)``.
+def _read_point(daq, x_val: float, w_val: float) -> tuple[float, float, float]:
+    """One fixed-duration DAQ read for a grid point; return ``(mean, std, duration)``.
 
     Acquisition time = ``T_SINGLE_S`` if ``x == 0 or w == 0`` (at most one beam
-    on, incl. the dark point), else ``T_BOTH_S``.  Filtering and
-    the SEM (over ``n_eff = 2 * duration * f_cut``) happen inside
-    ``DAQController.monitor_cycle`` -- the same read the GUI pipeline uses.
-    ``std`` is the low-passed trace spread, so ``sem = std / sqrt(n_eff)``
-    round-trips from the CSV.
+    on, incl. the dark point), else ``T_BOTH_S``.  Filtering happens inside
+    ``DAQController.monitor_cycle`` -- the same read the GUI pipeline uses --
+    and ``std`` is the spread of that low-passed trace, recorded verbatim in the
+    CSV as the per-point sigma the fit weights by.
     """
     single = x_val == 0.0 or w_val == 0.0
-    mean_v, std_v, sem_v = read_point(daq, single=single)
-    return mean_v, std_v, sem_v, (T_SINGLE_S if single else T_BOTH_S)
+    mean_v, std_v = read_point(daq, single=single)
+    return mean_v, std_v, (T_SINGLE_S if single else T_BOTH_S)
 
 
 def _measure_pair(slm, daq, layout, i: int, points) -> ChannelPairGrid:
@@ -465,7 +460,7 @@ def _measure_pair(slm, daq, layout, i: int, points) -> ChannelPairGrid:
 
     total = len(points)
     step = 0
-    rows: list[tuple[int, float, float, float, float, float]] = []
+    rows: list[tuple[int, float, float, float, float]] = []
     for x_val, w_val in points:
         x_vals = zeros.copy()
         w_vals = zeros.copy()
@@ -476,13 +471,13 @@ def _measure_pair(slm, daq, layout, i: int, points) -> ChannelPairGrid:
         )
         if SETTLE_S:
             time.sleep(SETTLE_S)
-        mean_v, std_v, sem_v, dur = _read_point(daq, x_val, w_val)
-        rows.append((0, float(x_val), float(w_val), mean_v, std_v, sem_v))
+        mean_v, std_v, dur = _read_point(daq, x_val, w_val)
+        rows.append((0, float(x_val), float(w_val), mean_v, std_v))
         step += 1
-        ratio = abs(sem_v / mean_v) if mean_v else float("inf")
+        ratio = abs(std_v / mean_v) if mean_v else float("inf")
         print(f"[{step}/{total}] pair {i} "
               f"x={x_val:.3f} w={w_val:.3f} ({dur:.0f}s) -> {mean_v*1000:.4f} mV "
-              f"sem ratio {ratio*100:.2f}%")
+              f"std ratio {ratio*100:.2f}%")
 
     return ChannelPairGrid(
         index=i,
@@ -496,7 +491,6 @@ def _measure_pair(slm, daq, layout, i: int, points) -> ChannelPairGrid:
         w=np.array([r[2] for r in rows], dtype=float),
         voltage_mean_v=np.array([r[3] for r in rows], dtype=float),
         voltage_std_v=np.array([r[4] for r in rows], dtype=float),
-        voltage_sem_v=np.array([r[5] for r in rows], dtype=float),
         fit=None,
     )
 

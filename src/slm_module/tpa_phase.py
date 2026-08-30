@@ -234,9 +234,6 @@ class PhaseFit:
     amp_err: float
     offset: float              # residual dark d (should be ~0)
     offset_err: float
-    chi2_red: float
-    dof: int
-    birge: float
     r2: float
     eta_ref: float             # step-6 bound centre for a
     eta_tgt: float             # step-6 bound centre for b
@@ -250,7 +247,7 @@ class PhaseFit:
     dphi_slm: np.ndarray = field(repr=False)     # dPhi_SLM per point (slm_phase_diff)
     g: np.ndarray = field(repr=False)            # target field amplitude = sqrt(x_t w_t)
     y: np.ndarray = field(repr=False)            # dark-subtracted measured Y
-    sem: np.ndarray = field(repr=False)
+    std: np.ndarray = field(repr=False)
     known: np.ndarray = field(repr=False)        # a^2 + b^2 g^2 + step-6 single-beam (no fringe/offset)
     y_pred: np.ndarray = field(repr=False)       # full model prediction
     residuals: np.ndarray = field(repr=False)
@@ -270,7 +267,7 @@ def fit_phase(
     dphi_slm: np.ndarray,
     g: np.ndarray,
     y: np.ndarray,
-    sem: np.ndarray,
+    std: np.ndarray,
 ) -> PhaseFit:
     """Weighted LS fit of ``Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb) + d``.
 
@@ -281,29 +278,26 @@ def fit_phase(
         c0 = a^2 + d   c1 = b^2   c2 = 2ab cos(dPhi_comb)   c3 = -2ab sin(dPhi_comb)
 
     and the physical (a, b, dPhi_comb, d) follow in closed form (see module
-    docstring).  Errors are covariance-propagated and Birge-scaled by
-    ``sqrt(chi2/dof)`` when chi2/dof > 1.  The amplitude ``a`` is fixed by the
-    interference + target self term, so it separates from the flat baseline (and
-    hence from the residual dark ``d``).
+    docstring).  Points are weighted by ``1/std`` and the errors are
+    covariance-propagated as-is -- no chi2/dof goodness-of-fit number and no
+    Birge rescaling.  The amplitude ``a`` is fixed by the interference + target
+    self term, so it separates from the flat baseline (and hence from the
+    residual dark ``d``).
     """
     dphi_slm = np.asarray(dphi_slm, dtype=float)
     g = np.asarray(g, dtype=float)
     y = np.asarray(y, dtype=float)
-    sem = np.asarray(sem, dtype=float)
+    std = np.asarray(std, dtype=float)
 
     cols = [np.ones_like(g), g**2, g * np.cos(dphi_slm), g * np.sin(dphi_slm)]
     A = np.column_stack(cols)
 
-    Aw = A / sem[:, None]
-    coeffs, *_ = np.linalg.lstsq(Aw, y / sem, rcond=None)
+    Aw = A / std[:, None]
+    coeffs, *_ = np.linalg.lstsq(Aw, y / std, rcond=None)
     cov = np.linalg.inv(Aw.T @ Aw)
 
     y_pred = A @ coeffs
     residuals = y - y_pred
-    dof = max(len(y) - A.shape[1], 1)
-    chi2_red = float(np.sum((residuals / sem) ** 2) / dof)
-    birge = max(1.0, np.sqrt(chi2_red))
-    cov = cov * birge**2
 
     c0, c1, c2, c3 = (float(coeffs[i]) for i in range(4))
     amp = float(np.hypot(c2, c3))                       # 2 a b
@@ -338,11 +332,11 @@ def fit_phase(
         a=a, a_err=a_err, b=b, b_err=b_err,
         amp=amp, amp_err=float("nan"),
         offset=d, offset_err=offset_err,
-        chi2_red=chi2_red, dof=dof, birge=birge, r2=r2,
+        r2=r2,
         eta_ref=a, eta_tgt=b, bound_frac=float("inf"),
         a_at_bound=False, b_at_bound=False,
         bg0=0.0, bg1=0.0, bg2=0.0,
-        dphi_slm=dphi_slm, g=g, y=y, sem=sem, known=known,
+        dphi_slm=dphi_slm, g=g, y=y, std=std, known=known,
         y_pred=y_pred, residuals=residuals,
     )
 
@@ -369,8 +363,7 @@ class PhaseResult:
     x_r: np.ndarray = field(repr=False)
     w_r: np.ndarray = field(repr=False)
     voltage_mean_v: np.ndarray = field(repr=False)
-    voltage_std_v: np.ndarray = field(repr=False)   # raw low-passed trace std (diagnostic)
-    voltage_sem_v: np.ndarray = field(repr=False)    # SEM of the mean -> the fit weight
+    voltage_std_v: np.ndarray = field(repr=False)   # low-passed trace std -> the fit weight
     # per-row dark measured at that row's trial start; subtracted per row before
     # averaging so per-trial dark drift is removed row-by-row (not as a constant)
     dark_v: np.ndarray = field(repr=False)
@@ -398,21 +391,21 @@ class PhaseResult:
 
 
 def _average_points(result: PhaseResult, dark_override: float | None = None):
-    """Per-row dark-subtract, then average repeated trials per cell -> arrays + SEM.
+    """Per-row dark-subtract, then average repeated trials per cell -> arrays + std.
 
     Each row's dark (measured at its trial's start) is removed BEFORE averaging,
     so per-trial dark drift is taken out row-by-row rather than as a single
     constant.  ``dark_override`` (a scalar) replaces the per-row dark uniformly.
     The returned ``y`` is therefore already dark-subtracted.
 
-    ``sem`` is the across-trial standard error of the mean (std/sqrt(n)) for a
-    cell measured more than once.  A cell measured only ONCE has no across-trial
-    spread, so it falls back to that row's recorded ``voltage_sem_v`` (the DAQ's
-    reported standard error of the mean) -- the real per-point uncertainty --
-    which keeps the weighted fit meaningful with ``n_trials == 1`` (mirrors
+    ``std`` is the across-trial standard deviation for a cell measured more than
+    once -- the spread as measured, NOT divided by sqrt(n).  A cell measured only
+    ONCE has no across-trial spread, so it falls back to that row's recorded
+    ``voltage_std_v`` (the instrument's reported trace spread), which keeps the
+    weighted fit meaningful with ``n_trials == 1`` (mirrors
     :func:`slm_module.tpa_pair.average_cells`; otherwise every cell would be
     floored to a bogus 1.0 V, flattening the fit).  Only cells with neither
-    repeats nor a recorded SEM inherit the median positive SEM.
+    repeats nor a recorded std inherit the median positive std.
     """
     y_raw = np.asarray(result.voltage_mean_v, dtype=float)
     if dark_override is None:
@@ -420,35 +413,35 @@ def _average_points(result: PhaseResult, dark_override: float | None = None):
     else:
         dark_row = np.full(y_raw.shape, float(dark_override))
     y_sub = y_raw - dark_row
-    sem_row = np.asarray(result.voltage_sem_v, dtype=float)
+    std_row = np.asarray(result.voltage_std_v, dtype=float)
 
     cells: dict[tuple, list[float]] = defaultdict(list)
     scells: dict[tuple, list[float]] = defaultdict(list)
     key = np.column_stack([result.x_t, result.w_t, result.x_r, result.w_r])
-    for row, y, s in zip(key, y_sub, sem_row):
+    for row, y, s in zip(key, y_sub, std_row):
         rk = tuple(np.round(row, 9))
         cells[rk].append(float(y))
         scells[rk].append(float(s))
 
-    keys, ys, sem = [], [], []
+    keys, ys, std = [], [], []
     for k, vals in sorted(cells.items()):
         arr = np.asarray(vals, dtype=float)
         keys.append(k)
         ys.append(arr.mean())
         if arr.size > 1:
-            sem.append(arr.std(ddof=1) / np.sqrt(arr.size))    # across-trial spread
+            std.append(arr.std(ddof=1))                         # across-trial spread
         else:
-            rec = np.asarray(scells[k], dtype=float)            # recorded per-point SEM
+            rec = np.asarray(scells[k], dtype=float)            # recorded per-point std
             rec = rec[np.isfinite(rec) & (rec > 0)]
-            sem.append(float(rec.mean()) if rec.size else np.nan)
+            std.append(float(rec.mean()) if rec.size else np.nan)
 
     keys = np.asarray(keys, dtype=float)
     ys = np.asarray(ys, dtype=float)
-    sem = np.asarray(sem, dtype=float)
-    finite = sem[np.isfinite(sem) & (sem > 0)]
+    std = np.asarray(std, dtype=float)
+    finite = std[np.isfinite(std) & (std > 0)]
     floor = float(np.median(finite)) if finite.size else 1.0
-    sem = np.where(np.isfinite(sem) & (sem > 0), sem, floor)
-    return keys[:, 0], keys[:, 1], keys[:, 2], keys[:, 3], ys, sem
+    std = np.where(np.isfinite(std) & (std > 0), std, floor)
+    return keys[:, 0], keys[:, 1], keys[:, 2], keys[:, 3], ys, std
 
 
 def fit_phase_ratio(
@@ -456,7 +449,7 @@ def fit_phase_ratio(
     g: np.ndarray,
     fixed_bg: np.ndarray,
     y: np.ndarray,
-    sem: np.ndarray,
+    std: np.ndarray,
     *,
     eta_ref: float,
     eta_ref_err: float,
@@ -485,7 +478,8 @@ def fit_phase_ratio(
     (``s, dPhi_comb, d``); ``fixed_bg`` is the per-row step-6 single-beam
     background (dark already removed) that the amplitudes do NOT scale.  Solved as
     a bounded nonlinear least squares (:func:`scipy.optimize.least_squares`);
-    errors are covariance-propagated from the Jacobian and Birge-scaled.
+    points are weighted by ``1/std`` and errors are covariance-propagated from
+    the Jacobian as-is (no chi2/dof, no Birge rescaling).
 
     ``frac = 0`` collapses the box: ``s`` is PINNED at exactly 1, so
     ``a = eta_ref`` and ``b = eta_tgt`` verbatim and only ``dPhi_comb`` and ``d``
@@ -504,7 +498,7 @@ def fit_phase_ratio(
     g = np.asarray(g, dtype=float)
     fixed_bg = np.asarray(fixed_bg, dtype=float)
     y = np.asarray(y, dtype=float)
-    sem = np.asarray(sem, dtype=float)
+    std = np.asarray(std, dtype=float)
 
     A, B = float(eta_ref), float(eta_tgt)
     fix_scale = frac == 0.0                                   # box collapsed -> s pinned at 1
@@ -515,7 +509,7 @@ def fit_phase_ratio(
                 + 2.0 * s2 * A * B * g * np.cos(dphi_slm + dphi) + fixed_bg + d)
 
     # phase seed: linear projection of the (background + self) subtracted signal
-    w = 1.0 / sem**2
+    w = 1.0 / std**2
     r0 = y - fixed_bg - A**2 - B**2 * g**2
     P = float(np.sum(w * r0 * g * np.cos(dphi_slm)))
     Q = float(np.sum(w * r0 * g * np.sin(dphi_slm)))
@@ -523,13 +517,13 @@ def fit_phase_ratio(
 
     if fix_scale:                  # 2 free params (dPhi_comb, d); a = A, b = B verbatim
         def resid(p):
-            return (predict(1.0, p[0], p[1]) - y) / sem
+            return (predict(1.0, p[0], p[1]) - y) / std
 
         sol = least_squares(resid, [dphi0, 0.0], max_nfev=20000)
         s, dphi, d = 1.0, float(sol.x[0]), float(sol.x[1])
     else:                          # 3 free params; s boxed to [max(0, 1-frac), 1+frac]
         def resid(p):
-            return (predict(p[0], p[1], p[2]) - y) / sem
+            return (predict(p[0], p[1], p[2]) - y) / std
 
         lo = [max(0.0, 1.0 - frac), -np.inf, -np.inf]
         hi = [1.0 + frac, np.inf, np.inf]
@@ -541,13 +535,10 @@ def fit_phase_ratio(
     y_pred = predict(s, dphi, d)
     residuals = y - y_pred
     n_free = 2 if fix_scale else 3
-    dof = max(len(y) - n_free, 1)
-    chi2_red = float(np.sum((residuals / sem) ** 2) / dof)
-    birge = max(1.0, np.sqrt(chi2_red))
 
-    # covariance from the weighted Jacobian at the solution (resid already /sem)
+    # covariance from the weighted Jacobian at the solution (resid already /std)
     try:
-        cov = np.linalg.inv(sol.jac.T @ sol.jac) * birge**2
+        cov = np.linalg.inv(sol.jac.T @ sol.jac)
     except np.linalg.LinAlgError:
         cov = np.full((n_free, n_free), np.nan)
     if fix_scale:
@@ -580,11 +571,11 @@ def fit_phase_ratio(
         a=a, a_err=a_err, b=b, b_err=b_err,
         amp=amp, amp_err=amp_err,
         offset=d, offset_err=offset_err,
-        chi2_red=chi2_red, dof=dof, birge=birge, r2=r2,
+        r2=r2,
         eta_ref=eta_ref, eta_tgt=eta_tgt, bound_frac=frac,
         a_at_bound=a_at_bound, b_at_bound=b_at_bound,
         bg0=bg0, bg1=bg1, bg2=bg2,
-        dphi_slm=dphi_slm, g=g, y=y, sem=sem, known=known,
+        dphi_slm=dphi_slm, g=g, y=y, std=std, known=known,
         y_pred=y_pred, residuals=residuals,
     )
 
@@ -620,7 +611,7 @@ def fit_result(
 
     ``dark`` (scalar) overrides the per-row dark uniformly.
     """
-    x_t, w_t, x_r, w_r, y, sem = _average_points(result, dark_override=dark)
+    x_t, w_t, x_r, w_r, y, std = _average_points(result, dark_override=dark)
 
     g = np.sqrt(np.clip(x_t * w_t, 0.0, None))         # target field amplitude
     dphi_slm = slm_phase_diff(x_t, w_t, x_r, w_r)       # SLM phase difference
@@ -628,7 +619,7 @@ def fit_result(
     result.tgt_model = tgt_model
     result.ref_model = ref_model
     if frac is None:
-        fit = fit_phase(dphi_slm, g, y, sem)
+        fit = fit_phase(dphi_slm, g, y, std)
     else:
         if single_beam_bg:
             # step-6 single-beam of both pairs as a fixed background (dark already out)
@@ -644,7 +635,7 @@ def fit_result(
             bg0 = bg1 = bg2 = 0.0
 
         fit = fit_phase_ratio(
-            dphi_slm, g, fixed_bg, y, sem,
+            dphi_slm, g, fixed_bg, y, std,
             eta_ref=ref_model.eta, eta_ref_err=ref_model.eta_err,
             eta_tgt=tgt_model.eta, eta_tgt_err=tgt_model.eta_err,
             bg0=bg0, bg1=bg1, bg2=bg2, frac=frac,
@@ -667,12 +658,12 @@ def swap_invariance(result: PhaseResult):
 
     Under the bilinear model the target amplitude ``sqrt(x w)`` and ``dPhi_SLM``
     (a channel *sum*) are swap-symmetric, so ``Z`` must be too; a residual well
-    above the combined SEM flags a genuine channel asymmetry (unequal per-channel
+    above the combined std flags a genuine channel asymmetry (unequal per-channel
     phase/amplitude law or crosstalk).  Returns ``(x_t, w_t, z, z_swapped,
-    abs_diff, sem)`` for the off-diagonal cells.  Falls back to raw Y only if the
+    abs_diff, std)`` for the off-diagonal cells.  Falls back to raw Y only if the
     fit is not attached.  ``fit.known`` already carries ``a^2 + b^2 g^2 + sb``.
     """
-    x_t, w_t, x_r, w_r, y, sem = _average_points(result)   # y already dark-subtracted
+    x_t, w_t, x_r, w_r, y, std = _average_points(result)   # y already dark-subtracted
     fit = result.fit
     if fit is not None and fit.known is not None and np.isfinite(fit.a):
         # clean interference: strip fitted self terms + step-6 single-beam + d
@@ -681,9 +672,9 @@ def swap_invariance(result: PhaseResult):
         sig = y
 
     lut = {(round(a, 9), round(b, 9)): (zz, ss)
-           for a, b, zz, ss in zip(x_t, w_t, sig, sem)}
+           for a, b, zz, ss in zip(x_t, w_t, sig, std)}
     out = []
-    for a, b, zz, ss in zip(x_t, w_t, sig, sem):
+    for a, b, zz, ss in zip(x_t, w_t, sig, std):
         if round(a, 9) == round(b, 9):
             continue
         swapped = lut.get((round(b, 9), round(a, 9)))
@@ -702,7 +693,7 @@ def swap_invariance(result: PhaseResult):
 _CSV_HEADER = [
     "trial", "tgt_index", "ref_index",
     "phi_xt_deg", "phi_wt_deg", "x_t", "w_t", "x_r", "w_r",
-    "dark_v", "voltage_mean_v", "voltage_std_v", "voltage_sem_v",
+    "dark_v", "voltage_mean_v", "voltage_std_v",
 ]
 
 
@@ -713,16 +704,17 @@ def write_phase_csv(result: PhaseResult, path: str | Path) -> str:
     comparison with the sweep tables); the fit reloads from the canonical
     intensities.  ``dark_v`` is the per-row dark (that row's trial start) used for
     per-row subtraction; the run's mean dark is also stashed as a trailing comment.
+    ``voltage_std_v`` is the trace spread the fit weights by; legacy CSVs carrying
+    the retired ``voltage_sem_v`` column still load, that column is ignored.
     """
     out = Path(path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(_CSV_HEADER)
-        for t, x_t, w_t, x_r, w_r, dark_v, mean_v, std_v, sem_v in zip(
+        for t, x_t, w_t, x_r, w_r, dark_v, mean_v, std_v in zip(
             result.trial, result.x_t, result.w_t, result.x_r, result.w_r,
             result.dark_v, result.voltage_mean_v, result.voltage_std_v,
-            result.voltage_sem_v,
         ):
             phi_xt = np.degrees(2.0 * float(phi_half(x_t)))
             phi_wt = np.degrees(2.0 * float(phi_half(w_t)))
@@ -730,7 +722,7 @@ def write_phase_csv(result: PhaseResult, path: str | Path) -> str:
                 [int(t), result.tgt_index, result.ref_index,
                  f"{phi_xt:.4g}", f"{phi_wt:.4g}",
                  f"{x_t:.6g}", f"{w_t:.6g}", f"{x_r:.6g}", f"{w_r:.6g}",
-                 f"{dark_v:.9g}", f"{mean_v:.9g}", f"{std_v:.9g}", f"{sem_v:.9g}"]
+                 f"{dark_v:.9g}", f"{mean_v:.9g}", f"{std_v:.9g}"]
             )
     with open(out, "a", newline="", encoding="utf-8") as f:
         f.write(f"# dark_mean_v,{result.dark:.9g}\n")
@@ -773,7 +765,7 @@ def load_phase_csv(
                 if len(parts) == 2 and parts[0].strip() == "dark_mean_v":
                     file_dark = float(parts[1])
 
-    rows: list[tuple[int, float, float, float, float, float, float, float, float | None]] = []
+    rows: list[tuple[int, float, float, float, float, float, float, float | None]] = []
     tgt_index, ref_index = tgt_model.index, ref_model.index
     with open(Path(path), newline="", encoding="utf-8") as f:
         for row in csv.DictReader(line for line in f if not line.startswith("#")):
@@ -781,15 +773,13 @@ def load_phase_csv(
             if only_tgt is not None and row_tgt != only_tgt:
                 continue  # skip the other targets in a multi-pair CSV
             dv = row.get("dark_v")
-            std_v = float(row.get("voltage_std_v", "nan") or "nan")
-            sem_v = float(row["voltage_sem_v"])  # the fit weight; every CSV records it
+            std_v = float(row["voltage_std_v"])  # the fit weight; every CSV records it
             rows.append((
                 int(float(row.get("trial", 0))),
                 float(row["x_t"]), float(row["w_t"]),
                 float(row["x_r"]), float(row["w_r"]),
                 float(row["voltage_mean_v"]),
                 std_v,
-                sem_v,
                 float(dv) if dv not in (None, "") else None,
             ))
             tgt_index = row_tgt
@@ -802,8 +792,8 @@ def load_phase_csv(
         else 0.5 * (tgt_model.d + ref_model.d)
     )
     # per-row dark: CSV column if present (and not overridden), else the scalar
-    if dark is None and all(r[8] is not None for r in rows) and rows:
-        dark_v = np.array([r[8] for r in rows], dtype=float)
+    if dark is None and all(r[7] is not None for r in rows) and rows:
+        dark_v = np.array([r[7] for r in rows], dtype=float)
     else:
         dark_v = np.full(len(rows), float(scalar_dark), dtype=float)
 
@@ -816,7 +806,6 @@ def load_phase_csv(
         w_r=np.array([r[4] for r in rows], dtype=float),
         voltage_mean_v=np.array([r[5] for r in rows], dtype=float),
         voltage_std_v=np.array([r[6] for r in rows], dtype=float),
-        voltage_sem_v=np.array([r[7] for r in rows], dtype=float),
         dark_v=dark_v,
         n_trials=int(trials.max()) + 1 if trials.size else 1,
         csv_path=str(Path(path).resolve()),
@@ -845,9 +834,6 @@ def phase_fit_payload(fit: PhaseFit) -> dict:
         "amp_2ab_err": fit.amp_err,
         "dark_resid_v": fit.offset,  # residual DC after per-row dark subtraction
         "dark_resid_err_v": fit.offset_err,
-        "chi2_red": fit.chi2_red,
-        "dof": fit.dof,
-        "birge": fit.birge,
         "r2": fit.r2,
     }
 

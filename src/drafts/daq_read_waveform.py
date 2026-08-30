@@ -2,18 +2,18 @@
 
 Needs real hardware (no mocks), so it is not a pytest test.  The acquisition
 itself lives in :mod:`daq_module` (``NIDAQDriver`` -> ``DAQController``): DIFF
-input, one untriggered finite window, digital Butterworth low-pass, SEM over
-the effective sample count ``n_eff = 2*T*f_cut``.  This draft drives that same
-path directly to eyeball a raw trace and its amplitude spectrum -- the
-bring-up view the production monitor doesn't plot.
+input, one untriggered finite window, digital Butterworth low-pass, mean and
+std of the filtered trace.  This draft drives that same path directly to
+eyeball a raw trace and its amplitude spectrum -- the bring-up view the
+production monitor doesn't plot.
 
 This draft distinguishes TWO cutoffs where the module has one: ``F_CUT_HW`` is
 the hardware low-pass (the detector/TIA 3 dB bandwidth -- physics, already
 baked into the signal), ``F_CUT_DIG`` is the digital Butterworth applied in
 software and may differ (e.g. cut below the hardware bandwidth to reject more
-noise).  Statistics follow the narrowest cutoff in the chain
-(``effective_f_cut``): settle time and the filtered trace's ``n_eff`` use
-``min(F_CUT_HW, F_CUT_DIG)``.
+noise).  The narrowest cutoff in the chain (``effective_f_cut`` =
+``min(F_CUT_HW, F_CUT_DIG)``) is the slowest filter, so it sets the settle
+guard dropped before any statistics.
 
 Two draft-local corrections sit on top of that shared path (neither touches
 ``daq_module``): every read is sign-inverted -- our TIA outputs negative volts
@@ -29,7 +29,7 @@ discarded after filtering as a turn-on transient before any statistics.
   parameter per call::
 
       from daq_read_waveform import measure, read_waveform
-      mean_v, sem_v = measure(duration_s=1.0)         # low-passed mean + its SEM
+      mean_v, std_v = measure(duration_s=1.0)         # low-passed mean + its std
       times, voltages = read_waveform()               # raw trace, if you want it
 
 The module-level constants mirror the :class:`daq_module.DAQMonitorSettings`
@@ -62,7 +62,6 @@ CHANNEL = "ai0"
 F_CUT_HW = _DEFAULTS.f_cut               # hardware 3 dB bandwidth (Hz)
 F_CUT_HW = 150
 F_CUT_DIG = 20                     # digital low-pass cutoff (Hz); override to differ
-F_CUT = F_CUT_HW                         # back-compat alias (imported by daq_dynamic_read)
 FILTER_ORDER = _DEFAULTS.filter_order    # digital Butterworth low-pass order
 SAMPLE_RATE_HZ = _DEFAULTS.sample_rate
 # SAMPLE_RATE_HZ = 1_000
@@ -133,19 +132,25 @@ def amplitude_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray
     return freqs[1:], spec[1:]  # drop DC bin
 
 
-def stats(v: np.ndarray, n_eff: float) -> tuple[float, float]:
-    """Return ``(mean, sem)`` for a trace, sem = std / sqrt(n_eff)."""
-    return float(v.mean()), float(v.std() / np.sqrt(n_eff))
+def stats(v: np.ndarray) -> tuple[float, float]:
+    """Return ``(mean, std)`` for a trace -- the spread as measured, undivided.
+
+    No standard error of the mean is derived: the low-passed samples are
+    correlated (drift and 1/f wander dominate over a multi-second window), so
+    dividing the spread by any assumed independent-sample count would report an
+    uncertainty far smaller than the scatter actually seen between repeats.
+    """
+    return float(v.mean()), float(v.std())
 
 
-def report(label: str, v: np.ndarray, n_eff: float) -> tuple[float, float]:
-    """Print mean, SEM (= std / sqrt(n_eff)) and the SEM ratio; return ``(mean, sem)``."""
-    mean, sem = stats(v, n_eff)
+def report(label: str, v: np.ndarray) -> tuple[float, float]:
+    """Print mean, std and the std ratio (std/|mean|); return ``(mean, std)``."""
+    mean, std = stats(v)
     print(
-        f"{label:>8}: mean={abs(mean)*1000:.4f} mV, sem={sem*1000:.4f} mV, "
-        f"sem ratio={abs(sem/mean)*100:.4f}%"
+        f"{label:>8}: mean={abs(mean)*1000:.4f} mV, std={std*1000:.4f} mV, "
+        f"std ratio={abs(std/mean)*100:.4f}%"
     )
-    return mean, sem
+    return mean, std
 
 
 def effective_f_cut(f_cut_hw: float = F_CUT_HW, f_cut_dig: float = F_CUT_DIG) -> float:
@@ -153,7 +158,7 @@ def effective_f_cut(f_cut_hw: float = F_CUT_HW, f_cut_dig: float = F_CUT_DIG) ->
 
     The hardware low-pass is already in the signal; the digital one is applied
     on top.  Whichever cuts lower sets the noise bandwidth of the filtered
-    trace, hence the settle guard and ``n_eff``.
+    trace, hence the settle guard.
     """
     return min(f_cut_hw, f_cut_dig)
 
@@ -185,16 +190,16 @@ def measure(
     invert: bool = INVERT,
     verbose: bool = False,
 ) -> tuple[float, float]:
-    """Read one waveform and return ``(mean_v, sem_v)`` of the low-passed trace.
+    """Read one waveform and return ``(mean_v, std_v)`` of the low-passed trace.
 
     Like ``DAQController.monitor_cycle`` -- band-limit and report the mean plus
-    its standard error -- but with the two cutoffs split: the digital
-    Butterworth runs at ``f_cut_dig`` while ``f_cut_hw`` states the analog
-    bandwidth already in the signal, and statistics use the narrower of the two
-    (``f_eff``).  Two draft-local corrections on top: the read is sign-inverted
+    the trace spread -- but with the two cutoffs split: the digital Butterworth
+    runs at ``f_cut_dig`` while ``f_cut_hw`` states the analog bandwidth already
+    in the signal, and the narrower of the two (``f_eff``) sets the settle
+    guard.  Two draft-local corrections on top: the read is sign-inverted
     (``invert``) and the first ``SETTLE_CYCLES / f_eff`` s are dropped after
-    filtering as a turn-on transient, so the mean and its SEM (over the
-    retained ``n_eff = 2 * T_kept * f_eff``) see only steady-state signal.
+    filtering as a turn-on transient, so the mean and std see only steady-state
+    signal.
     """
     _, voltages = read_waveform(
         device=device, channel=channel, sample_rate_hz=sample_rate_hz,
@@ -205,8 +210,7 @@ def measure(
     f_eff = effective_f_cut(f_cut_hw, f_cut_dig)
     n_settle = settle_samples(sample_rate_hz, f_eff)
     kept = filtered[n_settle:] if filtered.size > n_settle else filtered
-    n_eff = max(2.0 * (kept.size / sample_rate_hz) * f_eff, 1.0)
-    return stats(kept, n_eff)
+    return stats(kept)
 
 
 __all__ = [
@@ -235,16 +239,14 @@ def main() -> None:
     settle_s = n_settle / SAMPLE_RATE_HZ
     v_kept, f_kept = voltages[n_settle:], filtered[n_settle:]
     t_kept = v_kept.size / SAMPLE_RATE_HZ
-    n_eff_raw = max(2.0 * t_kept * F_CUT_HW, 1.0)
-    n_eff_filt = max(2.0 * t_kept * f_eff, 1.0)
     print(
         f"Read {voltages.size} samples over {times[-1]:.3f} s; "
         f"dropped first {settle_s*1000:.0f} ms warmup ({n_settle} samples); "
-        f"effective samples: raw {n_eff_raw:.0f} (hw {F_CUT_HW:g} Hz), "
-        f"filtered {n_eff_filt:.0f} ({f_eff:g} Hz)"
+        f"kept {t_kept:.2f} s (raw bandwidth {F_CUT_HW:g} Hz, "
+        f"filtered {f_eff:g} Hz)"
     )
-    report("raw", v_kept, n_eff_raw)
-    report("filtered", f_kept, n_eff_filt)
+    report("raw", v_kept)
+    report("filtered", f_kept)
 
     fig, (ax_t, ax_f) = plt.subplots(2, 1, figsize=(10, 8))
 

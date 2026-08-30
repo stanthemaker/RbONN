@@ -70,7 +70,7 @@ class DAQMonitorSettings:
     # 5, 10 V and rounds any request UP -- +/-0.1 V is the most sensitive.
     min_val: float = -0.1            # V
     max_val: float = 0.1             # V
-    f_cut: float = 20.0              # Hz, hardware 3 dB bandwidth (low-pass + effective-N)
+    f_cut: float = 20.0              # Hz, hardware 3 dB bandwidth (digital low-pass)
     filter_order: int = 4            # digital Butterworth low-pass order
 
 
@@ -154,13 +154,13 @@ class DAQController:
         The raw waveform behind the average is cached on ``last_times`` /
         ``last_values`` so callers can plot it (e.g. a "current waveform" view).
 
-        The reported ``value`` / ``std`` / ``sem`` are all computed on the
-        *low-passed* trace (band-limited to ``settings.f_cut``, the hardware
-        bandwidth), so out-of-band noise doesn't inflate the spread.  ``sem`` is
-        the standard error of the mean taken over the *effective* independent-
-        sample count ``n_eff = 2 * duration * f_cut`` (Nyquist for a
-        ``f_cut``-bandwidth signal), not the raw sample count -- oversampling
-        past ``2 * f_cut`` adds no new information about the mean.
+        The reported ``value`` / ``std`` are both computed on the *low-passed*
+        trace (band-limited to ``settings.f_cut``, the hardware bandwidth), so
+        out-of-band noise doesn't inflate the spread.  ``std`` is the spread of
+        that trace and is the only uncertainty reported: no standard error of
+        the mean is derived from it, since the trace samples are correlated
+        (drift and 1/f wander dominate) and dividing by an assumed independent-
+        sample count understates the real point-to-point scatter.
 
         ``single=True`` marks a weak point -- at most one beam on (``x == 0 or
         w == 0``, including the all-off dark): it reads the longer
@@ -194,11 +194,11 @@ class DAQController:
 
     def _sample_from(self, settings: DAQMonitorSettings, values: np.ndarray,
                      index: int) -> MonitorSample:
-        """Build a MonitorSample from a raw trace: low-pass, then mean/std/sem.
+        """Build a MonitorSample from a raw trace: low-pass, then mean/std.
 
-        ``std`` is the spread of the (low-passed) trace; ``sem`` divides it by
-        sqrt(n_eff), n_eff = 2 * duration * f_cut.  Also caches the raw trace on
-        ``last_values`` / ``last_times``.
+        ``std`` is the spread of the (low-passed) trace and ``std_ratio`` is
+        ``std / mean``.  Also caches the raw trace on ``last_values`` /
+        ``last_times``.
         """
         self.last_values = values
         self.last_times = (
@@ -208,12 +208,9 @@ class DAQController:
         filtered = lowpass(values, settings.sample_rate, settings.f_cut, settings.filter_order)
         mean = float(filtered.mean())
         std = float(filtered.std())
-        duration = values.size / settings.sample_rate if settings.sample_rate else 0.0
-        n_eff = max(2.0 * duration * settings.f_cut, 1.0)
-        sem = std / float(np.sqrt(n_eff))
-        sem_ratio = sem / mean if mean else float("nan")
+        std_ratio = std / mean if mean else float("nan")
         sample = MonitorSample(
-            value=mean, std=std, sem=sem, sem_ratio=sem_ratio,
+            value=mean, std=std, std_ratio=std_ratio,
             index=index, timestamp=time.time(),
         )
         self._notify_sample_listeners(sample)

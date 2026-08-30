@@ -485,7 +485,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._daqmon_times: list[float] = []
         self._daqmon_values: list[float] = []
         self._daqmon_stds: list[float] = []
-        self._daqmon_sems: list[float] = []
         self.hold_stop_event: threading.Event | None = None
         # Heater (Thorlabs TC300B): one serial link, so at most one background
         # loop (ramp or read-only monitor) owns it at a time.
@@ -4900,7 +4899,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._panel_with_widget("Joint fit (measured vs predicted)", self.tpa_fit_canvas)
         )
         plot_split.addWidget(
-            self._panel_with_widget("Pulls (residual / SEM)", self.tpa_pulls_canvas)
+            self._panel_with_widget("Pulls (residual / std)", self.tpa_pulls_canvas)
         )
         plot_split.setSizes([560, 520])
         page.layout().addWidget(plot_split, 1)
@@ -5105,7 +5104,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"η = {f.eta:.4g} ± {f.eta_err:.2g}   "
             f"a_x={p['a_x'][0]:.3g}  a_w={p['a_w'][0]:.3g}  "
             f"d={p['d'][0]*1e3:.3f} mV   "
-            f"χ²/dof={f.chi2_red:.2f} (Birge ×{f.birge:.2f})  R²={f.r2:.4f}"
+            f"R²={f.r2:.4f}"
         )
 
     def _tpa_draw_fit(self, grid) -> None:
@@ -5124,11 +5123,11 @@ class MainWindow(QtWidgets.QMainWindow):
         f = grid.fit
         y = f.y * 1e3
         yp = f.y_pred * 1e3
-        sem = f.sem * 1e3
+        std = f.std * 1e3
         axis = (f.x == 0) | (f.w == 0)
         lims = [min(y.min(), yp.min()), max(y.max(), yp.max())]
         ax.plot(lims, lims, "--", color="#e0a447", lw=1.0, label="ideal")
-        ax.errorbar(y, yp, xerr=sem, fmt="none", ecolor="#41515c", elinewidth=0.8, zorder=1)
+        ax.errorbar(y, yp, xerr=std, fmt="none", ecolor="#41515c", elinewidth=0.8, zorder=1)
         if axis.any():
             ax.scatter(y[axis], yp[axis], marker="s", s=42, facecolor="none",
                        edgecolor="#e0a447", lw=1.3, zorder=3, label="axis")
@@ -5142,19 +5141,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpa_fit_canvas.draw_idle()
 
     def _tpa_draw_pulls(self, grid) -> None:
-        """Right: normalised residuals (pull = residual/SEM) vs predicted."""
+        """Right: normalised residuals (pull = residual/std) vs predicted."""
         self.tpa_pulls_fig.clear()
         self.tpa_pulls_fig.patch.set_facecolor("#101820")
         ax = self.tpa_pulls_fig.add_subplot(111)
         self._style_dark_axes(ax)
         ax.set_xlabel("Predicted voltage (mV)")
-        ax.set_ylabel("Pull = residual / SEM")
+        ax.set_ylabel("Pull = residual / std")
         if grid is None or grid.fit is None:
             self.tpa_pulls_canvas.draw_idle()
             return
         f = grid.fit
         yp = f.y_pred * 1e3
-        pulls = f.residuals / f.sem
+        pulls = f.residuals / f.std
         axis = (f.x == 0) | (f.w == 0)
         ax.axhspan(-1, 1, color="#8fd14f", alpha=0.12)
         ax.axhline(0.0, color="#e0a447", ls="--", lw=1.0)
@@ -5557,7 +5556,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"ΔΦ_comb = {f.dphi_comb_deg:+.2f} ± "
             f"{np.degrees(f.dphi_comb_err):.2f}°   "
             f"a={f.a:.4g}  b={f.b:.4g}   "
-            f"χ²/dof={f.chi2_red:.2f} (Birge ×{f.birge:.2f}){flags}"
+            f"R²={f.r2:.4f}{flags}"
         )
         plot_fringe(self.tpa_phase_fig, f, k)
         self.tpa_phase_canvas.draw_idle()
@@ -6421,15 +6420,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Unlike the encoder page's behaviour recorder (one point per SLM send),
         this reads back-to-back averaged samples from the connected DAQ and
-        scrolls them on a strip chart -- a live voltmeter with a per-window SEM
+        scrolls them on a strip chart -- a live voltmeter with a per-window std
         band. Connect the DAQ on the Connections page first.
         """
         page = self._page_shell("DAQ Monitor")
         subtitle = QtWidgets.QLabel(
             "Live continuous readout of the NI-DAQ analog input. Each point is one "
             "averaged acquisition over the window below; the shaded band is "
-            "\N{PLUS-MINUS SIGN}SEM (std / \N{SQUARE ROOT}n_eff, "
-            "n_eff = 2\N{MIDDLE DOT}window\N{MIDDLE DOT}f_cut). Connect the DAQ on "
+            "\N{PLUS-MINUS SIGN}std of the low-passed trace. Connect the DAQ on "
             "the Connections page first."
         )
         subtitle.setObjectName("PageSubtitle")
@@ -6466,7 +6464,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daqmon_fcut.setValue(20.0)
         self.daqmon_fcut.setSuffix(" Hz")
         self.daqmon_fcut.setToolTip(
-            "Low-pass bandwidth for the mean/std and the effective-N behind the SEM"
+            "Low-pass bandwidth for the reported mean and std"
         )
         self.daqmon_history = QtWidgets.QSpinBox()
         self.daqmon_history.setRange(10, 100_000)
@@ -6598,21 +6596,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._daqmon_t0 is None:
             self._daqmon_t0 = sample.timestamp
         std = sample.std if sample.std is not None else float("nan")
-        sem = sample.sem if sample.sem is not None else float("nan")
         self._daqmon_times.append(sample.timestamp - self._daqmon_t0)
         self._daqmon_values.append(sample.value)
         self._daqmon_stds.append(std)
-        self._daqmon_sems.append(sem)
         # keep only the most recent `history` points on the chart
         keep = int(self.daqmon_history.value())
         if len(self._daqmon_times) > keep:
             self._daqmon_times = self._daqmon_times[-keep:]
             self._daqmon_values = self._daqmon_values[-keep:]
             self._daqmon_stds = self._daqmon_stds[-keep:]
-            self._daqmon_sems = self._daqmon_sems[-keep:]
-        rel = (sem / abs(sample.value) * 100.0) if sample.value else float("nan")
+        rel = (std / abs(sample.value) * 100.0) if sample.value else float("nan")
         self.daqmon_readout.setText(
-            f"{sample.value*1000:+.4f} \N{PLUS-MINUS SIGN} {sem*1000:.4f} mV"
+            f"{sample.value*1000:+.4f} \N{PLUS-MINUS SIGN} {std*1000:.4f} mV"
             f"   ({rel:.2f}%)"
         )
         self._daq_monitor_draw()
@@ -6627,8 +6622,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._daqmon_times:
             t = np.asarray(self._daqmon_times, dtype=float)
             v = np.asarray(self._daqmon_values, dtype=float) * 1000.0
-            sem = np.asarray(self._daqmon_sems, dtype=float) * 1000.0
-            band = np.where(np.isfinite(sem), sem, 0.0)
+            std = np.asarray(self._daqmon_stds, dtype=float) * 1000.0
+            band = np.where(np.isfinite(std), std, 0.0)
             ax.fill_between(t, v - band, v + band, color="#88c0d0", alpha=0.25,
                             linewidth=0)
             ax.plot(t, v, color="#88c0d0", linewidth=1.2)
@@ -6644,7 +6639,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._daqmon_times = []
         self._daqmon_values = []
         self._daqmon_stds = []
-        self._daqmon_sems = []
         self.daqmon_readout.setText("\N{EN DASH}")
         self.daqmon_save_button.setEnabled(False)
         self.daqmon_status.setText("Cleared.")
@@ -6662,10 +6656,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
             with open(path, "w", newline="") as fh:
                 writer = csv.writer(fh)
-                writer.writerow(["elapsed_s", "voltage_v", "voltage_std_v", "voltage_sem_v"])
-                for t, val, std, sem in zip(self._daqmon_times, self._daqmon_values,
-                                            self._daqmon_stds, self._daqmon_sems):
-                    writer.writerow([f"{t:.6f}", f"{val:.9g}", f"{std:.9g}", f"{sem:.9g}"])
+                writer.writerow(["elapsed_s", "voltage_v", "voltage_std_v"])
+                for t, val, std in zip(self._daqmon_times, self._daqmon_values,
+                                       self._daqmon_stds):
+                    writer.writerow([f"{t:.6f}", f"{val:.9g}", f"{std:.9g}"])
             self._log(f"Saved DAQ monitor log → {path}")
         except Exception as exc:
             self._log(f"Save failed: {exc}")
@@ -6844,8 +6838,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daq_mon_fcut.setValue(20.0); self.daq_mon_fcut.setSuffix(" Hz")
         self.daq_mon_fcut.setMaximumWidth(100)
         self.daq_mon_fcut.setToolTip(
-            "Detector 3 dB bandwidth: low-pass cutoff for the trace and the "
-            "effective-N (2*T*f_cut) behind the reported SEM"
+            "Detector 3 dB bandwidth: low-pass cutoff for the trace behind "
+            "the reported mean and std"
         )
         self.daq_mon_range = QtWidgets.QComboBox()
         self.daq_mon_range.setMaximumWidth(100)
