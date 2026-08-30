@@ -1,14 +1,14 @@
 """Long-term monitor: DAQ filtered mean + 2400 resistance + OSA spectrum every 15 minutes.
 
 Each cycle takes the same DAQ reading as ``python src/drafts/daq_read_waveform.py``
-(sign inversion, digital low-pass, settle-guard drop, ``n_eff`` SEM), one
+(sign inversion, digital low-pass, settle-guard drop, trace std), one
 resistance reading from the Keithley 2400 over GPIB, and one OSA sweep with the
 live-viewer parameters (778 nm center, 8 nm span, HIGH3, 1001 points, 8 uW ref,
 linear W).
 
 Per cycle it appends one row to a master CSV under ``src/calib_data``::
 
-    timestamp, elapsed_min, daq_mean_mV, daq_sem_mV, ohm_Ohm,
+    timestamp, elapsed_min, daq_mean_mV, daq_std_mV, ohm_Ohm,
     osa_peak_wl_nm, osa_peak_uW, spectrum_csv
 
 and saves the full OSA spectrum to its own CSV inside a run folder next to the
@@ -81,11 +81,11 @@ OSA_SETTINGS = MeasurementSettings(
 
 
 def read_daq() -> tuple[list, str]:
-    """Filtered mean and its SEM on ``DAQ_CHANNEL``, in mV."""
-    (mean_v, sem_v), = daq_measure([DAQ_CHANNEL])
+    """Filtered mean and its trace std on ``DAQ_CHANNEL``, in mV."""
+    (mean_v, std_v), = daq_measure([DAQ_CHANNEL])
     mean_mv = round(abs(mean_v) * 1000.0, 6)
-    sem_mv = round(sem_v * 1000.0, 6)
-    return [mean_mv, sem_mv], f"daq mean={mean_mv:.4f} mV sem={sem_mv:.4f} mV"
+    std_mv = round(std_v * 1000.0, 6)
+    return [mean_mv, std_mv], f"daq mean={mean_mv:.4f} mV std={std_mv:.4f} mV"
 
 
 def read_ohm() -> tuple[list, str]:
@@ -126,7 +126,7 @@ def read_osa(spectra_dir: Path) -> tuple[list, str]:
 def main() -> None:
     ohm_src = "no 2400" if K2400_RESOURCE is None else f"2400 @ {K2400_RESOURCE}"
     probes = [
-        Probe(f"DAQ {DAQ_CHANNEL}", ("daq_mean_mV", "daq_sem_mV"), read_daq),
+        Probe(f"DAQ {DAQ_CHANNEL}", ("daq_mean_mV", "daq_std_mV"), read_daq),
         Probe(ohm_src, ("ohm_Ohm",), read_ohm),
         # bound late: the run folder only exists once RunLog has made it
         Probe("OSA", ("osa_peak_wl_nm", "osa_peak_uW", "spectrum_csv"),

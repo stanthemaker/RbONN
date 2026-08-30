@@ -12,13 +12,13 @@ window and their per-cycle ratio ``signal / laser`` is meaningful: anything
 left in that ratio is not the laser.  (The board multiplexes, so the two
 channels are microseconds apart -- nothing at a 20 Hz cutoff.)  Every other DAQ
 knob -- 1 kS/s, 10 s window, +/-0.1 V, sign inversion, 20 Hz digital low-pass,
-settle-guard drop, ``n_eff`` SEM -- is inherited from ``daq_read_waveform.py``,
+settle-guard drop, trace std -- is inherited from ``daq_read_waveform.py``,
 so this reads exactly what that diagnostic plots.
 
 Per cycle it appends one row to a master CSV under ``src/calib_data``::
 
-    timestamp, elapsed_min, sig_mean_mV, sig_sem_mV,
-    laser_mean_mV, laser_sem_mV, pmt_ohm_Ohm
+    timestamp, elapsed_min, sig_mean_mV, sig_std_mV,
+    laser_mean_mV, laser_std_mV, pmt_ohm_Ohm
 
 The thermistor is logged in raw ohms, not degrees: convert in analysis once the
 part is known (``th10k_celsius()`` in ``plot_osa_monitor.py`` is the TH10K
@@ -77,18 +77,18 @@ K2400_TIMEOUT_S = 10.0
 
 
 def read_daq() -> tuple[list, str]:
-    """Signal and laser power from one acquisition, as mean +/- SEM in mV."""
-    (sig_v, sig_sem_v), (las_v, las_sem_v) = daq_measure([SIGNAL_CHANNEL, LASER_CHANNEL])
+    """Signal and laser power from one acquisition, as mean +/- trace std in mV."""
+    (sig_v, sig_std_v), (las_v, las_std_v) = daq_measure([SIGNAL_CHANNEL, LASER_CHANNEL])
     sig_mv = round(abs(sig_v) * 1000.0, 6)
-    sig_sem_mv = round(sig_sem_v * 1000.0, 6)
+    sig_std_mv = round(sig_std_v * 1000.0, 6)
     las_mv = round(abs(las_v) * 1000.0, 6)
-    las_sem_mv = round(las_sem_v * 1000.0, 6)
+    las_std_mv = round(las_std_v * 1000.0, 6)
     # Ratio is for the console only -- the CSV keeps raw measurements, so the
     # normalisation stays a choice made in analysis.
     ratio = f"{sig_mv / las_mv:.4f}" if las_mv else "n/a"
     return (
-        [sig_mv, sig_sem_mv, las_mv, las_sem_mv],
-        f"sig={sig_mv:.4f}+-{sig_sem_mv:.4f} mV  laser={las_mv:.4f}+-{las_sem_mv:.4f} mV  "
+        [sig_mv, sig_std_mv, las_mv, las_std_mv],
+        f"sig={sig_mv:.4f}+-{sig_std_mv:.4f} mV  laser={las_mv:.4f}+-{las_std_mv:.4f} mV  "
         f"sig/laser={ratio}",
     )
 
@@ -113,7 +113,7 @@ def main() -> None:
     probes = [
         Probe(
             f"DAQ {SIGNAL_CHANNEL}+{LASER_CHANNEL}",
-            ("sig_mean_mV", "sig_sem_mV", "laser_mean_mV", "laser_sem_mV"),
+            ("sig_mean_mV", "sig_std_mV", "laser_mean_mV", "laser_std_mV"),
             read_daq,
         ),
         Probe(ohm_src, ("pmt_ohm_Ohm",), read_pmt_ohm),

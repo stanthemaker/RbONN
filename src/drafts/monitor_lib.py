@@ -85,12 +85,12 @@ def daq_measure(
     f_cut_dig: float = F_CUT_DIG,
     filter_order: int = FILTER_ORDER,
 ) -> list[tuple[float, float]]:
-    """Read one or more AI channels in a SINGLE acquisition -> ``(mean_v, sem_v)`` each.
+    """Read one or more AI channels in a SINGLE acquisition -> ``(mean_v, std_v)`` each.
 
     Same processing chain as :func:`daq_read_waveform.measure` -- DIFF input,
-    sign inversion, digital Butterworth low-pass, settle-guard drop, SEM over
-    ``n_eff = 2 * T_kept * f_eff`` -- applied per channel, but with every
-    channel acquired in one finite task so they share a window.  The board
+    sign inversion, digital Butterworth low-pass, settle-guard drop, then the
+    std of the retained trace -- applied per channel, but with every channel
+    acquired in one finite task so they share a window.  The board
     multiplexes rather than sampling simultaneously, which puts microseconds of
     skew between channels: nothing at a 20 Hz cutoff, so a per-cycle ratio of
     two channels is meaningful.
@@ -121,8 +121,7 @@ def daq_measure(
     for trace in raw:
         filtered = lowpass(trace, sample_rate_hz, f_cut_dig, filter_order)
         kept = filtered[n_settle:] if filtered.size > n_settle else filtered
-        n_eff = max(2.0 * (kept.size / sample_rate_hz) * f_eff, 1.0)
-        out.append(stats(kept, n_eff))
+        out.append(stats(kept))
     return out
 
 

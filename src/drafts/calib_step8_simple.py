@@ -18,7 +18,8 @@ the two simplest cases, measures, and prints the difference:
 * **two pairs** -- pairs j and k driven together, both at ``x = w = v``.
 
 Nothing is fitted to the new data; ``diff = meas - pred`` and
-``pull = diff / SEM`` are the whole result.
+``pull = diff / std`` are the whole result -- ``std`` being the spread of the
+low-passed trace, the one uncertainty these drafts carry.
 
 Not a pytest test (no mocks, needs real hardware) -- run it directly::
 
@@ -179,8 +180,8 @@ def _csv_header(pairs) -> list[str]:
     cols = ["block", "pairs", "v"]
     for k in pairs:
         cols += [f"x_{k}", f"w_{k}"]
-    return cols + ["dark_v", "voltage_mean_v", "voltage_std_v", "voltage_sem_v",
-                   "sem_ratio", "pred_v"]
+    return cols + ["dark_v", "voltage_mean_v", "voltage_std_v", "std_ratio",
+                   "pred_v"]
 
 
 def _pairs_tag(driven) -> str:
@@ -206,9 +207,9 @@ def write_csv(path, pairs, rows, *, method: str) -> str:
                 on = float(r["v"]) if k in driven else 0.0
                 line += [f"{on:.6g}", f"{on:.6g}"]
             mean_v = r["mean_v"]
-            ratio = abs(r["sem_v"] / mean_v) if mean_v else float("inf")
+            ratio = abs(r["std_v"] / mean_v) if mean_v else float("inf")
             line += [f"{r['dark_v']:.9g}", f"{mean_v:.9g}", f"{r['std_v']:.9g}",
-                     f"{r['sem_v']:.9g}", f"{ratio:.6g}", f"{r['pred_v']:.9g}"]
+                     f"{ratio:.6g}", f"{r['pred_v']:.9g}"]
             writer.writerow(line)
         f.write(f"# step7_json,{IN_STEP7}\n")
         f.write(f"# pred_method,{method}\n")
@@ -219,9 +220,13 @@ def write_csv(path, pairs, rows, *, method: str) -> str:
 def load_csv(path):
     """Reload a step-8-simple CSV -> ``(pairs, blocks)``.
 
-    ``blocks`` is a list of ``(driven, levels, dark, mean, std, sem)`` in file
+    ``blocks`` is a list of ``(driven, levels, dark, mean, std)`` in file
     order; the driven set of each block comes from the ``pairs`` column, so the
     file is self-describing and PAIRS may have changed since it was collected.
+
+    ``std`` is read from ``voltage_std_v``, present in every generation of this
+    CSV; the retired ``voltage_sem_v``/``sem_ratio`` columns of older files are
+    ignored, so they still load.
     """
     with open(Path(path), newline="", encoding="utf-8") as f:
         reader = csv.DictReader(line for line in f if not line.startswith("#"))
@@ -248,7 +253,6 @@ def load_csv(path):
             np.array([float(r["dark_v"]) for r in group]),
             np.array([float(r["voltage_mean_v"]) for r in group]),
             np.array([float(r.get("voltage_std_v", "nan") or "nan") for r in group]),
-            np.array([float(r["voltage_sem_v"]) for r in group]),
         ))
     return sorted(seen), blocks
 
@@ -261,11 +265,11 @@ def compare(blocks, models, phases, *, method: str, png_path) -> None:
     """Print ``meas`` vs ``pred`` for every block, then the summary; write the PNG."""
     summary, plot_rows = [], []
 
-    for driven, v, dark, mean, _std, sem in blocks:
+    for driven, v, dark, mean, std in blocks:
         y = mean - dark
         pred = predict_curve(models, phases, driven, v)
         resid = y - pred
-        pull = resid / sem
+        pull = resid / std
 
         kind = "One pair" if len(driven) == 1 else "Two pairs"
         print(f"\n=== {kind}: {_pairs_tag(driven)}  [{method}] "
@@ -275,18 +279,21 @@ def compare(blocks, models, phases, *, method: str, png_path) -> None:
             print(f"  {v[i]:5.3f}  {y[i]*1e3:7.4f}  {pred[i]*1e3:7.4f}  "
                   f"{resid[i]*1e3:+7.4f}  {pull[i]:+6.2f}")
         rms = float(np.sqrt(np.mean(resid**2)))
-        chi2 = float(np.sum(pull**2)) / y.size      # no free params -> dof = n
+        rms_std = float(np.sqrt(np.mean(std**2)))
         print(f"  rms(meas - pred) = {rms*1e3:.4f} mV   "
               f"max |diff| = {float(np.max(np.abs(resid)))*1e3:.4f} mV   "
-              f"chi2/dof = {chi2:.2f}")
-        summary.append((driven, rms, float(np.max(np.abs(pull))), chi2))
-        plot_rows.append((driven, v, y, sem, pred, pull))
+              f"rms(std) = {rms_std*1e3:.4f} mV")
+        summary.append((driven, rms, float(np.max(np.abs(pull))), rms_std))
+        plot_rows.append((driven, v, y, std, pred, pull))
 
     print(f"\n=== Summary [{method}] ===")
-    print("  block        rms (mV)   max |pull|   chi2/dof")
-    for driven, rms, max_pull, chi2 in summary:
+    # rms(std) is the measurement noise the residual should be judged
+    # against: rms(diff) at or below it means the forward model is as good as
+    # the data.
+    print("  block        rms (mV)   max |pull|   rms(std) (mV)")
+    for driven, rms, max_pull, rms_std in summary:
         print(f"    {_pairs_tag(driven):<8s}   {rms*1e3:7.4f}     {max_pull:7.2f}    "
-              f"{chi2:8.2f}")
+              f"{rms_std*1e3:11.4f}")
 
     make_plot(plot_rows, method=method, path=png_path)
     print(f"\n  Plot saved to {png_path}")
@@ -302,13 +309,13 @@ def make_plot(plot_rows, *, method: str, path) -> None:
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.8))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    for i, (driven, v, y, sem, pred, pull) in enumerate(plot_rows):
+    for i, (driven, v, y, std, pred, pull) in enumerate(plot_rows):
         col = colors[i % len(colors)]
         tag = _pairs_tag(driven)
         solo = len(driven) == 1
         ax1.plot(v, pred * 1e3, "-", color=col, lw=1.5, alpha=0.9,
                  label=f"{'pair' if solo else 'pairs'} {tag} pred")
-        ax1.errorbar(v, y * 1e3, yerr=sem * 1e3, fmt="o" if solo else "s", ms=4.5,
+        ax1.errorbar(v, y * 1e3, yerr=std * 1e3, fmt="o" if solo else "s", ms=4.5,
                      color=col, mfc="none" if solo else col, ecolor="lightgray",
                      elinewidth=0.8, capsize=1.5, ls="none", zorder=3)
         ax2.plot(v, pull, "o" if solo else "s", color=col, ms=5,
@@ -323,7 +330,7 @@ def make_plot(plot_rows, *, method: str, path) -> None:
     ax2.axhspan(-1, 1, color="tab:blue", alpha=0.12, label=r"$\pm1\sigma$")
     ax2.axhline(0, color="gray", ls="--", lw=1)
     ax2.set_xlabel("level  v")
-    ax2.set_ylabel("Pull = (meas - pred) / SEM")
+    ax2.set_ylabel("Pull = (meas - pred) / std")
     ax2.set_title("Pulls")
     ax2.legend(fontsize=7, ncol=2)
 
@@ -389,7 +396,7 @@ def measure(*, flip: bool = False, methods: tuple[str, ...]) -> None:
     rows = []
     try:
         _display((), 0.0)                                  # all off
-        dark, _, _ = read_point(daq, single=True)
+        dark, _ = read_point(daq, single=True)
         if flip:
             dark = -dark
         print(f"[0/{n_points}] dark (all off, {T_SINGLE_S:.0f}s) = {dark*1000:.4f} mV")
@@ -399,14 +406,14 @@ def measure(*, flip: bool = False, methods: tuple[str, ...]) -> None:
                   f"{'pair' if len(driven) == 1 else 'pairs'} {_pairs_tag(driven)} ---")
             for v in levels:
                 _display(driven, v)
-                mean_v, std_v, sem_v = read_point(daq)
+                mean_v, std_v = read_point(daq)
                 if flip:
                     mean_v = -mean_v
                 pred = predict(models, phases, driven, v)
                 i += 1
                 rows.append({"block": b, "driven": driven, "v": float(v),
                              "dark_v": dark, "mean_v": mean_v, "std_v": std_v,
-                             "sem_v": sem_v, "pred_v": pred})
+                             "pred_v": pred})
                 print(f"[{i}/{n_points}] v={v:.3f} -> {(mean_v-dark)*1000:.4f} mV  "
                       f"(pred {pred*1000:.4f}, diff {(mean_v-dark-pred)*1000:+.4f})")
     finally:
