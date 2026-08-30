@@ -79,11 +79,11 @@ from slm_module.tpa_pair import (  # noqa: E402
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"  # data directory: inputs + outputs live here
 
-PAIR_INDICES = [1,3,5,7]                          
+PAIR_INDICES = [0,1,3] #0-based                          
 SWEEP_MIN = 0.1                                # min per-side intensity in the ramp (0..1)
 SWEEP_MAX = 1.0                                 # max per-side intensity in the ramp (0..1)
 N_SWEEP_POINTS = 10                              # points per 1-D curve (x-only / w-only / cross)
-IN_STEP3 = CALIB_PATH / "calib_step3b_0721_1615.json"    # Step 3 calib (near pair 0 + far pair 3)
+IN_STEP3 = CALIB_PATH / "calib_step3b_0828_1121.json"    # Step 3 calib (near pair 0 + far pair 3)
 
 SLM_DISPLAY_NO = None           # None -> auto-detect the LCOS-SLM display (like the GUI's Detect)
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch (USB link)
@@ -96,8 +96,8 @@ DAQ_CHANNEL = "ai0"
 # (1 kS/s, +/-0.1 V DIFF, 20 Hz).  Acquisition time = T_SINGLE_S if x==0 or
 # w==0 (weak single-beam / dark points), else T_BOTH_S.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio -- the per-point sigma.
-T_SINGLE_S = 8.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
-T_BOTH_S = 5.0                  # both beams on (the bright cross points) (s)
+T_SINGLE_S = 10.0                # at most one beam on (x==0 or w==0, incl. dark) (s)
+T_BOTH_S = 10.0                  # both beams on (the bright cross points) (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 

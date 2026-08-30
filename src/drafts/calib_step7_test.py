@@ -4,18 +4,22 @@ Not a pytest test (no mocks, needs real hardware) -- run it directly.  Two
 invocations:
 
     python src/drafts/calib_step7_test.py            # COLLECT: sweep each target
-                                                     #   pair, write a raw CSV
+                                                     #   pair, write a raw CSV, then
+                                                     #   fit it straight away
     python src/drafts/calib_step7_test.py some.csv   # REFIT:   fit dPhi_comb from an
                                                      #   existing CSV, offline (no hw)
 
-A REFIT also writes a combined ``calib_step7_result_*.json`` (the step-3 +
-step-6 payloads carried over from ``IN_STEP6`` plus the fitted ``{Phi_k}``
-spectrum) -- the single input downstream consumers read (e.g. the step-8
-random-input forward-model check, ``calib_step8_test.py``).
+A COLLECT fits the CSV it just wrote, so the normal run needs no second command
+(add ``--no-fit`` to stop after the CSV and fit it by hand later).  Either way
+the fit writes a combined ``calib_step7_result_*.json`` (the step-3 + step-6
+payloads carried over from ``IN_STEP6`` plus the fitted ``{Phi_k}`` spectrum)
+-- the single input downstream consumers read (e.g. the step-8 random-input
+forward-model check, ``calib_step8_test.py``).
 
-On a REFIT, ``--bounded`` / ``--fix`` pick how the step-6 amplitudes enter the
-fit (give both flags to run both methods back to back and print a comparison
-table; no flag defaults to ``--bounded``, the previous behaviour):
+``--bounded`` / ``--fix`` pick how the step-6 amplitudes enter the fit, on a
+REFIT or on a COLLECT's automatic fit (give both flags to run both methods back
+to back and print a comparison table; no flag defaults to ``--bounded``, the
+previous behaviour):
 
 * ``--bounded`` -- ``a:b`` locked to the step-6 ``eta_ref:eta_tgt`` ratio, one
   shared scale ``s`` floats, boxed to ``+/-BOUND_FRAC`` about 1.
@@ -27,7 +31,8 @@ light -> more negative volts): it negates the raw ``voltage_mean_v`` and its
 per-row ``dark_v`` (the SAME channel) so the fit's ``y = mean - dark`` becomes
 the positive light signal (= dark - |mean|).  On a REFIT it writes a sibling
 ``*_flipped.csv`` and fits that; on a COLLECT the values are negated as they are
-read, before the CSV is written.  The spreads (``voltage_std_v`` /
+read, before the CSV is written -- so the automatic fit that follows does NOT
+negate them a second time.  The spreads (``voltage_std_v`` /
 ``voltage_sem_v``) and ``sem_ratio`` (= |sem/mean|) are sign-independent and
 left untouched.
 
@@ -105,14 +110,14 @@ from slm_module.tpa_phase import (  # noqa: E402
 
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src/calib_data"          # data directory: inputs + outputs live here
-REF_INDEX = 1                                      # common reference pair (Phi = 0)
-TGT_INDICES = [3, 5, 7]                            # target pairs measured vs the reference
+REF_INDEX = 0                                      # common reference pair (Phi = 0)
+TGT_INDICES = [1, 3]                            # target pairs measured vs the reference
 
 # The ONE input: a combined step-6 result JSON (save_combined_json).  It embeds
 # the raw Step-3 calibration under "step3" (-> channel layout) and every fitted
 # pair under "step6" (-> eta + single-beam background), so the reference + all
 # targets come from this single file -- no separate step-3 import.
-IN_STEP6 = CALIB_PATH / "calib_step6_result_0722_1336.json"  # pairs 1 (ref) + 3,4,5 (targets)
+IN_STEP6 = CALIB_PATH / "calib_step6_result_0829_0033.json"  # pairs 1 (ref) + 3,4,5 (targets)
 
 # ---- The target sweep ----
 # Reference fully on (x_r = w_r = 1); the target's two channels swept TOGETHER
@@ -135,8 +140,8 @@ DAQ_CHANNEL = "ai0"
 # gets the longer T_single window; sweep points always have the reference
 # fully on (bright, both pairs driven) and read T_both.  Every CSV row records
 # the per-point SEM (voltage_sem_v) and sem_ratio.
-T_SINGLE_S = 5.0                 # all-off dark (at most one beam on) (s)
-T_BOTH_S = 3.0                   # sweep points: reference + target on (s)
+T_SINGLE_S = 10.0                 # all-off dark (at most one beam on) (s)
+T_BOTH_S = 10.0                   # sweep points: reference + target on (s)
 
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
 
@@ -587,7 +592,7 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
     )
 
 
-def measure_only(*, flip: bool = False) -> None:
+def measure_only(*, flip: bool = False) -> Path:
     """Sweep every target pair vs the shared reference; write one raw CSV.
 
     Loops over TGT_INDICES (each vs REF_INDEX), holding the reference fully on
@@ -598,8 +603,12 @@ def measure_only(*, flip: bool = False) -> None:
     step-6 models, no fit -- just drive the SLM and record the DAQ.  Refit later
     with ``python calib_step7_test.py <that csv>``.
 
+    Returns the written CSV path; :func:`main` fits it straight away (unless
+    ``--no-fit``), so a normal run needs no second command.
+
     ``flip`` negates each raw mean/dark read (inverted DAQ sign) so the written
-    CSV already holds the positive light signal -- refit it later WITHOUT --flip.
+    CSV already holds the positive light signal -- the fit that follows (and any
+    later refit) runs WITHOUT --flip.
     """
     layout = load_layout()
     if flip:
@@ -624,21 +633,31 @@ def measure_only(*, flip: bool = False) -> None:
     csv_path = OUT_DIR / f"calib_step7_meas_{time.strftime('%m%d_%H%M')}.csv"
     write_meas_csv(results, csv_path)
     print(f"\nCSV (ref {REF_INDEX}, targets {TGT_INDICES}) written to {csv_path}")
-    print(f"Refit with:  python {Path(__file__).name} {csv_path}")
+    return Path(csv_path)
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     flip = "--flip" in argv     # inverted DAQ read -> negate voltage_mean_v + dark_v
-    # refit method flag(s): --bounded / --fix (both -> run both + comparison table)
-    methods = tuple(m for m in METHODS if f"--{m}" in argv)
+    # fit method flag(s): --bounded / --fix (both -> run both + comparison table)
+    methods = tuple(m for m in METHODS if f"--{m}" in argv) or ("bounded",)
     positional = [a for a in argv if not a.startswith("-")]
     if positional:              # a CSV path -> offline refit, no hardware
-        fit_csv(positional[0], flip=flip, methods=methods or ("bounded",))
-    else:                       # no arg -> collect a fresh sweep (drives the SLM/DAQ)
-        if methods:
-            print("Note: --bounded/--fix only affect a REFIT; collecting raw data now.")
-        measure_only(flip=flip)
+        fit_csv(positional[0], flip=flip, methods=methods)
+        return 0
+
+    csv_path = measure_only(flip=flip)   # no arg -> fresh sweep (drives the SLM/DAQ)
+    if "--no-fit" in argv:               # raw data only; fit by hand later
+        print(f"Fit with:  python {Path(__file__).name} {csv_path}")
+        return 0
+    # Fit what was just collected, so no second command is needed.  flip=False:
+    # a --flip COLLECT already negated the reads before writing the CSV.
+    try:
+        fit_csv(csv_path, flip=False, methods=methods)
+    except Exception as exc:             # the raw CSV is on disk either way
+        print(f"\nAuto-fit FAILED ({type(exc).__name__}: {exc})")
+        print(f"Data is safe -- refit with:  python {Path(__file__).name} {csv_path}")
+        return 1
     return 0
 
 

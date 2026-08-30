@@ -55,7 +55,9 @@ def wls(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> dict:
     Neighbouring OSA samples are not independent (the 0.02 nm RBW spans a few
     grid points), so the naive standard errors are optimistic.  ``inflate`` is
     the lag-1 autocorrelation correction (1+rho)/(1-rho) and ``err`` already
-    has it applied; ``err_naive`` is the uncorrected value.
+    has it applied; ``err_naive`` is the uncorrected value.  ``cov`` is the
+    full inflated covariance matrix, for errors on functions of two or more
+    coefficients (a ratio of two of them, say).
     """
     sw = np.sqrt(w)
     Xw, yw = X * sw[:, None], y * sw
@@ -73,6 +75,7 @@ def wls(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> dict:
     rho = min(max(rho, 0.0), 0.98)
     inflate = np.sqrt((1 + rho) / (1 - rho))
     return dict(coef=coef, err=err_naive * inflate, err_naive=err_naive,
+                cov=s2 * xtx_inv * inflate**2,
                 rms=rms, resid=resid, rho=rho, inflate=float(inflate))
 
 
@@ -392,6 +395,13 @@ def main(argv: list[str] | None = None) -> int:
 
     ref = lin[0]
     mask = ref >= WING * ref.max()
+    # smooth_rows convolves in "same" mode, so the smoothed reference decays to
+    # zero over the last half-kernel at each end of the scan and -dlnS0/dl blows
+    # up there.  Trim those points: on a run whose window reaches the end of the
+    # scan they would otherwise dominate the shift fit.
+    edge = DERIV_SMOOTH // 2 + 1
+    mask[:edge] = False
+    mask[len(mask) - edge:] = False
     w = ref[mask]
     lam_p = float((w * wl[mask]).sum() / w.sum())
     x = wl[mask] - lam_p
