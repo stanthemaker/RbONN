@@ -19,7 +19,7 @@ purely linear background Y = eta^2*(x*w) + a_x*x + a_w*w + d, so a_x and a_w
 carry the full single-beam slopes with no a<->q split.
 
 For channel pair ``PAIR_INDEX`` (x[PAIR_INDEX], w[PAIR_INDEX]) this walks the
-reduced 1-D calibration curves built by ``tpa_pair.build_pair_points`` -- one
+reduced 1-D calibration curves built by ``calibration_module.pair.build_pair_points`` -- one
 line per fit term rather than the full 2-D grid, ``N_SWEEP_POINTS`` points each:
 
   * x-only  (x=r, w=0)  -- only the x channel on -> pins a_x, q_x
@@ -41,7 +41,7 @@ bandwidth.  The weighted-least-squares fit of
 
     Y = eta^2*(x*w) + a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d
 
-and the CSV persistence live in :mod:`slm_module.tpa_pair` (the same code the
+and the CSV persistence live in :mod:`calibration_module.pair` (the same code the
 GUI's Step 6 TPA tab uses); every CSV row records the mean, its trace std and
 the std ratio (std/|mean|).
 
@@ -64,7 +64,7 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
-from slm_module.tpa_pair import (  # noqa: E402
+from calibration_module.pair import (  # noqa: E402
     ChannelPairGrid,
     PairFit,
     TPAPairResult,
@@ -176,7 +176,7 @@ def make_plot(fit: PairFit, path: str | Path | None = None) -> None:
     background ``a_x*x + q_x*x^2 + a_w*w + q_w*w^2 + d``, plotted vs the
     product x*w with the fitted line ``eta^2*(x*w)`` overlaid.  x and w are
     commanded INTENSITIES; eta multiplies the field amplitude, hence the
-    eta^2 coefficient (see :mod:`slm_module.tpa_pair`).  Error bars are the
+    eta^2 coefficient (see :mod:`calibration_module.pair`).  Error bars are the
     per-cell stds only (background-parameter uncertainty is not propagated --
     this is an eyeball plot; the printed report carries the real errors).
 

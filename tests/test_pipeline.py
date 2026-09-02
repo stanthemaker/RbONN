@@ -32,9 +32,9 @@ from slm_module.pipeline import (
     run_pipeline,
     validate_request,
 )
-from slm_module.tpa_center import TPACenterProgress
-from slm_module.tpa_pair import TPAPairAborted, TPAPairProgress
-from slm_module.tpa_phase_measure import TPAPhaseProgress
+from calibration_module.measure_center import TPACenterProgress
+from calibration_module.measure_pair import TPAPairAborted, TPAPairProgress
+from calibration_module.measure_phase import TPAPhaseProgress
 
 
 def _plan(stage_id, config, inputs, out_dir: Path, name: str) -> StagePlan:
@@ -360,8 +360,8 @@ class PhaseReportRenderTests(unittest.TestCase):
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        from slm_module.tpa_phase import PhaseFit
-        from slm_module.tpa_phase_report import plot_fringe
+        from calibration_module.phase import PhaseFit
+        from calibration_module.report import plot_fringe
 
         n = 15
         theta = np.linspace(0.0, np.pi, n)
@@ -397,7 +397,7 @@ class CombPhaseJsonTests(unittest.TestCase):
 
     @staticmethod
     def _fit(dphi: float, frac: float):
-        from slm_module.tpa_phase import PhaseFit
+        from calibration_module.phase import PhaseFit
 
         n = 5
         arr = np.zeros(n)
@@ -417,7 +417,7 @@ class CombPhaseJsonTests(unittest.TestCase):
     def test_round_trip_and_method_selection(self) -> None:
         import json
 
-        from slm_module.tpa_phase import load_comb_phase_json, save_comb_phase_json
+        from calibration_module.phase import load_comb_phase_json, save_comb_phase_json
 
         step6 = self.out / "step6.json"
         step6.write_text(

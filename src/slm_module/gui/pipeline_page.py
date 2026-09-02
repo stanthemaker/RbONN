@@ -47,7 +47,7 @@ from ..pipeline import (
     run_pipeline,
     validate_request,
 )
-from ..tpa_phase_report import plot_fringe
+from calibration_module.report import plot_fringe
 from .common import CalibrationProgressDialog
 from .style import DARK_STYLESHEET
 

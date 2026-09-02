@@ -1,19 +1,20 @@
 """Step-7 measurement driver: two-pair phase sweep against a scope/DAQ monitor.
 
-The fitting/IO half of step 7 lives in :mod:`.tpa_phase` and is geometry
+The fitting/IO half of step 7 lives in :mod:`.phase` and is geometry
 general -- it recovers ``dPhi_comb`` from whatever drive produced the raw
 rows.  This module owns the instrument-facing half the unified pipeline
 needs: building a drive table, walking it on the SLM while reading the
-monitor, and handing the collected rows to :func:`.tpa_phase.fit_result`.
-It is kept OUT of ``tpa_phase.py`` so that module stays in lock-step with
-the offline driver ``src/drafts/calib_step7_test.py`` (which does its own
-SLM/DAQ wiring).
+monitor, and handing the collected rows to :func:`.phase.fit_result`.
+LEGACY -- it talks to BOTH the SLM and the monitor, so it is orchestration,
+not physics.  The offline draft ``src/drafts/calib_step7_v1.py`` does its own
+SLM/DAQ wiring and does not use this.  Nothing new should import from here;
+delete this module once GUI Step 7 / ``pipeline._run_comb_phase`` is rebuilt.
 
 Readings follow the step-6 convention: one fixed-window monitor read per
 point (the DAQ's T_both/T_single windows already average enough); ``std``
 is the low-passed trace spread the instrument reports (falling back to the
 raw-waveform std) and is what the fit weights by -- undivided by any
-effective-N (see :func:`.tpa_phase._average_points`).
+effective-N (see :func:`.phase._average_points`).
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .tpa_phase import (
+from .phase import (
     PairModel,
     PhaseResult,
     fit_result,
@@ -41,49 +42,6 @@ class TPAPhaseAborted(Exception):
 # ======================================================================
 # drive builders
 # ======================================================================
-
-def build_phase_sweep(
-    *,
-    n_points: int = 15,
-    phi_start_deg: float = 0.0,
-    phi_stop_deg: float = 180.0,
-    ref_phase_deg: float = 180.0,
-) -> list[tuple[float, float, float, float]]:
-    """Symmetric target phase sweep vs a fixed reference (half fringe).
-
-    The target pair is driven symmetrically ``phi^x = phi^w = phi`` over
-    ``[phi_start_deg, phi_stop_deg]`` (default 0..180 deg -- the full reachable
-    half turn), the reference pair fixed at ``ref_phase_deg`` on both channels
-    (default 180 deg == intensity 1, fully on).  Returns target-first commanded
-    intensity tuples ``(x_t, w_t, x_r, w_r)`` with ``x = sin(phi/2)^2``, so
-    ``dPhi_SLM = phi - ref_phase`` sweeps the fringe.
-    """
-    phis = np.radians(np.linspace(phi_start_deg, phi_stop_deg, int(n_points)))
-    x_r = float(intensity_for_phase(np.radians(ref_phase_deg)))
-    x_t = intensity_for_phase(phis)
-    return [(float(v), float(v), x_r, x_r) for v in x_t]
-
-
-def build_symmetry_grid(
-    *,
-    phi_values_deg: Sequence[float] = (90.0, 135.0, 180.0),
-    ref_phase_deg: float = 180.0,
-) -> list[tuple[float, float, float, float]]:
-    """3x3 grid on the target's individual channel phases (symmetry check).
-
-    Sweeps ``phi^x`` and ``phi^w`` of the target *independently* over
-    ``phi_values_deg`` with the reference fixed, so swapped cells and equal-sum
-    cells can be compared (see :func:`.tpa_phase.swap_invariance`).  Returns
-    target-first commanded intensity tuples.
-    """
-    x_r = float(intensity_for_phase(np.radians(ref_phase_deg)))
-    out: list[tuple[float, float, float, float]] = []
-    for px in phi_values_deg:
-        xt = float(intensity_for_phase(np.radians(px)))
-        for pw in phi_values_deg:
-            wt = float(intensity_for_phase(np.radians(pw)))
-            out.append((xt, wt, x_r, x_r))
-    return out
 
 
 # ======================================================================
@@ -181,7 +139,7 @@ def measure_phase_sweep(
 
     zeros = np.zeros(n)
     slm_width, slm_height = slm.get_slm_info()
-    from .encoding import encode_to_pattern
+    from slm_module.encoding import encode_to_pattern
 
     def _check_stop() -> None:
         if stop_event is not None and stop_event.is_set():
@@ -271,7 +229,5 @@ __all__ = [
     "TPAPhaseAborted",
     "TPAPhaseProgress",
     "ProgressCallback",
-    "build_phase_sweep",
-    "build_symmetry_grid",
     "measure_phase_sweep",
 ]

@@ -44,33 +44,25 @@ from .calibration.calibration_new import (
 )
 from .calibration.outliers import OutlierRemeasurePolicy
 from .encoding import ChannelLayout, channel_layout_from_calibration
-from .tpa_center import (
-    TPACenterAborted,
-    TPACenterResult,
-    measure_center_scan,
-    save_tpa_center_json,
-)
-from .tpa_pair import (
-    TPAPairAborted,
+from calibration_module.center import TPACenterResult, save_tpa_center_json
+from calibration_module.measure_center import TPACenterAborted, measure_center_scan
+from calibration_module.pair import (
     TPAPairResult,
     build_pair_points,
     build_sweep,
-    measure_pair_grids,
     save_tpa_pair_json,
     write_tpa_pair_csv,
 )
-from .tpa_phase import (
+from calibration_module.measure_pair import TPAPairAborted, measure_pair_grids
+from calibration_module.phase import (
     PairModel,
     PhaseResult,
+    build_phase_sweep,
     load_pair_models,
     save_phase_json,
     write_phase_csv,
 )
-from .tpa_phase_measure import (
-    TPAPhaseAborted,
-    build_phase_sweep,
-    measure_phase_sweep,
-)
+from calibration_module.measure_phase import TPAPhaseAborted, measure_phase_sweep
 
 _STAGE_ABORTS = (
     CalibrationAborted,

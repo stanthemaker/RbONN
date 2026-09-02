@@ -76,7 +76,7 @@ def plot_report(fig, result, tgt: int, ref: int, *, subtitle: str = "") -> None:
     circles, coloured by x*w so a symmetry breakdown is visible at a glance.
     Port of the draft's ``make_report``.
     """
-    from .tpa_phase import _average_points  # same cell averaging as the fit
+    from .phase import _average_points  # same cell averaging as the fit
 
     fit = result.fit
     if fit is None:

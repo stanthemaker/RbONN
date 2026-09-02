@@ -52,7 +52,7 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
-from slm_module.tpa_phase import (  # noqa: E402
+from calibration_module.phase import (  # noqa: E402
     load_comb_phase_json,
     load_pair_models,
     phi_half,

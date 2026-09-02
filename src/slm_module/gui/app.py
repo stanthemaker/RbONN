@@ -98,36 +98,34 @@ from ..optimization import (
     run_osa_optimization_batch,
     validate_independent_profile,
 )
-from ..tpa_pair import (
-    TPAPairAborted,
-    TPAPairProgress,
+from calibration_module.pair import (
     TPAPairResult,
     build_sweep,
     load_tpa_pair_csv,
-    measure_pair_grids,
     save_tpa_pair_json,
     write_tpa_pair_csv,
 )
-from ..tpa_center import (
+from calibration_module.measure_pair import (
+    TPAPairAborted,
+    TPAPairProgress,
+    measure_pair_grids,
+)
+from calibration_module.center import TPACenterResult, average_trace_points
+from calibration_module.measure_center import (
     TPACenterAborted,
     TPACenterProgress,
-    TPACenterResult,
-    average_trace_points,
     measure_center_scan,
 )
-from ..tpa_phase import (
+from calibration_module.phase import (
     PairModel,
     PhaseResult,
+    build_phase_sweep,
     load_pair_models,
     save_phase_json,
     write_phase_csv,
 )
-from ..tpa_phase_measure import (
-    TPAPhaseAborted,
-    build_phase_sweep,
-    measure_phase_sweep,
-)
-from ..tpa_phase_report import plot_fringe
+from calibration_module.measure_phase import TPAPhaseAborted, measure_phase_sweep
+from calibration_module.report import plot_fringe
 from ..keepalive import SLMKeepAlive
 from .common import (
     CalibrationProgressDialog,

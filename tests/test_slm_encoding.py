@@ -602,7 +602,7 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
 class MeasurePairGridsColRatioTests(unittest.TestCase):
     def test_col_ratio_forwarded_to_encode(self) -> None:
         from slm_module import encoding as encoding_module
-        from slm_module import tpa_pair as tpa_pair_module
+        from calibration_module import measure_pair as tpa_pair_module
 
         layout = _make_layout(width=15)
         ratio = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)

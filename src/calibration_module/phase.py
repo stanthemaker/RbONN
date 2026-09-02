@@ -69,6 +69,7 @@ from __future__ import annotations
 import csv
 import json
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -162,7 +163,7 @@ def load_pair_models(paths, *, layout=None) -> dict[int, PairModel]:
                     m = PairModel.from_json_channel(ch)
                     models[m.index] = m
         else:
-            from .tpa_pair import load_tpa_pair_csv
+            from .pair import load_tpa_pair_csv
             result = load_tpa_pair_csv(path, layout=layout)
             for grid in result.channels:
                 if grid.fit is not None:
@@ -939,11 +940,61 @@ def load_comb_phase_json(
     return int(step7["ref_index"]), phases
 
 
+
+# ======================================================================
+# drive builders
+# ======================================================================
+
+def build_phase_sweep(
+    *,
+    n_points: int = 15,
+    phi_start_deg: float = 0.0,
+    phi_stop_deg: float = 180.0,
+    ref_phase_deg: float = 180.0,
+) -> list[tuple[float, float, float, float]]:
+    """Symmetric target phase sweep vs a fixed reference (half fringe).
+
+    The target pair is driven symmetrically ``phi^x = phi^w = phi`` over
+    ``[phi_start_deg, phi_stop_deg]`` (default 0..180 deg -- the full reachable
+    half turn), the reference pair fixed at ``ref_phase_deg`` on both channels
+    (default 180 deg == intensity 1, fully on).  Returns target-first commanded
+    intensity tuples ``(x_t, w_t, x_r, w_r)`` with ``x = sin(phi/2)^2``, so
+    ``dPhi_SLM = phi - ref_phase`` sweeps the fringe.
+    """
+    phis = np.radians(np.linspace(phi_start_deg, phi_stop_deg, int(n_points)))
+    x_r = float(intensity_for_phase(np.radians(ref_phase_deg)))
+    x_t = intensity_for_phase(phis)
+    return [(float(v), float(v), x_r, x_r) for v in x_t]
+
+
+def build_symmetry_grid(
+    *,
+    phi_values_deg: Sequence[float] = (90.0, 135.0, 180.0),
+    ref_phase_deg: float = 180.0,
+) -> list[tuple[float, float, float, float]]:
+    """3x3 grid on the target's individual channel phases (symmetry check).
+
+    Sweeps ``phi^x`` and ``phi^w`` of the target *independently* over
+    ``phi_values_deg`` with the reference fixed, so swapped cells and equal-sum
+    cells can be compared (see :func:`.tpa_phase.swap_invariance`).  Returns
+    target-first commanded intensity tuples.
+    """
+    x_r = float(intensity_for_phase(np.radians(ref_phase_deg)))
+    out: list[tuple[float, float, float, float]] = []
+    for px in phi_values_deg:
+        xt = float(intensity_for_phase(np.radians(px)))
+        for pw in phi_values_deg:
+            wt = float(intensity_for_phase(np.radians(pw)))
+            out.append((xt, wt, x_r, x_r))
+    return out
+
 __all__ = [
     "PairModel",
     "PhaseFit",
     "PhaseResult",
     "load_pair_models",
+    "build_phase_sweep",
+    "build_symmetry_grid",
     "phi_half",
     "intensity_for_phase",
     "slm_phase_diff",
