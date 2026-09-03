@@ -1,5 +1,13 @@
 # Calibration campaign 2026-07-15 — Steps 6, 7, 8
 
+> **Historical record — do not run the commands below as written.** This
+> describes the 07-15 campaign and has not been updated since. The scripts are
+> now `calib_step{6,7,8}_v1.py` (not `_test.py`) and the fitters moved to
+> `calibration_module.{pair,phase}` (not `slm_module.tpa_{pair,phase}`). Every
+> uncertainty here is an SEM with Birge-scaled errors and χ²/dof; all three were
+> removed in favour of the trace std, so re-running the fits today will not
+> reproduce these numbers. See "Code status" in the README.
+
 One-day chain on branch `0713updates`, building on the Step-3b calibration from 07-14
 (`src/calib_data/calib_step3b_0714_1534.json`). Each step's result JSON embeds its inputs, so every
 stage is driven by **one** file:

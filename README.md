@@ -1,5 +1,72 @@
 # RbONN
 
+## Code status
+
+Which files are being developed, and which are kept only so something else keeps
+running. Nothing marked **legacy** or **dead** should be imported from new code.
+
+### Live
+
+| Path | Role |
+|------|------|
+| `src/calibration_module/` | calibration physics — models, fits, file formats. Instrument-free by design: it takes commanded levels and measured volts, and returns fitted parameters. |
+| `src/calibration_module/steps/calib_step6_v2.py` | **current** step 6 — the difference estimator (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`), 31 acquisitions over 10 repeated levels. Self-contained: it does not import `pair.py`. |
+| `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Steps 7 and 8 still run on v1; step 6 v1 is kept for the joint-fit comparison and to re-fit historical CSVs. |
+| `src/calibration_module/steps/draft_hw.py` | SLM/DAQ connection helpers shared by the step scripts |
+| `src/{daq,osa,scope,heater}_module/`, `src/slm_module/{controller,driver,encoding,generator}` | instrument drivers and pattern encoding |
+| `src/drafts/monitor_lib.py` + `daq_osa_monitor.py` / `daq_pmt_monitor.py` | overnight drift monitors |
+
+### Legacy — alive only because the GUI and pipeline still call them
+
+The calibration chain is mid-rewrite, so these are frozen on the v1 model. They
+duplicate what the `calib_step*_v1.py` drafts do — **two implementations of the
+same measurement** — and the drafts are the ones being developed. Delete each
+once its GUI page is rebuilt.
+
+| Path | Kept alive by |
+|------|---------------|
+| `src/calibration_module/measure_pair.py` | Step 6 — [app.py:5021](src/slm_module/gui/app.py#L5021), [pipeline.py:652](src/slm_module/pipeline.py#L652) |
+| `src/calibration_module/measure_phase.py` | Step 7 — [app.py:5468](src/slm_module/gui/app.py#L5468), [pipeline.py:716](src/slm_module/pipeline.py#L716) |
+| `src/calibration_module/measure_center.py` | TPA centre scan — [app.py:5747](src/slm_module/gui/app.py#L5747), [pipeline.py:604](src/slm_module/pipeline.py#L604) |
+| `src/slm_module/pipeline.py` + `src/slm_module/gui/pipeline_page.py` | the 5-stage auto-pipeline. Parked, not maintained, while the step order and models are still changing. |
+| `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:7325](src/slm_module/gui/app.py#L7325) still reach it. `phase_for_level` and `predict_intensity` are exported but never called outside tests. |
+
+### Dead — nothing imports these
+
+| Path | Why |
+|------|-----|
+| `src/slm_module/scope_tpa.py` (451 lines) | scope-era diagonal-only TPA sweep (`x = w = √u`), superseded by `calibration_module/pair.py`. Zero importers. |
+| `src/slm_module/scope_background.py` (465 lines) | its only consumer is `scope_tpa.py`. Zero other importers. |
+| `src/bg_scatter.csv`, `src/bg_scatter.json` | `scope_background` output, committed to the `src/` root rather than `src/calib_data/` |
+| `tests/test_bit_depth.py` | loads `tests/fixtures/bit_depth_golden.npz` at import. `.gitignore` excludes `*.npz`, so the fixture can never be committed and `tests/fixtures/` does not exist — the file errors on every run. |
+
+The whole scope readout path is dead: the measurement moved to the DAQ bucket
+detector, and no `scope_*` module in `slm_module` has an importer left.
+
+**Dangling references:** `src/drafts/heat_controller.py` has been deleted, but
+four docstrings still name it as the thing they mirror —
+`heater_module/__init__.py`, `heater_module/controller.py`,
+`heater_module/driver.py` and [app.py:6097](src/slm_module/gui/app.py#L6097).
+The code is fine; only the pointers are stale. `heater_module/` is now the
+sole copy of that logic.
+
+### Superseded drafts
+
+Kept for provenance; they answered their question and are not maintained.
+
+| Path | Status |
+|------|--------|
+| `src/calibration_module/steps/calib_step3_todaq_test.py` | one-off DAQ smoke test; Step 3 on the DAQ is now `calibration_new.intensity_calibration_daq`. Its docstring still gives the pre-move path `tests/slm_sin2_level_sweep_test.py`. |
+| `src/drafts/hold_pid.py`, `src/drafts/pid_sweep.py` | PID tuning is finished (25 °C → 0.5/20/5, 79.5 °C → 0.5/20/2, with a DC base heater). The staircase controller now lives in `heater_module/`. |
+| `src/drafts/daq_hold_time_test.py`, `src/drafts/daq_repeat_measure.py` | one-shot characterisations of settle time and repeatability |
+
+### Stale docs
+
+| Path | Problem |
+|------|---------|
+| `docs/calib_0715_steps_6_7_8.md` | names `calib_step{6,7,8}_test.py` (now `_v1.py`) and `slm_module.tpa_{pair,phase}` (now `calibration_module.{pair,phase}`). Every uncertainty in it is an SEM with Birge-scaled errors and χ²/dof — all three were removed in favour of the trace std, so the numbers are not reproducible from today's code. |
+| `docs/pipeline_parameters.md` | documents `slm_module/pipeline.py`, itself legacy; SEM and Birge scaling throughout |
+
 ## Alignment
 
 Set the polarization chain before calibrating, so the SLM modulates at full
@@ -119,6 +186,96 @@ Single beam — one sideband on, amplitude swept (pins $a$, $q$):
 Cross (pair) — one sideband pinned at $x = 1$, the other swept; the only points with $x \cdot w \neq 0$, so they pin $\eta$:
 
 ![Both sidebands, one swept](docs/images/step6_pair.png)
+
+#### Extracting $\eta$ — the difference estimator (v2)
+
+The model above is unchanged. What changed is how $\eta$ is pulled out of it.
+
+v1 fit all six parameters jointly over three sweep lines. Because $d$ is shared
+across those lines, misfit on the x-only line leaks into $d$ and from there into
+the cross line's intercept/slope split — dropping $q_x$ moved $\eta$ by
+**+0.67 %** on pair 0 (August data), while leaving pairs 1 and 3 unmoved at
+0.01 %. That sensitivity is the estimator's, not the physics'.
+
+v2 subtracts the w-only background along the cross line instead:
+
+$$D(w) \equiv Y(1,w) - Y(0,w) = \eta^{2}\,w + (a_x + q_x)$$
+
+| term | fate |
+|------|------|
+| $a_w,\ q_w,\ d$ | **cancel identically** — no role in $\eta$ |
+| $a_x,\ q_x$ | survive only as their sum, the intercept $\beta_0$ |
+| $\eta^{2}$ | the slope |
+
+$\eta$ is then the slope of a two-parameter straight line. Nothing needs to be
+assumed about the shape of the single-beam background, and the $q$-term question
+disappears. The background block is still fitted — steps 7 and 8 need
+$a_x, q_x, a_w, q_w, d$ for the forward model — but it no longer touches $\eta$.
+
+**$\hat B$ is fitted, so the $D$ points are correlated.** The grid has no
+w-only level at any cross $w$, so the difference cannot be formed point-by-point;
+it is taken against the fitted curve $\hat B(w) = a_w w + q_w w^2 + d$, which
+means every $D$ shares those parameters. The background covariance is propagated
+into a full covariance for $D$ and the slope comes from a **generalized** least
+squares fit. Treating the points as independent would re-introduce exactly the
+slope/intercept leak the estimator exists to remove.
+
+**Grid — 31 acquisitions per pair** (37 with the verification block), every
+level repeated with an SLM rewrite in
+between, so the repeat scatter measures encoding repeatability rather than
+detector jitter alone:
+
+| block | $(x,w)$ | $n$ | pins |
+|-------|---------|-----|------|
+| dark | $(0,0)$ | 2 | $d$ |
+| x-only | $(0.5,0)$, $(1,0)$ | 2, 3 | $a_x, q_x$; $(1,0)$ also anchors $D(0)$ |
+| w-only | $(0,0.5)$, $(0,1)$ | 2, 2 | $a_w, q_w$ |
+| **cross** | $(1,w)$, $w \in \{0.2, 0.45, 0.7, 0.9\}$ | 4, 4, 4, 6 | $\boldsymbol{\eta^{2}}$ |
+| diagnostic | $(1,1)$ | 2 | top-drive compression — **excluded from the slope fit** |
+| *verification* | $(1,0.25)$, $(0.5,0.5)$ | 3, 3 | product-only check (below) — **excluded**, +6 acquisitions |
+
+Repeats are interleaved as round-robin passes rather than run back-to-back, so a
+slow drift shows up as scatter within a level instead of masquerading as a slope.
+
+$\eta$ is a **local** slope over $w \in [0.2, 0.9]$ and is reported with that
+range, because the cross line is not exactly straight. How not-straight is the
+point of the excluded level: on the August data the top-drive point sits
+**−12.4 %** below the extrapolated line — v1 included it and took a −3.44 mV
+residual there.
+
+##### Verification
+
+Four checks print with every fit. **None feeds the fit** — they say whether the
+model $\eta$ is defined within still holds on this pair. Two come free from the
+grid (the $D(0)$ anchor, and the top-drive point above); two are explicit:
+
+**1 — intercept identity.** $D(w) = \eta^2 w + (a_x + q_x)$ means the cross line
+extrapolated to $w = 0$ must land on $a_x + q_x$, measured independently in the
+x-only block. Curvature over the fit window shows here first, because
+extrapolating to zero amplifies it. On the v2 grid the background block is
+saturated, so $a_x + q_x$ equals the raw $Y(1,0) - Y(0,0)$ exactly and this
+restates the anchor through the fitted parameters; re-fitting a v1 CSV gives an
+over-determined background and the two then genuinely differ. On the August
+data it passes at pull −0.03.
+
+**2 — product-only dependence.** The model says $Y$ depends on the two drives
+only through $x\,w$. $(1, 0.25)$ and $(0.5, 0.5)$ share that product but split
+the drive very differently, so after subtracting the full single-beam
+background their TPA residues must agree. Neither point exists in the base
+grid, so this costs **6 extra acquisitions** (31 → 37, ≈ +1 min/pair) in a
+verification block that stays out of the slope fit.
+
+It is worth them, because a split here does not mean the estimator is wrong —
+it means the pair has **no single $\eta$ at all**, which would invalidate the
+one-number-per-pair model steps 7 and 8 are built on. And the slope fit will
+not reliably catch that on its own: with a 10 % drive-split tilt injected into
+synthetic data, $R^2$ was still 0.9995 and $\eta$ moved only 0.26 %, because the
+tilt is nearly linear in $w$ along $x = 1$ and gets absorbed into the slope and
+intercept. The residual pulls did rise (max 7.2), but only the product check
+names the cause — +6.8 % split at 9.1 σ.
+
+Set `VERIFY_ENABLED = False` for the bare 31-acquisition grid; the product check
+then reports itself as not measured rather than silently passing.
 
 ## Encoding
 
