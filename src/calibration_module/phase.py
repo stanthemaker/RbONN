@@ -305,6 +305,14 @@ class PhaseFit:
     eta_tgt_err: float = 0.0
     dphi_deta_ref: float = 0.0        # d(dPhi_comb)/d(eta_ref), rad per unit eta
     dphi_deta_tgt: float = 0.0        # d(dPhi_comb)/d(eta_tgt)
+    # The same sensitivities PER POINT, on the model rather than on the phase:
+    # dm_j/d(eta_ref) and dm_j/d(eta_tgt) in volts per unit eta.  These are what
+    # turn the step-6 eta error into a per-point model error, and hence into
+    # :attr:`std_total` -- the denominator the residual pull should be taken
+    # against.  None for any fit that floats a/b (there the amplitude error is
+    # already inside the residuals' own scatter).
+    dm_deta_ref: np.ndarray | None = field(default=None, repr=False)
+    dm_deta_tgt: np.ndarray | None = field(default=None, repr=False)
 
     @property
     def dphi_comb_deg(self) -> float:
@@ -329,6 +337,48 @@ class PhaseFit:
         between targets -- see :func:`fit_beta2`'s ``cov``.
         """
         return float(np.hypot(self.dphi_comb_err, self.dphi_comb_err_eta))
+
+    @property
+    def std_model_eta(self) -> np.ndarray:
+        """Per-point MODEL error from the pinned step-6 etas (volts).
+
+        ``a`` and ``b`` are held at eta_ref / eta_tgt, so the fitted curve is
+        only as well known as those two numbers are::
+
+            sigma_m,j = hypot(dm_j/d(eta_ref) * eta_ref_err,
+                              dm_j/d(eta_tgt) * eta_tgt_err)
+
+        All zeros when the fit floated a/b, or when step 6 quoted no eta error.
+        """
+        if self.dm_deta_ref is None or self.dm_deta_tgt is None:
+            return np.zeros_like(self.std)
+        return np.hypot(self.dm_deta_ref * self.eta_ref_err,
+                        self.dm_deta_tgt * self.eta_tgt_err)
+
+    @property
+    def std_total(self) -> np.ndarray:
+        """Per-point sigma to judge a residual against: measurement (+) eta.
+
+        ``std`` alone is the DAQ trace spread -- how well the POINT is known.
+        It says nothing about how well the CURVE is known, and with a/b pinned
+        the curve carries step 6's eta error bodily.  Comparing a residual to
+        ``std`` alone therefore charges the fit for a model uncertainty it was
+        never given the freedom to absorb, which is what makes a good fringe
+        read 3 sigma out.  This is the two in quadrature.
+
+        Display only -- :func:`fit_phase_fixed` still WEIGHTS by ``std``.  The
+        eta term is common to every point in the sweep (one eta per pair, not
+        one per acquisition), so it tilts the whole curve coherently rather than
+        scattering the points; folding it into the weights would misdescribe it
+        as independent noise and distort dPhi_comb.  For the same reason the
+        resulting :attr:`pulls` move together and should be read as a set.
+        """
+        return np.hypot(self.std, self.std_model_eta)
+
+    @property
+    def pulls(self) -> np.ndarray:
+        """``residuals / std_total`` -- the residual in sigmas of the RIGHT sigma."""
+        return self.residuals / self.std_total
 
     def fringe_arg(self, dphi_slm=None):
         """The cosine argument of this fit, honouring its sign convention."""
@@ -697,6 +747,16 @@ def fit_phase_fixed(
     in.  Skipping that does not make the phase more precise, only its quoted
     error smaller -- the lever is ~15 rad per unit eta, so a 0.1% eta lands a
     few tenths of a degree on the phase, several times the fringe noise.
+
+    The same eta error also sits on the CURVE at every point, as
+    ``dm_deta_ref``/``dm_deta_tgt`` (volts per unit eta).  ``std`` is the DAQ
+    trace spread -- how well each point is known -- and says nothing about how
+    well the pinned model is known, so a residual judged against ``std`` alone
+    is charged for an uncertainty the fit could not absorb.
+    :attr:`PhaseFit.std_total` is the honest per-point denominator and
+    :attr:`PhaseFit.pulls` uses it; the WEIGHTS here stay ``1/std``, because the
+    eta term is one number per pair (coherent across the sweep), not per-point
+    noise.
     """
     from scipy.optimize import least_squares
 
@@ -773,6 +833,7 @@ def fit_phase_fixed(
         convention="comb-slm",
         eta_ref_err=float(eta_ref_err), eta_tgt_err=float(eta_tgt_err),
         dphi_deta_ref=dphi_deta_ref, dphi_deta_tgt=dphi_deta_tgt,
+        dm_deta_ref=j_A, dm_deta_tgt=j_B,
     )
 
 
@@ -1282,6 +1343,42 @@ class Beta2Fit:
             finite = self.pulls[np.isfinite(self.pulls)]
             return float(np.sum(finite**2))
         return float(self.residuals @ np.linalg.solve(self.cov, self.residuals))
+
+
+def phase_covariance(fits, pairs) -> np.ndarray:
+    """Covariance of the fitted ``dPhi_comb`` across targets, step-6 eta included.
+
+    ``fits`` maps a target pair index to its :class:`PhaseFit` (from
+    :func:`fit_phase_fixed`, the only fitter that PINS the etas and so the only
+    one that fills the sensitivities); ``pairs`` is the target order the matrix
+    is built in -- the SAME order the phases are handed to :func:`fit_beta2`.
+    Three contributions, for targets ``i``, ``j``::
+
+        fringe noise    diag(dphi_comb_err_i^2)                    independent
+        eta_tgt,i       diag((dphi_deta_tgt,i * eta_tgt_err_i)^2)  independent
+        eta_ref         dphi_deta_ref_i * dphi_deta_ref_j * s^2    COMMON
+
+    The last term is rank 1 and it is the whole point: every target is pinned to
+    the SAME reference amplitude, so an error in ``eta_ref`` slides the entire
+    spectrum together instead of scattering it.  Independent sigmas would charge
+    that one common shift once per target, which is exactly how a perfectly good
+    spectrum comes out reading several sigma per pair.
+
+    The diagonal is :attr:`PhaseFit.dphi_comb_err_total` squared, so an error bar
+    drawn from ``sqrt(diag(cov))`` agrees with what the step-7 report quotes per
+    pair; only the off-diagonal is new.  ``eta_ref_err`` is one number shared by
+    every fit, so it is read off the first.  Pass the result to
+    :func:`fit_beta2` as ``cov`` and judge on :attr:`Beta2Fit.pulls_white`.
+    """
+    pairs = list(pairs)
+    if not pairs:
+        raise ValueError("no target pairs to build a covariance over")
+    diag = np.array(
+        [fits[k].dphi_comb_err**2 + (fits[k].dphi_deta_tgt * fits[k].eta_tgt_err) ** 2
+         for k in pairs], dtype=float)
+    c_ref = np.array([fits[k].dphi_deta_ref for k in pairs], dtype=float)
+    s_ref = float(fits[pairs[0]].eta_ref_err)
+    return np.diag(diag) + np.outer(c_ref, c_ref) * s_ref**2
 
 
 def _beta2_line(u: np.ndarray, phi: np.ndarray, w: np.ndarray, cinv=None):

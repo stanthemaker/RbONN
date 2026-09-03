@@ -1,19 +1,18 @@
-"""Manual smoke test (v2): comb phase dPhi_comb per pair, ONE free parameter + a
-beta2 dispersion check.
+"""Manual smoke test (v2): comb phase dPhi_comb per pair, ONE free parameter.
 
 Not a pytest test (no mocks, needs real hardware) -- run it directly.  Two
 invocations, exactly as v1:
 
     python src/calibration_module/steps/calib_step7_v2.py            # COLLECT: sweep each target
                                                      #   pair, write a raw CSV, then
-                                                     #   fit + verify straight away
+                                                     #   fit straight away
     python src/calibration_module/steps/calib_step7_v2.py some.csv   # REFIT:   fit dPhi_comb from an
                                                      #   existing CSV, offline (no hw)
 
 A COLLECT fits the CSV it just wrote (add ``--no-fit`` to stop after the CSV).
 Either way the fit writes a combined ``calib_step7_result_*.json`` (the step-3 +
-step-6 payloads carried over from ``IN_STEP6``, the fitted ``{Phi_k}`` spectrum,
-and the beta2 verification) -- the single input downstream consumers read.
+step-6 payloads carried over from ``IN_STEP6`` plus the fitted ``{Phi_k}``
+spectrum) -- the single input downstream consumers read.
 
 What changed vs :mod:`calib_step7_v1`
 -------------------------------------
@@ -32,19 +31,29 @@ What changed vs :mod:`calib_step7_v1`
    no longer be absorbed by a nuisance parameter -- it shows up as a bad
    ``R^2`` / a non-zero mean residual instead.  There is consequently only one
    fit method, so v1's ``--bounded`` / ``--fix`` flags are gone.
-3. **Verification.**  The recovered spectrum is compared against pure
-   second-order dispersion: pair ``i`` at comb detuning ``Omega_i`` should carry
-   ``dPhi_comb,i = beta2 (Omega_ref^2 - Omega_i^2)`` relative to the reference.
-   ``beta2`` is an INPUT here (:data:`BETA2`), not something this script fits --
-   the only fitted quantities are the per-pair ``dPhi_comb``.  The check just
-   evaluates the model at each pair's real ``Omega`` and PRINTS the comparison
-   pair by pair; the plot shows only the measured unwrapped trace, because the
-   quoted phase errors do not yet carry the step-6 ``eta`` uncertainty and a
-   drawn pull would overstate the disagreement.  ``Omega`` must be the
-   REAL comb geometry (``PAIR_OMEGA``, or ``OMEGA_ZERO_INDEX``/``OMEGA_STEP``):
-   the regressor is ``Omega^2``, so a pair sitting 10000 comb lines out is not
-   the same as one at the centre.  ``--no-verify`` skips it.
-4. The measurement grid is UNCHANGED from v1.
+3. **No dispersion model.**  This script measures ``dPhi_comb`` and stops.  It
+   does not compare the spectrum against ``beta2 (Omega_ref^2 - Omega_i^2)``,
+   does not need the comb geometry, and quotes no pull against any model --
+   there is no beta2 anywhere in v2.  (:func:`~calibration_module.phase.fit_beta2`
+   survives for :mod:`calib_synth_v1`'s ``--check``, which verifies the
+   GENERATOR against the beta2 it built its truth phases from -- a different
+   claim from anything measured here.)
+4. **The error bar includes step 6.**  Because a/b are pinned, the fitter's own
+   ``dphi_comb_err`` is the fringe's photon noise ALONE: step 6's ``eta``
+   uncertainty is invisible in it, not absent.  It reaches the phase through
+   ``d(dPhi_comb)/d(eta)`` (~15 rad per unit eta), so a 0.1% eta puts a couple
+   of tenths of a degree on the phase -- several times the fringe noise.  The
+   report and the plot quote ``dphi_comb_err_total``, the two in quadrature;
+   the JSON carries both terms separately.
+5. **So does the per-point pull.**  Same reason, one level down: the CSV's
+   ``voltage_std_v`` is how well a POINT is known, and with a/b pinned it says
+   nothing about how well the CURVE is known.  The pull panel and the drawn
+   error bars use ``PhaseFit.std_total`` -- the trace std and the eta's model
+   error ``d(model)/d(eta) * eta_err`` in quadrature -- so a fringe that is
+   fine stops reading 3 sigma out.  The FIT still weights by the trace std
+   alone: one eta per pair tilts the whole curve coherently, so folding it
+   into the weights would misdescribe it as per-point noise.
+6. The measurement grid is UNCHANGED from v1.
 
 What it measures.  Each target pair carries a fixed comb-phase offset
 ``dPhi_comb`` relative to a common reference pair (the reference defines
@@ -116,11 +125,8 @@ from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 from calibration_module.phase import (  # noqa: E402
-    Beta2Fit,
     PhaseFit,
     PhaseResult,
-    beta2_payload,
-    fit_beta2,
     fringe_arg,
     load_pair_models,
     load_phase_csv,
@@ -179,47 +185,6 @@ SINGLE_BEAM_BG = True
 # Method label stored in the output JSON (v2 has exactly one fit method).
 METHOD = "fixed_comb_only"
 
-# ---- Verification: dPhi_comb,i = beta2 (Omega_ref^2 - Omega_i^2) ----
-# Comb detuning Omega of each pair.  This needs the REAL comb geometry, not the
-# pair index: the regressor is Omega^2, and pair 1 sitting 1100 comb lines out
-# from the two-photon centre is not the same as it sitting at 0.  Writing
-# Omega_i = (i - OMEGA_ZERO_INDEX) * OMEGA_STEP keeps that offset explicit --
-# for pairs 1..5 on comb lines 1100, 3100, ... 9100 with f_rep = 80 MHz that
-# is OMEGA_ZERO_INDEX = 1 - 1100/2000 = 0.45 and OMEGA_STEP = 2000 * 2*pi*f_rep.  Setting
-# OMEGA_ZERO_INDEX = PAIR_INDEX_BASE (i.e. "Omega ~ pair index") drops the
-# linear-in-index part of the phase and gets beta2 wrong by several fold.
-# Pick a unit and stay in it: beta2 comes out in rad per that unit squared.
-# calib_synth_v1.py prints a ready-made block for whatever comb you set there.
-PAIR_OMEGA: dict[int, float] | None = None   # explicit {pair index: Omega}; None -> uniform comb
-OMEGA_ZERO_INDEX = 0.45          # pair index sitting at Omega = 0 (the comb centre)
-OMEGA_STEP = 1.005310e12         # Omega per unit pair index (2000 lines * 2 pi f_rep)
-OMEGA_UNIT = "rad/s"             # label only, for printing / the JSON
-
-# The dispersion slope itself, in rad per OMEGA_UNIT^2.  beta2 is an INPUT to
-# the check, not something this script fits: the only fitted quantities are the
-# per-pair dPhi_comb.  The verification just evaluates beta2 (Omega_ref^2 -
-# Omega_i^2) at each pair's real Omega and plots it against the measured
-# dPhi_comb,i.  For the symmetric-pair geometry (the pair's two comb lines at
-# -Omega_i and +Omega_i) this slope is -2 * GDD, so 1e4 fs^2 of GDD is -2e-26.
-# Set to None only if the dispersion is unknown and you want it fitted instead.
-# Propagate step 6's eta uncertainty into dPhi_comb before the beta2 check.
-#
-# fit_phase_fixed PINS a = eta_ref and b = eta_tgt, so dphi_comb_err is the
-# fringe's photon noise ALONE -- the etas' own error is invisible there, not
-# absent.  The lever is d(dPhi)/d(eta) ~ 15 rad per unit eta, so step 6's
-# ~0.1% eta puts a couple of tenths of a degree on the phase: several times
-# the fringe noise, and the reason this check used to read >3 sigma on data
-# that is fine.  Off (False) reproduces the old, too-small error bars.
-PROPAGATE_ETA = True
-
-BETA2: float | None = -2.0e-26
-
-# A fringe fit only recovers dPhi_comb modulo 2 pi, so the verification searches
-# an integer 2 pi shift per target (+/- this many) and keeps the set that fits
-# the quadratic best.  0 disables unwrapping (use the wrapped phases as-is).
-MAX_BRANCH = 2
-
-
 # ======================================================================
 # input loading  (layout + step-6 models from the combined JSON)
 # ======================================================================
@@ -268,21 +233,6 @@ def load_models():
     return models
 
 
-def pair_omega(index: int) -> float:
-    """Comb detuning ``Omega`` of a pair index (see the PAIR_OMEGA config block).
-
-    Explicit ``PAIR_OMEGA`` wins; otherwise a uniform comb,
-    ``Omega_i = (i - OMEGA_ZERO_INDEX) * OMEGA_STEP``.  ``OMEGA_ZERO_INDEX`` is
-    the pair index that would sit at the two-photon centre -- generally NOT the
-    first pair, and getting it wrong biases beta2 badly (see the config block).
-    """
-    if PAIR_OMEGA is not None:
-        if index not in PAIR_OMEGA:
-            raise ValueError(f"PAIR_OMEGA has no entry for pair index {index}")
-        return float(PAIR_OMEGA[index])
-    return (float(index) - OMEGA_ZERO_INDEX) * OMEGA_STEP
-
-
 # ======================================================================
 # report + plot
 # ======================================================================
@@ -299,17 +249,35 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     print("            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6")
     print("            -> dPhi_comb is the ONLY free parameter")
     print(f"Pair {tgt} vs reference {ref}  (value +/- error):")
-    print(f"  dPhi_comb = {fit.dphi_comb:+.4f} +/- {fit.dphi_comb_err:.4f} rad"
-          f"   ( {fit.dphi_comb_deg:+.2f} +/- {np.degrees(fit.dphi_comb_err):.2f} deg )")
+    # The quoted error is the TOTAL: fringe noise and the pinned step-6 eta in
+    # quadrature.  a and b do not float, so the fitter's own dphi_comb_err
+    # cannot see the eta error -- it is invisible there, not absent.
+    err = fit.dphi_comb_err_total
+    print(f"  dPhi_comb = {fit.dphi_comb:+.4f} +/- {err:.4f} rad"
+          f"   ( {fit.dphi_comb_deg:+.2f} +/- {np.degrees(err):.2f} deg )")
+    print(f"     of which fringe noise {np.degrees(fit.dphi_comb_err):.3f} deg, "
+          f"step-6 eta {np.degrees(fit.dphi_comb_err_eta):.3f} deg"
+          f"   [d(dPhi)/d(eta): ref {fit.dphi_deta_ref:+.2f}, "
+          f"tgt {fit.dphi_deta_tgt:+.2f} rad per unit eta]")
     print(f"  a (ref R_1)      = {fit.a*1e3:.4f} mV^0.5   (pinned to step-6 eta)")
     print(f"  b (tgt eta CxCw) = {fit.b*1e3:.4f} mV^0.5   (pinned to step-6 eta)")
     print(f"  fringe amp 2ab   = {fit.amp*1e3:.4f} mV   (pinned)")
     # Not fitted here (v1 floated it as `d`), so it is a pure check on step 6:
     # a big mean residual means the fixed amplitudes/background are off.
-    pulls = fit.residuals / fit.std
     print(f"  mean residual    = {float(np.mean(fit.residuals))*1e3:+.4f} mV   "
           f"(NOT fitted -- should be ~0 if step 6 is right)")
-    print(f"  max |pull|       = {float(np.max(np.abs(pulls))):.2f}")
+    # Pull denominator is std_total, not the DAQ trace std: with a and b pinned
+    # the CURVE carries step 6's eta error, and the fit had no freedom to absorb
+    # it, so charging the residual against the point spread alone reads high.
+    eta_v = fit.std_model_eta
+    print(f"  max |pull|       = {float(np.max(np.abs(fit.pulls))):.2f}   "
+          f"[pull = residual / std_total]")
+    print(f"     std_total     = {float(np.median(fit.std))*1e3:.4f} (DAQ trace) "
+          f"(+) {float(np.median(eta_v))*1e3:.4f} (step-6 eta) mV, median over points"
+          f"   -> {float(np.median(fit.std_total))*1e3:.4f} mV")
+    print(f"  max |pull| on std alone = "
+          f"{float(np.max(np.abs(fit.residuals / fit.std))):.2f}   "
+          f"(measurement only -- overstates, the eta error is not in it)")
     print(f"  R^2 = {fit.r2:.4f}")
 
 
@@ -321,7 +289,12 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     import matplotlib.pyplot as plt
 
     dphi = np.degrees(fit.dphi_slm)             # dPhi_SLM at the measured points
-    pulls = fit.residuals / fit.std
+    # Both panels use std_total = DAQ trace std (+) the pinned step-6 eta's
+    # model error, in quadrature (PhaseFit.std_total): a and b do not float, so
+    # the curve is only as well known as step 6's etas and the residual has to
+    # be judged against that too, not against the point spread alone.
+    pulls = fit.pulls
+    std_tot = fit.std_total
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -349,9 +322,9 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
              + bg_s + fit.offset)
     label = r"fit: $a^2+b^2\sin^4+2ab\sin^2\cos(\Delta\Phi_{comb}-\Delta\Phi_{SLM})$"
     ax1.plot(np.degrees(dslm), model * 1e3, "-", color="tab:blue", lw=1.6, label=label)
-    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.std * 1e3, fmt="o", ms=5, color="tab:orange",
+    ax1.errorbar(dphi, fit.y * 1e3, yerr=std_tot * 1e3, fmt="o", ms=5, color="tab:orange",
                  ecolor="lightgray", elinewidth=1, capsize=2, zorder=3,
-                 label="measured (dark-subtracted)")
+                 label=r"measured (dark-subtracted), $\sigma_{tot}$")
     ax1.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
     ax1.set_ylabel(r"$Y$, dark-subtracted  (mV)")
     ax1.set_title(f"Pair {tgt} interference  (both channels, half fringe)")
@@ -361,14 +334,20 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     ax2.axhline(0, color="gray", ls="--", lw=1)
     ax2.scatter(dphi, pulls, c="tab:red", s=40, edgecolor="k", lw=0.4)
     ax2.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax2.set_ylabel("Pull = residual / std")
-    ax2.set_title("Pulls")
+    ax2.set_ylabel(r"Pull = residual / $\sigma_{tot}$")
+    ax2.set_title(r"Pulls   [$\sigma_{tot}^2$ = DAQ trace std$^2$ + "
+                  r"(pinned step-6 $\eta$)$^2$]", fontsize=10)
     ax2.legend(loc="upper right", fontsize=8)
 
+    # Total error, not the fitter's: with a and b pinned, dphi_comb_err is the
+    # fringe noise alone and would draw a bar several times too small.
+    err = fit.dphi_comb_err_total
     txt = (
         f"$\\Delta\\Phi_{{comb}}$ = {fit.dphi_comb_deg:+.2f} $\\pm$ "
-        f"{np.degrees(fit.dphi_comb_err):.2f} deg  "
-        f"({_sigma(fit.dphi_comb, fit.dphi_comb_err):.0f}$\\sigma$)\n"
+        f"{np.degrees(err):.2f} deg  "
+        f"({_sigma(fit.dphi_comb, err):.0f}$\\sigma$)\n"
+        f"  = {np.degrees(fit.dphi_comb_err):.2f} (fringe) $\\oplus$ "
+        f"{np.degrees(fit.dphi_comb_err_eta):.2f} (step-6 $\\eta$) deg\n"
         f"a = {fit.a*1e3:.3f}, b = {fit.b*1e3:.3f} mV$^{{1/2}}$ (both pinned to step 6)\n"
         f"mean resid = {float(np.mean(fit.residuals))*1e3:+.3f} mV (not fitted)\n"
         f"R$^2$ = {fit.r2:.4f}  [1 free param: $\\Delta\\Phi_{{comb}}$]"
@@ -378,190 +357,6 @@ def make_plot(fit: PhaseFit, tgt: int, path) -> None:
 
     fig.tight_layout()
     fig.savefig(path, dpi=150)
-
-
-# ======================================================================
-# verification  (Phi_i = beta2 (Omega_0^2 - Omega_i^2))
-# ======================================================================
-
-def report_dispersion(bfit: Beta2Fit) -> None:
-    """Print the per-pair table comparing dPhi_comb,i against beta2 (Om_r^2 - Om_i^2)."""
-    print(f"\n=== Verification: dPhi_comb,i vs beta2 (Omega_{REF_INDEX}^2 - Omega_i^2) ===")
-    print(f"Omega unit: {OMEGA_UNIT}   reference pair {REF_INDEX} at "
-          f"Omega_{REF_INDEX} = {bfit.omega_ref:g}")
-    if PAIR_OMEGA is None:
-        print(f"Omega_i = (i - {OMEGA_ZERO_INDEX:g}) * {OMEGA_STEP:g}  "
-              f"(uniform comb; set PAIR_OMEGA for the real geometry)")
-    if bfit.beta2_fixed:
-        print(f"beta2 = {bfit.beta2:+.6g} rad/({OMEGA_UNIT})^2 -- GIVEN, not fitted; "
-              f"only dPhi_comb was fitted")
-    else:
-        print("beta2 was FITTED (BETA2 = None): one free slope over the targets")
-    print(f"dPhi_comb is only defined mod 2pi -> branch searched over "
-          f"+/-{bfit.max_branch}")
-    prop = bfit.cov is not None
-    if prop:
-        print("sigma includes the PINNED step-6 eta (PROPAGATE_ETA): eta_ref is "
-              "shared,\n  so 'pull*' is the covariance-whitened residual -- judge on that")
-    else:
-        print("sigma is the FRINGE noise only (PROPAGATE_ETA off): the pinned "
-              "step-6 eta\n  error is not in it, so these pulls read too large")
-    print(f"{'pair':>4} {'Omega':>9} {f'u=O{REF_INDEX}^2-Oi^2':>12} "
-          f"{'dPhi meas':>12} {'2pi':>4} {'dPhi used':>10} {'model':>10} "
-          f"{'resid':>9} {'sigma':>8} {'pull':>7} {'pull*':>7}")
-    for k, om, u, pm, pe, br, pu, mo, rr, pl, pw in zip(
-        bfit.indices, bfit.omega, bfit.u, bfit.dphi_comb, bfit.dphi_comb_err,
-        bfit.branch, bfit.phi_used, bfit.model, bfit.residuals, bfit.pulls,
-        bfit.pulls_white,
-    ):
-        print(f"{k:>4} {om:>9.4g} {u:>12.4g} "
-              f"{np.degrees(pm):>+9.2f}deg {br:>+4d} {np.degrees(pu):>+9.2f} "
-              f"{np.degrees(mo):>+10.2f} {np.degrees(rr):>+9.2f} "
-              f"{np.degrees(pe):>8.3f} {pl:>+7.2f} {pw:>+7.2f}")
-    rms = float(np.sqrt(np.mean(np.degrees(bfit.residuals) ** 2)))
-    print(f"residual: rms {rms:.3f} deg,  max {np.max(np.abs(np.degrees(bfit.residuals))):.3f} deg,"
-          f"  max |pull| {bfit.max_abs_pull:.2f},  max |pull*| "
-          f"{bfit.max_abs_pull_white:.2f},  chi2 = r^T C^-1 r = {bfit.chi2_gls:.2f} "
-          f"over {bfit.n_targets} targets")
-    # What a free slope WOULD be, on the same branches -- says whether a
-    # mismatch is the overall dispersion being off (scale) or the shape.
-    dev = (bfit.beta2_free / bfit.beta2 - 1.0) * 100.0 if bfit.beta2 else float("nan")
-    print(f"  free-slope fit on these points: {bfit.beta2_free:+.6g} "
-          f"+/- {bfit.beta2_free_err:.3g}  ({dev:+.2f}% vs the beta2 used)")
-    if OMEGA_UNIT == "rad/s":
-        # dPhi_comb,i = 2 GDD (Omega_i^2 - Omega_ref^2) = -2 GDD * u, so the
-        # slope is -2x the GDD -- valid for the symmetric-pair geometry (the
-        # pair's two comb lines at -Omega_i and +Omega_i).
-        print(f"  in GDD terms: beta2 used = {(-bfit.beta2/2.0)/(1e-15)**2:+.2f} fs^2, "
-              f"free-slope = {(-bfit.beta2_free/2.0)/(1e-15)**2:+.2f} "
-              f"+/- {(bfit.beta2_free_err/2.0)/(1e-15)**2:.2f} fs^2")
-    # Judge on the whitened pull: with eta propagated the phases are correlated,
-    # and a single common-mode eta_ref shift would otherwise be counted once per
-    # target and read as several independent outliers.
-    worst = bfit.max_abs_pull_white
-    if worst > 3.0:
-        print(f"  ** CHECK: a pair sits >3 sigma off the model (max |pull*| = "
-              f"{worst:.2f}) -- wrong beta2 or Omega mapping, a mis-fit fringe, "
-              f"or genuine higher-order dispersion **")
-    else:
-        print(f"  OK: every pair within 3 sigma of the model "
-              f"(max |pull*| = {worst:.2f})")
-        if bfit.max_abs_pull > 3.0:
-            print("     (the raw per-point pull reaches "
-                  f"{bfit.max_abs_pull:.2f}; that excess is the SHARED eta_ref "
-                  "shift, counted once per target)")
-
-
-def make_spectrum_plot(bfit: Beta2Fit, path) -> None:
-    """The recovered comb-phase spectrum against PAIR INDEX -- measured only.
-
-    One trace: the fitted ``dPhi_comb,i`` after 2pi unwrapping, with the
-    reference pair sitting at ``dPhi = 0`` by definition.  Each point is
-    labelled with its value in degrees and with the pair's REAL comb detuning
-    ``Omega`` (from the comb lines, not the index).
-
-    The ``beta2 (Omega_ref^2 - Omega_i^2)`` trace and the residual/pull panel
-    are deliberately not drawn -- there is no beta2 anywhere in this figure.
-    :func:`report_dispersion` prints both, and that is the honest place for
-    them, because a pull is only meaningful once the pinned step-6 ``eta`` is
-    in the error and its shared ``eta_ref`` part has been decorrelated.
-
-    The error bars DO include the step-6 ``eta`` once ``PROPAGATE_ETA`` is on
-    (``bfit.dphi_comb_err`` is then ``sqrt(diag(cov))``).  They are still not a
-    pull: the ``eta_ref`` part is common to every point, so the bars slide
-    together rather than independently -- the whitened pulls in
-    :func:`report_dispersion` are the ones to read.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    # reference included: it anchors the trace at zero by construction
-    idx = [REF_INDEX] + list(bfit.indices)
-    meas = np.degrees(np.concatenate([[0.0], bfit.phi_used]))
-    merr = np.degrees(np.concatenate([[0.0], bfit.dphi_comb_err]))
-
-    fig, ax = plt.subplots(figsize=(8.5, 5.5))
-    ax.errorbar(idx, meas, yerr=merr, fmt="o-", ms=7, color="tab:orange",
-                ecolor="gray", elinewidth=1, capsize=3, lw=1.4, zorder=3,
-                label=r"measured $\Delta\Phi_{comb,i}$ (2$\pi$ unwrapped)"
-                      + (r", $\sigma$ incl. step-6 $\eta$" if bfit.cov is not None
-                         else r", $\sigma$ = fringe noise only"))
-    ax.scatter([REF_INDEX], [0.0], marker="*", s=200, c="tab:green", zorder=4,
-               label=f"reference pair {REF_INDEX} ($\\Delta\\Phi\\equiv0$)")
-
-    for i, ph, er in zip(idx, meas, merr):
-        ax.annotate(f"{ph:+.2f} $\\pm$ {er:.2f}$^\\circ$", (i, ph),
-                    textcoords="offset points", xytext=(0, 13), fontsize=8,
-                    ha="center")
-        # off to the right rather than under the marker: the trace rises
-        # steeply, so a centred label lands on the line itself
-        ax.annotate(f"$\\Omega$ = {pair_omega(i):.3g}", (i, ph),
-                    textcoords="offset points", xytext=(10, -12), fontsize=7,
-                    ha="left", color="dimgray")
-
-    ax.axhline(0, color="gray", ls="--", lw=0.8)
-    ax.set_xticks(idx)
-    # asymmetric: the Omega labels run to the RIGHT of their marker, so the last
-    # pair needs more room than the first
-    ax.set_xlim(min(idx) - 0.5, max(idx) + 0.9)
-    ax.margins(y=0.20)                       # room for the value labels
-    ax.set_xlabel("pair index $i$")
-    ax.set_ylabel(r"$\Delta\Phi_{comb,i}$  (deg)")
-    ax.set_title("Recovered comb phase per pair (measured, unwrapped)"
-                 "\n" r"$\beta_2$ comparison is in the printed table, not here")
-    ax.legend(loc="best", fontsize=8)
-
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-
-
-def phase_covariance(fits: dict[int, PhaseFit], pairs: list[int]) -> np.ndarray:
-    """Covariance of the fitted dPhi_comb across targets, step-6 eta included.
-
-    Three contributions, for targets ``i``, ``j``::
-
-        fringe noise    diag(dphi_comb_err_i^2)                    independent
-        eta_tgt,i       diag((dphi_deta_tgt,i * eta_tgt_err_i)^2)  independent
-        eta_ref         dphi_deta_ref_i * dphi_deta_ref_j * s^2    COMMON
-
-    The last term is rank 1 and it is the whole point: every target is pinned
-    to the SAME reference amplitude, so an error in eta_ref slides the entire
-    spectrum together instead of scattering it.  Four independent sigmas would
-    charge that one common shift four separate times.
-
-    The sensitivities come from :func:`~calibration_module.phase.fit_phase_fixed`
-    (Gauss-Newton, no extra fit); ``eta_ref_err`` is one number shared by every
-    fit, so it is read off the first.
-    """
-    diag = np.array(
-        [fits[k].dphi_comb_err**2 + (fits[k].dphi_deta_tgt * fits[k].eta_tgt_err) ** 2
-         for k in pairs], dtype=float)
-    c_ref = np.array([fits[k].dphi_deta_ref for k in pairs], dtype=float)
-    s_ref = float(fits[pairs[0]].eta_ref_err) if pairs else 0.0
-    return np.diag(diag) + np.outer(c_ref, c_ref) * s_ref**2
-
-
-def verify_dispersion(fits: dict[int, PhaseFit]) -> Beta2Fit:
-    """Run + report the beta2 dispersion check over every fitted target pair."""
-    pairs = sorted(fits)
-    cov = phase_covariance(fits, pairs) if PROPAGATE_ETA else None
-    bfit = fit_beta2(
-        pairs,
-        [fits[k].dphi_comb for k in pairs],
-        [fits[k].dphi_comb_err for k in pairs],
-        [pair_omega(k) for k in pairs],
-        omega_ref=pair_omega(REF_INDEX),
-        max_branch=MAX_BRANCH,
-        beta2=BETA2,                 # given, not fitted (None -> fit the slope)
-        cov=cov,                     # None -> fringe noise only (PROPAGATE_ETA off)
-    )
-    report_dispersion(bfit)
-    plot_path = OUT_DIR / "calib_step7_v2_spectrum.png"
-    make_spectrum_plot(bfit, plot_path)
-    print(f"Plot saved to {plot_path}")
-    return bfit
 
 
 # ======================================================================
@@ -628,8 +423,8 @@ def _flip_meas_csv(path) -> Path:
     return dst
 
 
-def fit_csv(path, *, flip: bool = False, verify: bool = True) -> None:
-    """Re-fit an already-recorded CSV offline (no hardware), then verify.
+def fit_csv(path, *, flip: bool = False) -> None:
+    """Re-fit an already-recorded CSV offline (no hardware).
 
     Needs two inputs: this CSV plus the combined step-6 JSON (``IN_STEP6``) for
     each pair's eta + single-beam background.  The CSV may carry several target
@@ -644,9 +439,6 @@ def fit_csv(path, *, flip: bool = False, verify: bool = True) -> None:
     ``flip`` handles an inverted photodiode/DAQ read: it writes a sign-flipped
     sibling CSV (:func:`_flip_meas_csv`, negating ``voltage_mean_v`` + ``dark_v``)
     and re-fits that instead, so the fitted fringe is the positive light signal.
-
-    ``verify`` runs the beta2 dispersion check (:func:`verify_dispersion`) over the
-    fitted spectrum and stores it in the output JSON.
 
     Everything is persisted into ONE combined ``calib_step7_result_*.json``
     (:func:`~calibration_module.phase.save_comb_phase_json`).
@@ -680,14 +472,6 @@ def fit_csv(path, *, flip: bool = False, verify: bool = True) -> None:
         print(f"Plot saved to {plot_path}")
         fits[k] = result.fit
 
-    extra = None
-    if verify:
-        try:
-            extra = {"verification": beta2_payload(verify_dispersion(fits),
-                                                   omega_unit=OMEGA_UNIT)}
-        except Exception as exc:            # never lose the fits over the check
-            print(f"\nVerification FAILED ({type(exc).__name__}: {exc})")
-
     # Persist the fitted spectrum {Phi_k} as ONE combined JSON (step3 + step6
     # carried over verbatim from IN_STEP6) -- the single input for downstream
     # consumers.  NOTE the "comb-slm" convention recorded per fit: these phases
@@ -696,7 +480,7 @@ def fit_csv(path, *, flip: bool = False, verify: bool = True) -> None:
     save_comb_phase_json({(k, METHOD): f for k, f in fits.items()},
                          IN_STEP6, out_json, ref_index=REF_INDEX,
                          csv_path=str(Path(path).resolve()),
-                         single_beam_bg=SINGLE_BEAM_BG, extra=extra)
+                         single_beam_bg=SINGLE_BEAM_BG)
     print(f"\nCombined step-7 result (step3 + step6 + step7) saved to {out_json}")
 
 
@@ -877,10 +661,9 @@ def measure_only(*, flip: bool = False) -> Path:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     flip = "--flip" in argv          # inverted DAQ read -> negate voltage_mean_v + dark_v
-    verify = "--no-verify" not in argv   # beta2 dispersion check on the fitted spectrum
     positional = [a for a in argv if not a.startswith("-")]
     if positional:                   # a CSV path -> offline refit, no hardware
-        fit_csv(positional[0], flip=flip, verify=verify)
+        fit_csv(positional[0], flip=flip)
         return 0
 
     csv_path = measure_only(flip=flip)   # no arg -> fresh sweep (drives the SLM/DAQ)
@@ -890,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     # Fit what was just collected, so no second command is needed.  flip=False:
     # a --flip COLLECT already negated the reads before writing the CSV.
     try:
-        fit_csv(csv_path, flip=False, verify=verify)
+        fit_csv(csv_path, flip=False)
     except Exception as exc:             # the raw CSV is on disk either way
         print(f"\nAuto-fit FAILED ({type(exc).__name__}: {exc})")
         print(f"Data is safe -- refit with:  python {Path(__file__).name} {csv_path}")

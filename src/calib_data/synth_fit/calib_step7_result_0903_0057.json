@@ -2346,7 +2346,7 @@
     "ref_index": 1,
     "csv": "C:\\Users\\weishan\\Desktop\\RbONN\\src\\calib_data\\synth_step7_0902_2324.csv",
     "single_beam_bg": true,
-    "step6_json": "C:\\Users\\weishan\\Desktop\\RbONN\\src\\calib_data\\synth_fit\\calib_step6v2_result_0902_2324.json",
+    "step6_json": "C:\\Users\\weishan\\Desktop\\RbONN\\src\\calib_data\\synth_fit\\calib_step6v2_result_0903_0056.json",
     "channels": [
       {
         "tgt_index": 2,
@@ -2480,113 +2480,6 @@
           "r2": 0.9999752093750399
         }
       }
-    ],
-    "verification": {
-      "beta2_rad_per_unit2": -2e-26,
-      "beta2_err_rad_per_unit2": 0.0,
-      "beta2_fixed": true,
-      "beta2_free_rad_per_unit2": -2.015806862516738e-26,
-      "beta2_free_err_rad_per_unit2": 1.0408659745095868e-28,
-      "beta2_naive_rad_per_unit2": -2.015806862516738e-26,
-      "omega_unit": "rad/s",
-      "omega_ref": 552920500000.0,
-      "max_branch": 2,
-      "cost": 5.562605449666217,
-      "cost_no_unwrap": 3.2563801708470725,
-      "dof": 3,
-      "max_abs_pull": 1.605093388425421,
-      "eta_propagated": true,
-      "max_abs_pull_white": 1.8626144369440876,
-      "chi2_gls": 5.562605449666217,
-      "cov_rad2": [
-        [
-          1.5726443948218273e-05,
-          1.1144193698568575e-05,
-          9.289960383081624e-06,
-          9.706299645251416e-06
-        ],
-        [
-          1.1144193698568575e-05,
-          1.4113765171728335e-05,
-          8.840829969468185e-06,
-          9.237040983797183e-06
-        ],
-        [
-          9.289960383081624e-06,
-          8.840829969468185e-06,
-          9.518737618013397e-06,
-          7.700130410278072e-06
-        ],
-        [
-          9.706299645251416e-06,
-          9.237040983797183e-06,
-          7.700130410278072e-06,
-          1.0614892777847368e-05
-        ]
-      ],
-      "r2": 0.9993482460143797,
-      "pairs": [
-        {
-          "tgt_index": 2,
-          "omega": 1558230500000.0,
-          "u_omega_ref2_minus_omega2": -2.12236121181e+24,
-          "dphi_comb_rad": 0.04300802628368625,
-          "dphi_comb_err_rad": 0.003965658072529485,
-          "branch_2pi": 0,
-          "phi_used_rad": 0.04300802628368625,
-          "phi_used_deg": 2.4641783912429367,
-          "model_rad": 0.0424472242362,
-          "resid_rad": 0.0005608020474862502,
-          "resid_deg": 0.032131590463257316,
-          "pull": 0.14141462456659656,
-          "pull_white": 0.14141462456659656
-        },
-        {
-          "tgt_index": 3,
-          "omega": 2563540500000.0,
-          "u_omega_ref2_minus_omega2": -6.26601881582e+24,
-          "dphi_comb_rad": 0.12925097577591954,
-          "dphi_comb_err_rad": 0.003756829137947098,
-          "branch_2pi": 0,
-          "phi_used_rad": 0.12925097577591954,
-          "phi_used_deg": 7.405535409907831,
-          "model_rad": 0.1253203763164,
-          "resid_rad": 0.00393059945951954,
-          "resid_deg": 0.22520675998687215,
-          "pull": 1.0462545181566065,
-          "pull_white": 1.41706210588526
-        },
-        {
-          "tgt_index": 4,
-          "omega": 3568850500000.0,
-          "u_omega_ref2_minus_omega2": -1.243097281203e+25,
-          "dphi_comb_rad": 0.2535715628279623,
-          "dphi_comb_err_rad": 0.0030852451471501253,
-          "branch_2pi": 0,
-          "phi_used_rad": 0.2535715628279623,
-          "phi_used_deg": 14.528580354578628,
-          "model_rad": 0.2486194562406,
-          "resid_rad": 0.004952106587362282,
-          "resid_deg": 0.2837348071547918,
-          "pull": 1.605093388425421,
-          "pull_white": 1.8626144369440876
-        },
-        {
-          "tgt_index": 5,
-          "omega": 4574160500000.0,
-          "u_omega_ref2_minus_omega2": -2.061722320044e+25,
-          "dphi_comb_rad": 0.41565182736892126,
-          "dphi_comb_err_rad": 0.003258050456614717,
-          "branch_2pi": 0,
-          "phi_used_rad": 0.41565182736892126,
-          "phi_used_deg": 23.81509545513947,
-          "model_rad": 0.4123444640088,
-          "resid_rad": 0.0033073633601212737,
-          "resid_deg": 0.18949796185115558,
-          "pull": 1.0151357089655988,
-          "pull_white": 0.25536209776785046
-        }
-      ]
-    }
+    ]
   }
 }

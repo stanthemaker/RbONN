@@ -100,6 +100,7 @@ from calibration_module.phase import (  # noqa: E402
     PairModel,
     fit_beta2,
     load_phase_csv,
+    phase_covariance,
 )
 
 # ======================================================================
@@ -466,9 +467,16 @@ def check_step7(csv_path: Path, models: dict[int, PairModel]) -> None:
     """Re-fit dPhi_comb per target with the step-7 v2 fit, then verify beta2.
 
     Uses the models fitted from the synthetic step-6 CSV -- not the truth
-    values -- so this exercises the real chain, step-6 errors and all.
+    values -- so this exercises the real chain, step-6 errors and all.  That is
+    also why the quoted sigma has to be ``dphi_comb_err_total``: the step-7 fit
+    PINS a = eta_ref and b = eta_tgt to those fitted step-6 models, so its own
+    ``dphi_comb_err`` is the fringe photon noise alone and step 6's eta error is
+    invisible in it, not absent.  Judging the fit against truth on the fringe
+    term alone reads several sigma off on data that is fine.
     """
     print("\n=== Check: step-7 v2 dPhi_comb vs truth ===")
+    print("sigma = fringe noise (+) the PINNED step-6 eta, in quadrature "
+          "(dphi_comb_err_total)")
     if REF_INDEX not in models:
         print(f"no step-6 model for reference pair {REF_INDEX}; skipping")
         return
@@ -482,45 +490,71 @@ def check_step7(csv_path: Path, models: dict[int, PairModel]) -> None:
         fits[k] = fit
         true = comb_phase(k) - comb_phase(REF_INDEX)
         true = float(np.arctan2(np.sin(true), np.cos(true)))     # same (-pi, pi] branch
-        err = fit.dphi_comb_err
+        err = fit.dphi_comb_err_total
         sig = abs(fit.dphi_comb - true) / err if err else float("nan")
         print(f"pair {k}:  truth {np.degrees(true):>+8.3f} deg   "
               f"fit {fit.dphi_comb_deg:>+8.3f} +/- {np.degrees(err):.3f} deg   "
               f"({sig:>4.1f} sigma)   R^2 = {fit.r2:.5f}")
+        print(f"          sigma = {np.degrees(fit.dphi_comb_err):.3f} (fringe) "
+              f"(+) {np.degrees(fit.dphi_comb_err_eta):.3f} (step-6 eta) deg   "
+              f"[d(dPhi)/d(eta): ref {fit.dphi_deta_ref:+.2f}, "
+              f"tgt {fit.dphi_deta_tgt:+.2f} rad per unit eta]")
 
     if len(fits) < 2:
         print("need >= 2 targets for the beta2 check")
         return
     pairs = sorted(fits)
+    # Full covariance, not four independent sigmas: every target is pinned to the
+    # SAME eta_ref, so its error slides the whole spectrum instead of scattering
+    # it.  fit_beta2 then takes the sigmas from sqrt(diag(cov)) and does GLS.
+    cov = phase_covariance(fits, pairs)
     bfit = fit_beta2(pairs,
                      [fits[k].dphi_comb for k in pairs],
-                     [fits[k].dphi_comb_err for k in pairs],
+                     [fits[k].dphi_comb_err for k in pairs],   # ignored: cov wins
                      [omega(k) for k in pairs],
                      omega_ref=omega(REF_INDEX), max_branch=2,
-                     beta2=-2.0 * BETA2_S2)      # beta2 is known here, not fitted
+                     beta2=-2.0 * BETA2_S2,     # beta2 is known here, not fitted
+                     cov=cov)
     print("\n=== Check: measured dPhi_comb,i vs beta2 (Om_ref^2 - Om_i^2) ===")
     print(f"beta2 held at the truth {-2.0*BETA2_S2:+.6e} s^2 "
           f"(GDD {BETA2_S2/(1e-15)**2:.1f} fs^2) -- nothing is fitted here, the")
     print("two traces are just compared point by point:")
-    for k, mo, me, rr, pl in zip(pairs, bfit.model, bfit.phi_used,
-                                 bfit.residuals, bfit.pulls):
+    print("  sigma includes the pinned step-6 eta; eta_ref is COMMON to every "
+          "target, so\n  'pull*' is the covariance-whitened residual -- that is "
+          "the N(0,1) one to judge on")
+    for k, mo, me, rr, se, pl, pw in zip(pairs, bfit.model, bfit.phi_used,
+                                         bfit.residuals, bfit.dphi_comb_err,
+                                         bfit.pulls, bfit.pulls_white):
         print(f"  pair {k}:  model {np.degrees(mo):>+8.3f}   "
               f"measured {np.degrees(me):>+8.3f}   "
-              f"diff {np.degrees(rr):>+7.3f} deg  ({pl:>+5.1f} sigma)")
+              f"diff {np.degrees(rr):>+7.3f} +/- {np.degrees(se):.3f} deg  "
+              f"(pull {pl:>+5.1f}, pull* {pw:>+5.1f})")
     rms = float(np.sqrt(np.mean(np.degrees(bfit.residuals) ** 2)))
     print(f"residual rms = {rms:.3f} deg   max |pull| = {bfit.max_abs_pull:.2f}   "
+          f"max |pull*| = {bfit.max_abs_pull_white:.2f}   "
+          f"chi2 = r^T C^-1 r = {bfit.chi2_gls:.2f} over {bfit.n_targets} targets   "
           f"branches {[int(b) for b in bfit.branch]}")
     print(f"free-slope fit, for reference only: {bfit.beta2_free:+.6e} "
           f"+/- {bfit.beta2_free_err:.2e} s^2  -> GDD "
           f"{(-bfit.beta2_free/2.0)/(1e-15)**2:.2f} fs^2 "
           f"(truth {BETA2_S2/(1e-15)**2:.2f})")
-    if bfit.max_abs_pull > 3.0:
-        # Expected, and worth stating: fit_phase_fixed pins a/b to the step-6
-        # etas and reports ONLY the phase's own error, so a 0.2% eta error
-        # biases dPhi_comb by more than its quoted sigma.  The pulls measure
-        # the step-6 -> step-7 error propagation that the fit does not carry.
-        print("  NOTE: pulls > 3 sigma are the step-6 eta error leaking in -- "
-              "dphi_comb_err does NOT include it (a/b are pinned, not fitted).")
+    # Judge on the whitened pull: the raw per-point pull still counts the one
+    # shared eta_ref shift once per target, so it reads high on a good spectrum.
+    if bfit.max_abs_pull_white > 3.0:
+        print(f"  ** CHECK: a pair sits >3 sigma off truth "
+              f"(max |pull*| = {bfit.max_abs_pull_white:.2f})")
+        # eta is not the only thing step 7 pins.  The single-beam background
+        # (a_x, q_x, a_w, q_w) is taken from the same step-6 fit and is NOT
+        # propagated anywhere, and on this generator it moves dPhi_comb by as
+        # much as eta does (~0.3 deg on a 0.2 deg sigma).  So a pull* over 3
+        # here is the background term missing from cov, not a broken phase fit
+        # -- swap the fitted models for the truth ones to see it vanish.
+        print("     the pinned step-6 single-beam background is NOT in cov "
+              "(only eta is);\n     it shifts dPhi_comb by a comparable amount, "
+              "so pull* is an upper bound")
+    else:
+        print(f"  OK: every pair within 3 sigma of the model "
+              f"(max |pull*| = {bfit.max_abs_pull_white:.2f})")
 
 
 # ======================================================================

@@ -1,5 +1,8 @@
 ==============================================================================
-GENERATE  --  synthetic set with q = 0 on every channel
+STEP 6 v2  --  synth_step6_0902_2324.csv
+  truth    : synth_truth_0902_2324.json
+  out dir  : c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit
+  FIT_W_RANGE = (0.2, 0.9)   BHAT = a_w w + d
 ==============================================================================
 
 === Ground truth: 5 pairs / 10 channels (numbered 1..5, reference = pair 1) ===
@@ -27,16 +30,6 @@ Paste into calib_step7_v2.py to make its verification physical
   OMEGA_ZERO_INDEX is NOT 1: pair 1 sits 1100 comb lines out, not at the centre.  Dropping that offset
   drops the linear-in-index part of Phi and gets beta2 wrong by ~4x here.
 
-Truth JSON: C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_truth_0902_2324.json
-Step-6 CSV: 155 rows, pairs [1, 2, 3, 4, 5] -> C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv
-Step-7 CSV: 40 rows, targets [2, 3, 4, 5] vs ref 1 -> C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv
-
-Fit with:  python calib_step6_v2.py C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv
-           python calib_step7_v2.py C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv   (point IN_STEP6 at the step-6 result first)
-
-==============================================================================
-STEP 6 v2  --  synth_step6_0902_2324.csv   (FIT_Q = False, PARAMS_BG = ['a_x', 'a_w', 'd'])
-==============================================================================
 Loaded c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv: 5 pair(s), 155 acquisitions
 
 === pair 1 ===
@@ -319,9 +312,9 @@ Fit window: w in [0.20, 0.90]  (4 levels)
        difference  =   +0.0889 +/- 0.0679 mV   pull = +1.31   OK
     2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
 
-Saved Step-3 calib + Step-6 v2 fits -> c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_result_0902_2324.json
-Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair1_0902_2324.png
-Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair2_0902_2324.png
-Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair3_0902_2324.png
-Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair4_0902_2324.png
-Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair5_0902_2324.png
+Saved Step-3 calib + Step-6 v2 fits -> c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_result_0903_0056.json
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair1_0903_0056.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair2_0903_0056.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair3_0903_0056.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair4_0903_0056.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair5_0903_0056.png
