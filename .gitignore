@@ -7,4 +7,5 @@ refractor_claude.md
 refractor_codex.md
 .gitignore
 AGENT.md
-src/calib_data/*.png
+# fit plots are regenerable output; the CSV/JSON they come from is tracked
+src/calib_data/**/*.png

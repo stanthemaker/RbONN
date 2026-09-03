@@ -54,10 +54,23 @@ step-6 etas verbatim) and only ``dPhi_comb, d`` float.
 actually bound.  An unconstrained closed-form variant is kept as :func:`fit_phase`
 for diagnostics.
 
+Step-7 **v2** (``calib_step7_v2.py``) tightens this to a ONE-parameter fit
+(:func:`fit_phase_fixed`): ``a``/``b``, the single-beam background and the dark are
+ALL pinned to step 6 + the measured dark, so ``dPhi_comb`` is the only thing that
+can move -- a step-6 error can no longer hide in a nuisance parameter, it shows up
+as a bad ``R^2``.  It also flips the sign convention to
+``cos(dPhi_comb - dPhi_SLM)`` (the panel COMPENSATES the comb phase rather than
+adding to it; see :func:`fringe_arg`, and note that ``dPhi_comb`` is therefore the
+negative of what the ``slm+comb`` fits report).  The recovered spectrum is then
+compared against pure second-order dispersion, ``dPhi_comb,i = beta2 (Omega_ref^2
+- Omega_i^2)`` (:func:`fit_beta2`), with ``beta2`` normally GIVEN -- the check
+unwraps each fitted phase's 2*pi branch onto the model and reports the residual,
+fitting nothing.
+
 This module is fitting + IO only and geometry-general.  The instrument-facing
 half (drive builders + the SLM/monitor sweep) lives in
 :mod:`slm_module.tpa_phase_measure` for the pipeline, and in
-``src/drafts/calib_step7_test.py`` for the offline driver.  Raw rows (one per
+``src/calibration_module/steps/calib_step7_v1.py`` for the offline driver.  Raw rows (one per
 trial x point) are persisted as a CSV (:func:`write_phase_csv`) so a run can be
 reloaded and re-fit offline (:func:`load_phase_csv`); the fitted spectrum is
 persisted as a combined ``{step3, step6, step7}`` JSON
@@ -194,6 +207,28 @@ def intensity_for_phase(phi_rad) -> np.ndarray:
     return np.sin(phi / 2.0) ** 2
 
 
+def fringe_arg(dphi_slm, dphi_comb, convention: str = "slm+comb") -> np.ndarray:
+    """Cosine argument of the interference term, for either sign convention.
+
+    ``"slm+comb"`` -- ``dPhi_SLM + dPhi_comb``: the SLM phase ADDS to the comb
+    phase, i.e. the pair field is ``eta sqrt(x w) exp(i[phi_half(x) + phi_half(w)
+    + Phi_k])`` (the convention of :func:`fit_phase` / :func:`fit_phase_ratio`
+    and of the step-8 forward model).
+
+    ``"comb-slm"`` -- ``dPhi_comb - dPhi_SLM``: the SLM phase SUBTRACTS from the
+    comb phase, i.e. the panel compensates the comb's dispersion phase and the
+    fringe peaks where the two match (the convention of :func:`fit_phase_fixed`,
+    used by step-7 v2).  The two differ only in the SIGN of the recovered
+    ``dPhi_comb``, since ``cos`` is even.
+    """
+    dphi_slm = np.asarray(dphi_slm, dtype=float)
+    if convention == "comb-slm":
+        return dphi_comb - dphi_slm
+    if convention == "slm+comb":
+        return dphi_slm + dphi_comb
+    raise ValueError(f"unknown fringe convention {convention!r}")
+
+
 def slm_phase_diff(x_t, w_t, x_r, w_r) -> np.ndarray:
     """dPhi_SLM = 1/2[(phi^x_t+phi^w_t) - (phi^x_r+phi^w_r)] from commanded intensities.
 
@@ -258,10 +293,47 @@ class PhaseFit:
     w_t: np.ndarray | None = field(default=None, repr=False)
     x_r: np.ndarray | None = field(default=None, repr=False)
     w_r: np.ndarray | None = field(default=None, repr=False)
+    # Sign convention of the fringe argument (see :func:`fringe_arg`):
+    #   "slm+comb" -> cos(dPhi_SLM + dPhi_comb)   (fit_phase, fit_phase_ratio)
+    #   "comb-slm" -> cos(dPhi_comb - dPhi_SLM)   (fit_phase_fixed, step-7 v2)
+    convention: str = field(default="slm+comb", repr=False)
+    # --- pinned step-6 amplitudes: their error propagated into the phase ---
+    # Set by fit_phase_fixed only.  a/b do not float there, so their step-6
+    # uncertainty CANNOT appear in dphi_comb_err -- it is invisible, not
+    # absent.  It reaches the phase through these sensitivities instead.
+    eta_ref_err: float = 0.0
+    eta_tgt_err: float = 0.0
+    dphi_deta_ref: float = 0.0        # d(dPhi_comb)/d(eta_ref), rad per unit eta
+    dphi_deta_tgt: float = 0.0        # d(dPhi_comb)/d(eta_tgt)
 
     @property
     def dphi_comb_deg(self) -> float:
         return float(np.degrees(self.dphi_comb))
+
+    @property
+    def dphi_comb_err_eta(self) -> float:
+        """Phase error from the PINNED step-6 etas alone (rad).
+
+        Zero for every fit that floats a/b -- there the amplitude error is
+        already inside dphi_comb_err via the covariance.
+        """
+        return float(np.hypot(self.dphi_deta_ref * self.eta_ref_err,
+                              self.dphi_deta_tgt * self.eta_tgt_err))
+
+    @property
+    def dphi_comb_err_total(self) -> float:
+        """Fringe noise and the pinned-eta term in quadrature (rad).
+
+        This is the honest single-pair error bar.  It is NOT the whole story
+        across pairs: eta_ref is shared, so the eta_ref part is correlated
+        between targets -- see :func:`fit_beta2`'s ``cov``.
+        """
+        return float(np.hypot(self.dphi_comb_err, self.dphi_comb_err_eta))
+
+    def fringe_arg(self, dphi_slm=None):
+        """The cosine argument of this fit, honouring its sign convention."""
+        d = self.dphi_slm if dphi_slm is None else dphi_slm
+        return fringe_arg(d, self.dphi_comb, self.convention)
 
 
 def fit_phase(
@@ -581,6 +653,148 @@ def fit_phase_ratio(
     )
 
 
+def fit_phase_fixed(
+    dphi_slm: np.ndarray,
+    g: np.ndarray,
+    fixed_bg: np.ndarray,
+    y: np.ndarray,
+    std: np.ndarray,
+    *,
+    eta_ref: float,
+    eta_tgt: float,
+    eta_ref_err: float = 0.0,
+    eta_tgt_err: float = 0.0,
+    bg0: float = 0.0,
+    bg1: float = 0.0,
+    bg2: float = 0.0,
+) -> PhaseFit:
+    """Fit dPhi_comb ALONE -- every amplitude and background pinned to step 6.
+
+    One free parameter.  ``a = eta_ref`` and ``b = eta_tgt`` are the step-6
+    amplitudes verbatim (no shared scale, unlike :func:`fit_phase_ratio`), the
+    single-beam response enters as the fixed per-row ``fixed_bg``, the dark was
+    already removed row-by-row from ``y``, and no residual offset is floated::
+
+        Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_comb - dPhi_SLM) + fixed_bg
+
+    Note the SIGN: the SLM phase SUBTRACTS from the comb phase here
+    (``convention = "comb-slm"``, :func:`fringe_arg`), i.e. the panel compensates
+    the comb's dispersion phase and the fringe peaks where the two match.
+    :func:`fit_phase` / :func:`fit_phase_ratio` use the opposite convention, so
+    their ``dPhi_comb`` is this one negated.
+
+    Because nothing but the phase can move, the fit cannot hide a step-6
+    amplitude or background error inside a nuisance parameter: any such error
+    shows up as a bad ``R^2`` / non-zero mean residual instead.  Points are
+    weighted by ``1/std`` and ``dphi_comb_err`` comes from the weighted Jacobian
+    as-is (no chi2/dof, no Birge rescaling).  ``a_err``/``b_err``/``amp_err`` and
+    ``offset``/``offset_err`` are 0 by construction -- they are not fitted.
+
+    ``dphi_comb_err`` is therefore the FRINGE's own error only.  Pass
+    ``eta_ref_err``/``eta_tgt_err`` (step 6's) to also get the sensitivities
+    ``dphi_deta_ref``/``dphi_deta_tgt``, from which
+    :attr:`PhaseFit.dphi_comb_err_total` adds the pinned-amplitude error back
+    in.  Skipping that does not make the phase more precise, only its quoted
+    error smaller -- the lever is ~15 rad per unit eta, so a 0.1% eta lands a
+    few tenths of a degree on the phase, several times the fringe noise.
+    """
+    from scipy.optimize import least_squares
+
+    dphi_slm = np.asarray(dphi_slm, dtype=float)
+    g = np.asarray(g, dtype=float)
+    fixed_bg = np.asarray(fixed_bg, dtype=float)
+    y = np.asarray(y, dtype=float)
+    std = np.asarray(std, dtype=float)
+
+    A, B = float(eta_ref), float(eta_tgt)
+    known = A * A + B * B * g * g + fixed_bg      # everything that is not the fringe
+
+    def predict(dphi):
+        return known + 2.0 * A * B * g * np.cos(fringe_arg(dphi_slm, dphi, "comb-slm"))
+
+    # phase seed: project the fringe-only residual onto cos/sin(dPhi_SLM).  With
+    # cos(dPhi_comb - dPhi_SLM) = cos dPhi_SLM cos dPhi_comb + sin dPhi_SLM sin dPhi_comb
+    # the two projections are (proportional to) cos and sin of dPhi_comb.
+    w = 1.0 / std**2
+    r0 = y - known
+    P = float(np.sum(w * r0 * g * np.cos(dphi_slm)))
+    Q = float(np.sum(w * r0 * g * np.sin(dphi_slm)))
+    dphi0 = float(np.arctan2(Q, P))
+
+    def resid(p):
+        return (predict(p[0]) - y) / std
+
+    sol = least_squares(resid, [dphi0], max_nfev=20000)
+    dphi = float(np.arctan2(np.sin(sol.x[0]), np.cos(sol.x[0])))   # wrap to (-pi, pi]
+
+    y_pred = predict(dphi)
+    residuals = y - y_pred
+    try:
+        cov = np.linalg.inv(sol.jac.T @ sol.jac)
+        dphi_err = float(np.sqrt(max(cov[0, 0], 0.0)))
+    except np.linalg.LinAlgError:
+        dphi_err = float("nan")
+
+    # ---- the pinned amplitudes' error, propagated into the phase ----------
+    # phi_hat solves S(phi; A, B) = sum_j w_j (Y_j - m_j) dm_j/dphi = 0, so by
+    # the implicit function theorem, dropping the residual-weighted second
+    # derivative (Gauss-Newton -- it averages to zero at the solution):
+    #
+    #     dphi/dA = -(J_phi^T W J_A) / (J_phi^T W J_phi)
+    #
+    # The denominator is the same Fisher information that sets dphi_err above,
+    # so this costs three dot products and no extra fit.
+    psi = fringe_arg(dphi_slm, dphi, "comb-slm")
+    j_phi = -2.0 * A * B * g * np.sin(psi)               # dm/d(dPhi_comb)
+    j_A = 2.0 * A + 2.0 * B * g * np.cos(psi)            # dm/d(eta_ref)
+    j_B = 2.0 * B * g * g + 2.0 * A * g * np.cos(psi)    # dm/d(eta_tgt)
+    fisher = float(np.sum(w * j_phi * j_phi))            # = 1 / dphi_err^2
+    if fisher > 0:
+        dphi_deta_ref = -float(np.sum(w * j_phi * j_A)) / fisher
+        dphi_deta_tgt = -float(np.sum(w * j_phi * j_B)) / fisher
+    else:
+        dphi_deta_ref = dphi_deta_tgt = float("nan")
+
+    ss_res = float(np.sum(residuals**2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    return PhaseFit(
+        dphi_comb=dphi, dphi_comb_err=dphi_err,
+        a=A, a_err=0.0, b=B, b_err=0.0,
+        amp=2.0 * A * B, amp_err=0.0,
+        offset=0.0, offset_err=0.0,
+        r2=r2,
+        eta_ref=A, eta_tgt=B, bound_frac=0.0,
+        a_at_bound=False, b_at_bound=False,
+        bg0=bg0, bg1=bg1, bg2=bg2,
+        dphi_slm=dphi_slm, g=g, y=y, std=std, known=known,
+        y_pred=y_pred, residuals=residuals,
+        convention="comb-slm",
+        eta_ref_err=float(eta_ref_err), eta_tgt_err=float(eta_tgt_err),
+        dphi_deta_ref=dphi_deta_ref, dphi_deta_tgt=dphi_deta_tgt,
+    )
+
+
+def _step6_background(tgt_model, ref_model, x_t, w_t, x_r, w_r, enabled: bool):
+    """Per-row step-6 single-beam background (dark already out) + its g-polynomial.
+
+    Returns ``(fixed_bg, bg0, bg1, bg2)``.  ``bg0/bg1/bg2`` re-express the
+    background as a polynomial in ``g`` for the special case ``x_t = w_t`` and
+    are carried for reference only.  ``enabled=False`` -> an all-zero background.
+    """
+    g_shape = np.asarray(x_t, dtype=float)
+    if not enabled:
+        return np.zeros_like(g_shape), 0.0, 0.0, 0.0
+    fixed_bg = np.asarray(
+        ref_model.single_beam(x_r, w_r) + tgt_model.single_beam(x_t, w_t), dtype=float
+    )
+    return (fixed_bg,
+            float(ref_model.single_beam(1.0, 1.0)),
+            float(tgt_model.a_x + tgt_model.a_w),
+            float(tgt_model.q_x + tgt_model.q_w))
+
+
 def fit_result(
     result: PhaseResult,
     tgt_model: PairModel,
@@ -589,6 +803,7 @@ def fit_result(
     dark: float | None = None,
     frac: float | None = None,
     single_beam_bg: bool = False,
+    comb_only: bool = False,
 ) -> PhaseFit:
     """Fit ``a``, ``b`` and ``dPhi_comb`` to the dark-subtracted Y.
 
@@ -610,6 +825,11 @@ def fit_result(
       contributes the ``~g`` ramp, so ``s``/``dPhi_comb`` are not forced to
       absorb it.
 
+    ``comb_only=True`` overrides ``frac`` entirely and runs the step-7-v2 fit
+    (:func:`fit_phase_fixed`): ``a``/``b``, the single-beam background and the
+    dark are ALL pinned to step 6 + the measured dark, so ``dPhi_comb`` is the
+    only free parameter (and enters as ``cos(dPhi_comb - dPhi_SLM)``).
+
     ``dark`` (scalar) overrides the per-row dark uniformly.
     """
     x_t, w_t, x_r, w_r, y, std = _average_points(result, dark_override=dark)
@@ -619,21 +839,22 @@ def fit_result(
 
     result.tgt_model = tgt_model
     result.ref_model = ref_model
-    if frac is None:
+    if comb_only:
+        # step-7 v2: nothing floats but dPhi_comb
+        fixed_bg, bg0, bg1, bg2 = _step6_background(
+            tgt_model, ref_model, x_t, w_t, x_r, w_r, single_beam_bg)
+        fit = fit_phase_fixed(
+            dphi_slm, g, fixed_bg, y, std,
+            eta_ref=ref_model.eta, eta_ref_err=ref_model.eta_err,
+            eta_tgt=tgt_model.eta, eta_tgt_err=tgt_model.eta_err,
+            bg0=bg0, bg1=bg1, bg2=bg2,
+        )
+    elif frac is None:
         fit = fit_phase(dphi_slm, g, y, std)
     else:
-        if single_beam_bg:
-            # step-6 single-beam of both pairs as a fixed background (dark already out)
-            fixed_bg = np.asarray(
-                ref_model.single_beam(x_r, w_r) + tgt_model.single_beam(x_t, w_t),
-                dtype=float,
-            )
-            bg0 = float(ref_model.single_beam(1.0, 1.0))
-            bg1 = float(tgt_model.a_x + tgt_model.a_w)
-            bg2 = float(tgt_model.q_x + tgt_model.q_w)
-        else:
-            fixed_bg = np.zeros_like(g)
-            bg0 = bg1 = bg2 = 0.0
+        # step-6 single-beam of both pairs as a fixed background (dark already out)
+        fixed_bg, bg0, bg1, bg2 = _step6_background(
+            tgt_model, ref_model, x_t, w_t, x_r, w_r, single_beam_bg)
 
         fit = fit_phase_ratio(
             dphi_slm, g, fixed_bg, y, std,
@@ -739,6 +960,7 @@ def load_phase_csv(
     dark: float | None = None,
     frac: float | None = None,
     single_beam_bg: bool = False,
+    comb_only: bool = False,
     only_tgt: int | None = None,
 ) -> PhaseResult:
     """Load a raw phase-sweep CSV and re-fit dPhi_comb with the given step-6 models.
@@ -756,7 +978,9 @@ def load_phase_csv(
     the step-6 ``eta_ref:eta_tgt`` ratio and floats a shared scale boxed to
     ``+/- frac`` (``frac=0`` pins ``a``/``b`` to the step-6 etas exactly).
     ``single_beam_bg`` additionally folds in both pairs' step-6 single-beam
-    response as a fixed background.
+    response as a fixed background.  ``comb_only=True`` overrides ``frac`` and
+    runs the step-7-v2 fit (:func:`fit_phase_fixed`): amplitudes and background
+    all pinned to step 6, ``dPhi_comb`` the only free parameter.
     """
     file_dark: float | None = None
     with open(Path(path), newline="", encoding="utf-8") as f:
@@ -811,7 +1035,8 @@ def load_phase_csv(
         n_trials=int(trials.max()) + 1 if trials.size else 1,
         csv_path=str(Path(path).resolve()),
     )
-    fit_result(result, tgt_model, ref_model, frac=frac, single_beam_bg=single_beam_bg)
+    fit_result(result, tgt_model, ref_model, frac=frac,
+               single_beam_bg=single_beam_bg, comb_only=comb_only)
     return result
 
 
@@ -820,8 +1045,18 @@ def phase_fit_payload(fit: PhaseFit) -> dict:
     return {
         "dphi_comb_rad": fit.dphi_comb,
         "dphi_comb_deg": fit.dphi_comb_deg,
-        "dphi_comb_err_rad": fit.dphi_comb_err,
+        "dphi_comb_err_rad": fit.dphi_comb_err,          # fringe noise only
         "dphi_comb_err_deg": float(np.degrees(fit.dphi_comb_err)),
+        # pinned step-6 amplitudes (fit_phase_fixed): their error reaches the
+        # phase through these sensitivities, never through dphi_comb_err
+        "dphi_comb_err_eta_rad": fit.dphi_comb_err_eta,
+        "dphi_comb_err_eta_deg": float(np.degrees(fit.dphi_comb_err_eta)),
+        "dphi_comb_err_total_rad": fit.dphi_comb_err_total,
+        "dphi_comb_err_total_deg": float(np.degrees(fit.dphi_comb_err_total)),
+        "dphi_deta_ref": fit.dphi_deta_ref,   # d(dPhi_comb)/d(eta_ref), rad/eta
+        "dphi_deta_tgt": fit.dphi_deta_tgt,
+        "eta_ref_err": fit.eta_ref_err,
+        "eta_tgt_err": fit.eta_tgt_err,
         "a": fit.a,                 # reference amplitude R_1 (~ eta_ref)
         "a_err": fit.a_err,
         "a_at_bound": fit.a_at_bound,
@@ -833,6 +1068,7 @@ def phase_fit_payload(fit: PhaseFit) -> dict:
         "bound_frac": fit.bound_frac,
         "amp_2ab": fit.amp,         # interference amplitude 2ab
         "amp_2ab_err": fit.amp_err,
+        "convention": fit.convention,   # "slm+comb" or "comb-slm" (see fringe_arg)
         "dark_resid_v": fit.offset,  # residual DC after per-row dark subtraction
         "dark_resid_err_v": fit.offset_err,
         "r2": fit.r2,
@@ -867,6 +1103,7 @@ def save_comb_phase_json(
     ref_index: int,
     csv_path: str | None = None,
     single_beam_bg: bool | None = None,
+    extra: dict | None = None,
 ) -> str:
     """Combined step-7 result JSON: ``{"step3": ..., "step6": ..., "step7": ...}``.
 
@@ -878,6 +1115,9 @@ def save_comb_phase_json(
     channel layout (step3) + per-pair eta / single-beam / dark models (step6)
     + the comb-phase spectrum ``{Phi_k}`` vs ``ref_index`` (step7).  Downstream
     consumers (e.g. a multi-pair forward-model check) need nothing else.
+
+    ``extra`` keys are merged into the ``step7`` section (step-7 v2 stores its
+    ``beta2`` dispersion check there under ``"verification"``).
     """
     payload6 = json.loads(Path(step6_path).read_text(encoding="utf-8"))
     if "step6" not in payload6:                        # bare save_tpa_pair_json summary
@@ -898,6 +1138,8 @@ def save_comb_phase_json(
             ],
         },
     }
+    if extra:
+        payload["step7"].update(extra)
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return str(out)
 
@@ -938,6 +1180,290 @@ def load_comb_phase_json(
                 f"no '{method}' fit stored for pair(s) {sorted(missing)} in {path}"
             )
     return int(step7["ref_index"]), phases
+
+
+
+# ======================================================================
+# verification  (does {Phi_k} follow the comb's quadratic dispersion?)
+# ======================================================================
+
+@dataclass
+class Beta2Fit:
+    """Check that the measured spectrum obeys ``Phi_i = beta2 (Omega_ref^2 - Omega_i^2)``.
+
+    A pair's comb phase relative to the reference should be pure second-order
+    dispersion: with the reference pair at detuning ``Omega_ref`` and target pair
+    ``i`` at ``Omega_i``, the phase difference is
+    ``dPhi_comb,i = beta2 (Omega_ref^2 - Omega_i^2)``.
+
+    ``beta2`` is normally KNOWN (from the shaper's nominal GDD, or from an
+    independent measurement) and passed in, so this is a pure comparison of two
+    traces -- the measured ``dphi_comb`` and the model ``beta2 * u`` -- with
+    nothing fitted.  ``beta2_fixed`` records that.  Passing ``beta2=None``
+    instead fits the single slope, which is only useful when the dispersion is
+    unknown; ``beta2_free`` always reports what such a fit would give, as a
+    scale diagnostic.
+
+    The measured phases are only known modulo 2*pi (a fringe fit wraps to
+    (-pi, pi]), so an integer ``branch`` is chosen per target -- the one nearest
+    the model when ``beta2`` is fixed, or the combination with the lowest
+    weighted cost when it is fitted.  ``phi_used = dphi_comb + 2 pi branch`` is
+    what the model is compared against.  ``beta2`` is in radians per (whatever
+    unit ``omega`` is in)^2.
+    """
+
+    indices: list[int]
+    omega: np.ndarray            # detuning per target pair
+    omega_ref: float             # reference pair's detuning
+    u: np.ndarray                # Omega_ref^2 - Omega_i^2 (the regressor)
+    dphi_comb: np.ndarray        # measured phases, as fitted (wrapped)
+    dphi_comb_err: np.ndarray
+    branch: np.ndarray           # integer 2pi branch added to each measured phase
+    phi_used: np.ndarray         # dphi_comb + 2 pi branch  (what was fit)
+    beta2: float                 # rad per omega-unit^2
+    beta2_err: float
+    model: np.ndarray            # beta2 * u
+    residuals: np.ndarray        # phi_used - model  (rad)
+    pulls: np.ndarray            # residual / dphi_comb_err
+    cost: float                  # weighted SSR of the winning branch set
+    beta2_naive: float           # same fit with every branch forced to 0
+    beta2_naive_err: float
+    cost_naive: float
+    max_branch: int
+    beta2_fixed: bool            # True -> beta2 was given, not fitted
+    beta2_free: float            # what a free slope fit on these branches gives
+    beta2_free_err: float
+    r2: float
+    # Full phase covariance, when the caller propagated the step-6 etas.  The
+    # off-diagonal is real: every target is pinned to the SAME eta_ref, so an
+    # error in it slides the whole spectrum instead of scattering it.
+    cov: np.ndarray | None = field(default=None, repr=False)
+
+    @property
+    def n_targets(self) -> int:
+        return len(self.indices)
+
+    @property
+    def dof(self) -> int:
+        """Degrees of freedom: one per target, minus the single fitted beta2."""
+        return max(self.n_targets - 1, 0)
+
+    @property
+    def max_abs_pull(self) -> float:
+        finite = self.pulls[np.isfinite(self.pulls)]
+        return float(np.max(np.abs(finite))) if finite.size else float("nan")
+
+    @property
+    def pulls_white(self) -> np.ndarray:
+        """Residuals whitened by the FULL covariance: ``L^-1 r``, ``C = L L^T``.
+
+        These, not :attr:`pulls`, are the ones to judge when ``cov`` is given.
+        The per-point ``r_i / sigma_i`` counts the shared-eta_ref shift once per
+        target, so one common-mode offset reads as several independent >3 sigma
+        outliers.  Whitening removes exactly that double count.  Falls back to
+        :attr:`pulls` when no covariance was supplied.
+        """
+        if self.cov is None:
+            return self.pulls
+        return np.linalg.solve(np.linalg.cholesky(self.cov), self.residuals)
+
+    @property
+    def max_abs_pull_white(self) -> float:
+        finite = self.pulls_white[np.isfinite(self.pulls_white)]
+        return float(np.max(np.abs(finite))) if finite.size else float("nan")
+
+    @property
+    def chi2_gls(self) -> float:
+        """``r^T C^-1 r`` over the targets (``sum pulls^2`` without a covariance).
+
+        Reported, never used to rescale an error -- see the no-Birge rule.
+        """
+        if self.cov is None:
+            finite = self.pulls[np.isfinite(self.pulls)]
+            return float(np.sum(finite**2))
+        return float(self.residuals @ np.linalg.solve(self.cov, self.residuals))
+
+
+def _beta2_line(u: np.ndarray, phi: np.ndarray, w: np.ndarray, cinv=None):
+    """Weighted LS slope through the origin: ``phi = beta2 u``.  -> (beta2, err, cost).
+
+    ``cinv`` (the inverse phase covariance) replaces the diagonal weights ``w``
+    when the phases are CORRELATED, which they are once the shared step-6
+    ``eta_ref`` is propagated.  Same estimator either way -- generalised least
+    squares collapses to the weighted form for a diagonal covariance.
+    """
+    if cinv is None:
+        denom = float(np.sum(w * u * u))
+        num = float(np.sum(w * u * phi))
+    else:
+        denom = float(u @ cinv @ u)
+        num = float(u @ cinv @ phi)
+    if denom <= 0:
+        return float("nan"), float("nan"), float("nan")
+    beta2 = num / denom
+    err = float(1.0 / np.sqrt(denom))          # covariance as-is, no cost rescaling
+    r = phi - beta2 * u
+    cost = float(np.sum(w * r * r)) if cinv is None else float(r @ cinv @ r)
+    return beta2, err, cost
+
+
+def fit_beta2(
+    indices: Sequence[int],
+    dphi_comb: Sequence[float],
+    dphi_comb_err: Sequence[float],
+    omega: Sequence[float],
+    *,
+    omega_ref: float,
+    max_branch: int = 2,
+    beta2: float | None = None,
+    cov=None,
+) -> Beta2Fit:
+    """Compare the measured spectrum against ``beta2 (Omega_ref^2 - Omega_i^2)``.
+
+    ``indices``/``dphi_comb``/``dphi_comb_err``/``omega`` are per TARGET pair
+    (the reference is the anchor at ``u = 0``, ``dPhi = 0``, which the model
+    satisfies exactly, so it is not a fitted point).
+
+    ``beta2`` GIVEN (the normal case) holds the dispersion slope fixed: nothing
+    is fitted, the model is just evaluated at each pair's ``Omega`` and compared
+    to its measured ``dphi_comb``.  Each phase is wrapped to (-pi, pi], so its
+    integer ``branch`` is taken as the one nearest the model (clipped to
+    ``+/-max_branch``).  ``beta2_err`` is then 0 -- it is an input, not a result.
+
+    ``beta2 = None`` instead FITS the single slope by weighted least squares
+    through the origin, searching every branch combination in
+    ``[-max_branch, max_branch]`` and keeping the lowest-cost one (ties broken
+    toward the smallest shifts).  ``beta2_err`` is the plain weighted-LS error,
+    NOT rescaled by the cost.
+
+    Either way ``beta2_free`` reports the free-slope fit on the selected
+    branches (a scale diagnostic: it says whether a mismatch is the overall
+    dispersion being off or the shape being wrong), and ``beta2_naive`` the same
+    with no unwrapping at all.
+
+    ``cov`` (n x n) supplies the FULL phase covariance instead of independent
+    sigmas, and is the right input whenever step 6's ``eta`` was propagated:
+    the reference amplitude is common to every target, so its error is a
+    correlated, near-rank-1 block.  Given it, ``dphi_comb_err`` is taken from
+    ``sqrt(diag(cov))`` (the argument is ignored, so the two can never
+    disagree), the slope and cost become generalised least squares, and
+    :attr:`Beta2Fit.pulls_white` gives the pulls that are actually N(0, 1).
+    """
+    import itertools
+
+    idx = [int(k) for k in indices]
+    phi = np.asarray(dphi_comb, dtype=float)
+    err = np.asarray(dphi_comb_err, dtype=float)
+    om = np.asarray(omega, dtype=float)
+    if not (len(idx) == phi.size == err.size == om.size):
+        raise ValueError("indices / dphi_comb / dphi_comb_err / omega must be the same length")
+    if phi.size == 0:
+        raise ValueError("no target pairs to verify")
+
+    cinv = None
+    if cov is not None:
+        cov = np.asarray(cov, dtype=float)
+        if cov.shape != (phi.size, phi.size):
+            raise ValueError(f"cov must be {phi.size}x{phi.size}, got {cov.shape}")
+        cinv = np.linalg.inv(cov)
+        err = np.sqrt(np.diag(cov))     # single source of truth for the sigmas
+    good = np.isfinite(err) & (err > 0)
+    w = np.where(good, 1.0 / np.where(good, err, 1.0) ** 2, 1.0)   # unusable err -> weight 1
+    u = float(omega_ref) ** 2 - om**2
+
+    m = max(int(max_branch), 0)
+    if beta2 is not None:
+        # beta2 is an INPUT: no fit, just unwrap each phase onto the branch
+        # nearest the model and measure how far off it lands.
+        b2, b2_err, fixed = float(beta2), 0.0, True
+        shift = np.clip(np.round((b2 * u - phi) / (2.0 * np.pi)), -m, m)
+        phi_used = phi + 2.0 * np.pi * shift
+        r_fixed = phi_used - b2 * u
+        cost = (float(np.sum(w * r_fixed**2)) if cinv is None
+                else float(r_fixed @ cinv @ r_fixed))
+    else:
+        combos = sorted(itertools.product(range(-m, m + 1), repeat=phi.size),
+                        key=lambda c: sum(abs(v) for v in c))  # low |branch| first -> tie-break
+        best = None
+        for combo in combos:
+            trial_shift = np.asarray(combo, dtype=float)
+            trial = phi + 2.0 * np.pi * trial_shift
+            cand, cand_err, cand_cost = _beta2_line(u, trial, w, cinv)
+            if not np.isfinite(cand_cost):
+                continue
+            if best is None or cand_cost < best[0]:           # strict < keeps the tie-break
+                best = (cand_cost, trial_shift, cand, cand_err, trial)
+        if best is None:
+            raise ValueError("beta2 fit is degenerate (all Omega_i equal the reference?)")
+        cost, shift, b2, b2_err, phi_used = best
+        fixed = False
+
+    free, free_err, _ = _beta2_line(u, phi_used, w, cinv)   # scale diagnostic
+    naive, naive_err, cost_naive = _beta2_line(u, phi, w, cinv)
+    model = b2 * u
+    residuals = phi_used - model
+    pulls = np.where(good, residuals / np.where(good, err, 1.0), np.nan)
+    ss_tot = float(np.sum((phi_used - phi_used.mean()) ** 2))
+    r2 = 1.0 - float(np.sum(residuals**2)) / ss_tot if ss_tot > 0 else float("nan")
+
+    return Beta2Fit(
+        indices=idx, omega=om, omega_ref=float(omega_ref), u=u,
+        dphi_comb=phi, dphi_comb_err=err,
+        branch=shift.astype(int), phi_used=phi_used,
+        beta2=b2, beta2_err=b2_err,
+        model=model, residuals=residuals, pulls=pulls, cost=cost,
+        beta2_naive=naive, beta2_naive_err=naive_err, cost_naive=cost_naive,
+        max_branch=m, beta2_fixed=fixed, beta2_free=free, beta2_free_err=free_err,
+        r2=r2, cov=cov,
+    )
+
+
+def beta2_payload(fit: Beta2Fit, *, omega_unit: str | None = None) -> dict:
+    """JSON-ready summary of the beta2 dispersion check."""
+    return {
+        "beta2_rad_per_unit2": fit.beta2,
+        "beta2_err_rad_per_unit2": fit.beta2_err,
+        "beta2_fixed": fit.beta2_fixed,                   # True -> given, not fitted
+        "beta2_free_rad_per_unit2": fit.beta2_free,       # free slope on these branches
+        "beta2_free_err_rad_per_unit2": fit.beta2_free_err,
+        "beta2_naive_rad_per_unit2": fit.beta2_naive,     # no 2pi unwrapping
+        "omega_unit": omega_unit,
+        "omega_ref": fit.omega_ref,
+        "max_branch": fit.max_branch,
+        "cost": fit.cost,
+        "cost_no_unwrap": fit.cost_naive,
+        "dof": fit.dof,
+        "max_abs_pull": fit.max_abs_pull,               # diagonal r_i/sigma_i
+        # With eta propagated the phases are correlated, so these are the pulls
+        # that are actually N(0, 1); equal to the diagonal ones when cov is None.
+        "eta_propagated": fit.cov is not None,
+        "max_abs_pull_white": fit.max_abs_pull_white,
+        "chi2_gls": fit.chi2_gls,
+        "cov_rad2": (None if fit.cov is None else
+                     [[float(v) for v in row] for row in fit.cov]),
+        "r2": fit.r2,
+        "pairs": [
+            {
+                "tgt_index": int(k),
+                "omega": float(o),
+                "u_omega_ref2_minus_omega2": float(uu),
+                "dphi_comb_rad": float(pm),
+                "dphi_comb_err_rad": float(pe),
+                "branch_2pi": int(br),
+                "phi_used_rad": float(pu),
+                "phi_used_deg": float(np.degrees(pu)),
+                "model_rad": float(mo),
+                "resid_rad": float(rr),
+                "resid_deg": float(np.degrees(rr)),
+                "pull": float(pl),
+                "pull_white": float(pw),
+            }
+            for k, o, uu, pm, pe, br, pu, mo, rr, pl, pw in zip(
+                fit.indices, fit.omega, fit.u, fit.dphi_comb, fit.dphi_comb_err,
+                fit.branch, fit.phi_used, fit.model, fit.residuals, fit.pulls,
+                fit.pulls_white)
+        ],
+    }
 
 
 
@@ -992,15 +1518,20 @@ __all__ = [
     "PairModel",
     "PhaseFit",
     "PhaseResult",
+    "Beta2Fit",
     "load_pair_models",
     "build_phase_sweep",
     "build_symmetry_grid",
     "phi_half",
     "intensity_for_phase",
     "slm_phase_diff",
+    "fringe_arg",
     "fit_phase",
     "fit_phase_ratio",
+    "fit_phase_fixed",
     "fit_result",
+    "fit_beta2",
+    "beta2_payload",
     "swap_invariance",
     "write_phase_csv",
     "load_phase_csv",
