@@ -3,10 +3,10 @@
 Not a pytest test (no mocks, needs real hardware) -- run it directly.  Two
 invocations:
 
-    python src/drafts/calib_step7_test.py            # COLLECT: sweep each target
+    python src/calibration_module/steps/calib_step7_v1.py            # COLLECT: sweep each target
                                                      #   pair, write a raw CSV, then
                                                      #   fit it straight away
-    python src/drafts/calib_step7_test.py some.csv   # REFIT:   fit dPhi_comb from an
+    python src/calibration_module/steps/calib_step7_v1.py some.csv   # REFIT:   fit dPhi_comb from an
                                                      #   existing CSV, offline (no hw)
 
 A COLLECT fits the CSV it just wrote, so the normal run needs no second command
@@ -57,7 +57,7 @@ with ``R_1`` the fully-on reference amplitude.  Sweeping ``v`` 0.1 -> 1.0 sweeps
 The fit (in :mod:`calibration_module.phase`).  Every point is reduced to
 ``(g, dPhi_SLM)`` from its commanded intensities.  It floats ``dPhi_comb`` in
 
-    Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_SLM + dPhi_comb) + step-6 background + d
+    Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_comb - dPhi_SLM) + step-6 background + d
 
 with ``a`` := reference amplitude and ``b`` := target amplitude, both taken from
 step 6 -- either ratio-locked with a boxed shared gain ``s`` (``--bounded``) or
@@ -91,9 +91,9 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402

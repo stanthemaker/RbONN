@@ -6,7 +6,7 @@ rows.  This module owns the instrument-facing half the unified pipeline
 needs: building a drive table, walking it on the SLM while reading the
 monitor, and handing the collected rows to :func:`.phase.fit_result`.
 LEGACY -- it talks to BOTH the SLM and the monitor, so it is orchestration,
-not physics.  The offline draft ``src/drafts/calib_step7_v1.py`` does its own
+not physics.  The offline draft ``src/calibration_module/steps/calib_step7_v1.py`` does its own
 SLM/DAQ wiring and does not use this.  Nothing new should import from here;
 delete this module once GUI Step 7 / ``pipeline._run_comb_phase`` is rebuilt.
 

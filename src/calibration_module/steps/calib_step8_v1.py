@@ -23,9 +23,9 @@ low-passed trace, the one uncertainty these drafts carry.
 
 Not a pytest test (no mocks, needs real hardware) -- run it directly::
 
-    python src/drafts/calib_step8_simple.py            # COLLECT: drive, write raw
+    python src/calibration_module/steps/calib_step8_v1.py            # COLLECT: drive, write raw
                                                        #   CSV, compare in place
-    python src/drafts/calib_step8_simple.py some.csv   # COMPARE an existing CSV
+    python src/calibration_module/steps/calib_step8_v1.py some.csv   # COMPARE an existing CSV
                                                        #   offline, no hardware
 
 ``--bounded`` / ``--fix`` pick WHICH stored step-7 spectrum to predict from (a
@@ -45,9 +45,9 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402

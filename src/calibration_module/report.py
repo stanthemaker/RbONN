@@ -1,6 +1,6 @@
 """Matplotlib renderers for step-7 (comb phase) results, shared GUI/CLI.
 
-Factored out of ``src/drafts/calib_step7_test.py`` so the GUI's pipeline page
+Factored out of ``src/calibration_module/steps/calib_step7_v1.py`` so the GUI's pipeline page
 and the draft script draw byte-identical figures.  Every function renders into
 a caller-supplied :class:`matplotlib.figure.Figure` (works with any backend --
 Agg for PNGs, the Qt canvas in the GUI) and never calls ``savefig`` itself.

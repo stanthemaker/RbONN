@@ -3,7 +3,7 @@
 LEGACY -- kept only so the current GUI page and pipeline stage keep running.
 
 This is the in-app sweep driver: it talks to BOTH the SLM and the monitor, so
-it is orchestration, not physics.  The offline drafts under ``src/drafts`` do
+it is orchestration, not physics.  The offline step scripts under ``calibration_module/steps`` do
 not use it -- they compose the SLM and DAQ calls themselves, which is the
 pattern the rebuilt calibration pipeline should follow.  Nothing new should
 import from here; delete this module once GUI Step 6 / ``pipeline._run_pair_eta`` is rebuilt.

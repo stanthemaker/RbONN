@@ -2,11 +2,11 @@
 
 Not a pytest test (no mocks, needs real hardware) -- run it directly::
 
-    python drafts/calib_step6_test.py             # sweep hardware, fit, plot
-    python drafts/calib_step6_test.py --meas       # raw meas CSV only: sweep + record, no fit
-    python drafts/calib_step6_test.py some.csv     # re-fit an existing CSV offline
-    python drafts/calib_step6_test.py some.csv --flip  # re-fit sign-flipped (inverted read)
-    python drafts/calib_step6_test.py some.csv --no-q  # re-fit without the q saturation terms
+    python src/calibration_module/steps/calib_step6_v1.py             # sweep hardware, fit, plot
+    python src/calibration_module/steps/calib_step6_v1.py --meas       # raw meas CSV only: sweep + record, no fit
+    python src/calibration_module/steps/calib_step6_v1.py some.csv     # re-fit an existing CSV offline
+    python src/calibration_module/steps/calib_step6_v1.py some.csv --flip  # re-fit sign-flipped (inverted read)
+    python src/calibration_module/steps/calib_step6_v1.py some.csv --no-q  # re-fit without the q saturation terms
 
 ``--flip`` applies to a REFIT only (the measure path always records the raw
 signal): when the photodiode/DAQ reads inverted (more light -> more negative
@@ -57,9 +57,9 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(REPO_ROOT / "src" / "drafts"))  # for draft_hw
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
@@ -502,7 +502,7 @@ def measure_only() -> None:
     curves from :func:`build_pair_points`, every other channel held off) but
     records raw rows only, into a timestamped ``calib_step6_meas_MMDD_HHMM`` CSV
     with the same column layout as the normal run.  Re-fit later offline with
-    ``python src/drafts/calib_step6_test.py <that_csv>``.
+    ``python src/calibration_module/steps/calib_step6_v1.py <that_csv>``.
     """
     layout = _load_layout()
 

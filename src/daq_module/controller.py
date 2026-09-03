@@ -58,7 +58,7 @@ class DAQMonitorSettings:
     selects it).
 
     Defaults are the values validated on hardware by the step-6/7 calibration
-    runs (``src/drafts/calib_step6_test.py`` / ``calib_step7_test.py``).
+    runs (``src/calibration_module/steps/calib_step6_v1.py`` / ``calib_step7_v1.py``).
     """
 
     channel: str = "ai0"
