@@ -1,0 +1,92 @@
+==============================================================================
+STEP 7 v2  --  synth_step7_0902_2324.csv
+  step6 in : calib_step6v2_result_0902_2324.json
+  out dir  : c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit
+  BETA2 = -2e-26   PROPAGATE_ETA = True   MAX_BRANCH = 2   REF = 1
+==============================================================================
+Step 6: eta[ref 1] = 0.1636 ; eta[2]=0.1485 eta[3]=0.1481 eta[4]=0.1664 eta[5]=0.1432
+Fitting pair(s) [2, 3, 4, 5] vs reference 1 from c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv (one free parameter: dPhi_comb)
+
+=== Re-fit: pair 2 vs reference 1 ===
+Loaded 10 rows, dark = -0.1093 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 2 vs reference 1  (value +/- error):
+  dPhi_comb = +0.0430 +/- 0.0015 rad   ( +2.46 +/- 0.08 deg )
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 148.4735 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 48.5689 mV   (pinned)
+  mean residual    = +0.0438 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 2.51
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair2_refit.png
+
+=== Re-fit: pair 3 vs reference 1 ===
+Loaded 10 rows, dark = -0.0307 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 3 vs reference 1  (value +/- error):
+  dPhi_comb = +0.1293 +/- 0.0014 rad   ( +7.41 +/- 0.08 deg )
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 148.1091 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 48.4498 mV   (pinned)
+  mean residual    = -0.0669 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 2.68
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair3_refit.png
+
+=== Re-fit: pair 4 vs reference 1 ===
+Loaded 10 rows, dark = 0.0164 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 4 vs reference 1  (value +/- error):
+  dPhi_comb = +0.2536 +/- 0.0012 rad   ( +14.53 +/- 0.07 deg )
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 166.4100 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 54.4364 mV   (pinned)
+  mean residual    = -0.0384 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 3.26
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair4_refit.png
+
+=== Re-fit: pair 5 vs reference 1 ===
+Loaded 10 rows, dark = -0.0174 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 5 vs reference 1  (value +/- error):
+  dPhi_comb = +0.4157 +/- 0.0012 rad   ( +23.82 +/- 0.07 deg )
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 143.1672 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 46.8331 mV   (pinned)
+  mean residual    = -0.0330 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 3.35
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair5_refit.png
+
+=== Verification: dPhi_comb,i vs beta2 (Omega_1^2 - Omega_i^2) ===
+Omega unit: rad/s   reference pair 1 at Omega_1 = 5.5292e+11
+Omega_i = (i - 0.45) * 1.00531e+12  (uniform comb; set PAIR_OMEGA for the real geometry)
+beta2 = -2e-26 rad/(rad/s)^2 -- GIVEN, not fitted; only dPhi_comb was fitted
+dPhi_comb is only defined mod 2pi -> branch searched over +/-2
+sigma includes the PINNED step-6 eta (PROPAGATE_ETA): eta_ref is shared,
+  so 'pull*' is the covariance-whitened residual -- judge on that
+pair     Omega  u=O1^2-Oi^2    dPhi meas  2pi  dPhi used      model     resid    sigma    pull   pull*
+   2 1.558e+12   -2.122e+24     +2.46deg   +0     +2.46      +2.43     +0.03    0.227   +0.14   +0.14
+   3 2.564e+12   -6.266e+24     +7.41deg   +0     +7.41      +7.18     +0.23    0.215   +1.05   +1.42
+   4 3.569e+12   -1.243e+25    +14.53deg   +0    +14.53     +14.24     +0.28    0.177   +1.61   +1.86
+   5 4.574e+12   -2.062e+25    +23.82deg   +0    +23.82     +23.63     +0.19    0.187   +1.02   +0.26
+residual: rms 0.205 deg,  max 0.284 deg,  max |pull| 1.61,  max |pull*| 1.86,  chi2 = r^T C^-1 r = 5.56 over 4 targets
+  free-slope fit on these points: -2.01581e-26 +/- 1.04e-28  (+0.79% vs the beta2 used)
+  in GDD terms: beta2 used = +10000.00 fs^2, free-slope = +10079.03 +/- 52.04 fs^2
+  OK: every pair within 3 sigma of the model (max |pull*| = 1.86)
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_spectrum.png
+
+Combined step-7 result (step3 + step6 + step7) saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_result_0903_0005.json

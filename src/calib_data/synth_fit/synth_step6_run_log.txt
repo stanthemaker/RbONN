@@ -1,0 +1,327 @@
+==============================================================================
+GENERATE  --  synthetic set with q = 0 on every channel
+==============================================================================
+
+=== Ground truth: 5 pairs / 10 channels (numbered 1..5, reference = pair 1) ===
+comb: f_rep = 80 MHz -> Delta = 5.027e+08 rad/s;  beta1 = 1e-09 s (cancels per pair);  beta2 = 1e+04 fs^2
+dark d = -0.0350 mV (one, shared);  noise sigma = hypot(0.050 mV, 0.20% of Y)
+pair     eta    C_x    C_w  eta*CxCw      a_x      q_x      a_w      q_w    line       Phi  dPhi vs ref
+   1  0.1700  1.000  0.960   0.16320   0.0290   0.0000   0.0110   0.0000    1100    0.0061       +0.00deg
+   2  0.1520  0.970  1.010   0.14891   0.0400   0.0000   0.0250   0.0000    3100    0.0486       +2.43deg
+   3  0.1660  0.940  0.950   0.14824   0.0120   0.0000   0.0330   0.0000    5100    0.1314       +7.18deg
+   4  0.1580  1.030  1.020   0.16599   0.0060   0.0000   0.0400   0.0000    7100    0.2547      +14.24deg
+   5  0.1480  0.990  0.980   0.14359   0.0210   0.0000   0.0090   0.0000    9100    0.4185      +23.63deg
+   (a/q in mV, Phi = 2*beta2*Omega_i^2, dPhi vs pair 1)
+Recoverable: eta*CxCw (5), a/q per channel (20), d (1), dPhi_comb (4), beta2 (1).
+NOT recoverable: eta and C separately, beta1, absolute Phi (only diffs, mod 2pi).
+
+Paste into calib_step7_v2.py to make its verification physical
+  -- either explicitly, per pair:
+    PAIR_OMEGA = {1: 5.529203e+11, 2: 1.558230e+12, 3: 2.563540e+12, 4: 3.568849e+12, 5: 4.574159e+12}
+  -- or, equivalently, in pair-index form (uniform comb):
+    PAIR_OMEGA = None
+    OMEGA_ZERO_INDEX = 0.45    # pair index where Omega = 0 (base - m_first/dm)
+    OMEGA_STEP = 1.005310e+12   # dm * Delta, rad/s per pair index
+    OMEGA_UNIT = "rad/s"
+    BETA2_NOMINAL = -2.000000e-26   # expected slope vs u (= -2*beta2)
+  OMEGA_ZERO_INDEX is NOT 1: pair 1 sits 1100 comb lines out, not at the centre.  Dropping that offset
+  drops the linear-in-index part of Phi and gets beta2 wrong by ~4x here.
+
+Truth JSON: C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_truth_0902_2324.json
+Step-6 CSV: 155 rows, pairs [1, 2, 3, 4, 5] -> C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv
+Step-7 CSV: 40 rows, targets [2, 3, 4, 5] vs ref 1 -> C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv
+
+Fit with:  python calib_step6_v2.py C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv
+           python calib_step7_v2.py C:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv   (point IN_STEP6 at the step-6 result first)
+
+==============================================================================
+STEP 6 v2  --  synth_step6_0902_2324.csv   (FIT_Q = False, PARAMS_BG = ['a_x', 'a_w', 'd'])
+==============================================================================
+Loaded c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step6_0902_2324.csv: 5 pair(s), 155 acquisitions
+
+=== pair 1 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0352      0.0091         0.0500     0.0354
+    x-only   0.50  0.00   2    -0.0019      0.0189         0.0500     0.0354
+    x-only   1.00  0.00   3     0.0128      0.0460         0.0500     0.0289
+    w-only   0.00  0.50   2    -0.0234      0.0584         0.0500     0.0413
+    w-only   0.00  1.00   2    -0.0712      0.0227         0.0500     0.0354
+    cross    1.00  0.20   4     5.2751      0.0552         0.0511     0.0276
+    cross    1.00  0.45   4    11.9680      0.0278         0.0554     0.0277
+    cross    1.00  0.70   4    18.6709      0.0598         0.0624     0.0312
+    cross    1.00  0.90   6    23.9658      0.0486         0.0693     0.0283
+    cross*   1.00  1.00   2    26.6104      0.0635         0.0731     0.0517
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 2/10 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 3.9618e-05 +/- 4.366e-05
+    a_w = -3.7974e-05 +/- 4.769e-05
+    d   = -2.5508e-02 +/- 3.021e-02 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0097  -0.27
+      x-only   0.50  0.00     0.0038   0.11
+      x-only   1.00  0.00    -0.0013  -0.04
+      w-only   0.00  0.50     0.0211   0.51
+      w-only   0.00  1.00    -0.0077  -0.22
+      residual RMS = 0.0111 mV   max |pull| = 0.51   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 2.6752e-02 +/- 7.162e-05
+    eta   = 1.6356e-01 +/- 2.189e-04   (747.1 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.0327 +/- 0.0445 mV   [= a_x]
+    R^2   = 1.0000
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      5.3082      5.3178    -0.0095  -0.26
+     0.45     12.0106     12.0058     0.0048   0.14
+     0.70     18.7229     18.6939     0.0291   0.74
+     0.90     24.0255     24.0443    -0.0188  -0.46
+    residual RMS = 0.0181 mV
+
+  Checks:
+    anchor      D(0) measured =   0.0480 +/- 0.0456 mV  vs beta0 =  -0.0327 mV   pull = +1.26
+    top-drive   D(1.00) measured =  26.6739 +/- 0.0612 mV  vs line =  26.7195 mV   -0.17%  (pull -0.61)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.0327 +/- 0.0445 mV (cross line extrapolated to w=0)
+       a_x         =    0.0396 +/- 0.0437 mV (x-only block)
+       difference  =   -0.0723 +/- 0.0624 mV   pull = -1.16   OK
+    2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
+
+=== pair 2 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0442      0.0018         0.0500     0.0354
+    x-only   0.50  0.00   2     0.0039      0.0115         0.0500     0.0354
+    x-only   1.00  0.00   3    -0.0021      0.0252         0.0500     0.0289
+    w-only   0.00  0.50   2     0.0344      0.0251         0.0500     0.0354
+    w-only   0.00  1.00   2    -0.0036      0.0980         0.0500     0.0693
+    cross    1.00  0.20   4     4.4715      0.0360         0.0508     0.0254
+    cross    1.00  0.45   4    10.0832      0.0161         0.0538     0.0269
+    cross    1.00  0.70   4    15.5424      0.0482         0.0589     0.0294
+    cross    1.00  0.90   6    19.9682      0.0565         0.0640     0.0261
+    cross*   1.00  1.00   2    22.1518      0.0347         0.0669     0.0473
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 1/10 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 2.7257e-05 +/- 4.394e-05
+    a_w = 6.8379e-05 +/- 6.722e-05
+    d   = -2.4479e-02 +/- 3.052e-02 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0197  -0.56
+      x-only   0.50  0.00     0.0147   0.42
+      x-only   1.00  0.00    -0.0049  -0.17
+      w-only   0.00  0.50     0.0247   0.70
+      w-only   0.00  1.00    -0.0475  -0.69
+      residual RMS = 0.0265 mV   max |pull| = 0.70   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 2.2044e-02 +/- 8.345e-05
+    eta   = 1.4847e-01 +/- 2.810e-04   (528.3 sigma)   over w in [0.20, 0.90]
+    beta0 = 0.1019 +/- 0.0431 mV   [= a_x]
+    R^2   = 0.9999
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      4.4823      4.5108    -0.0285  -0.82
+     0.45     10.0769     10.0219     0.0550   1.51
+     0.70     15.5190     15.5330    -0.0139  -0.31
+     0.90     19.9312     19.9418    -0.0107  -0.20
+    residual RMS = 0.0322 mV
+
+  Checks:
+    anchor      D(0) measured =   0.0421 +/- 0.0456 mV  vs beta0 =   0.1019 mV   pull = -0.95
+    top-drive   D(1.00) measured =  22.1079 +/- 0.0701 mV  vs line =  22.1463 mV   -0.17%  (pull -0.42)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =    0.1019 +/- 0.0431 mV (cross line extrapolated to w=0)
+       a_x         =    0.0273 +/- 0.0439 mV (x-only block)
+       difference  =   +0.0747 +/- 0.0615 mV   pull = +1.21   OK
+    2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
+
+=== pair 3 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0039      0.0790         0.0500     0.0559
+    x-only   0.50  0.00   2    -0.0272      0.0208         0.0500     0.0354
+    x-only   1.00  0.00   3     0.0360      0.0245         0.0500     0.0289
+    w-only   0.00  0.50   2    -0.0723      0.0797         0.0500     0.0564
+    w-only   0.00  1.00   2     0.0402      0.0113         0.0500     0.0354
+    cross    1.00  0.20   4     4.3686      0.0702         0.0508     0.0351
+    cross    1.00  0.45   4     9.9231      0.0481         0.0538     0.0269
+    cross    1.00  0.70   4    15.3327      0.0242         0.0587     0.0294
+    cross    1.00  0.90   6    19.8173      0.0588         0.0638     0.0260
+    cross*   1.00  1.00   2    22.0225      0.0945         0.0666     0.0668
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 4/10 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 8.3872e-05 +/- 5.507e-05
+    a_w = 8.1654e-05 +/- 5.697e-05
+    d   = -5.3233e-02 +/- 4.214e-02 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00     0.0493   0.88
+      x-only   0.50  0.00    -0.0159  -0.45
+      x-only   1.00  0.00     0.0053   0.18
+      w-only   0.00  0.50    -0.0599  -1.06
+      w-only   0.00  1.00     0.0118   0.33
+      residual RMS = 0.0359 mV   max |pull| = 1.06   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 2.1936e-02 +/- 8.074e-05
+    eta   = 1.4811e-01 +/- 2.726e-04   (543.4 sigma)   over w in [0.20, 0.90]
+    beta0 = 0.0328 +/- 0.0564 mV   [= a_x]
+    R^2   = 0.9999
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      4.4055      4.4200    -0.0145  -0.30
+     0.45      9.9395      9.9041     0.0354   0.94
+     0.70     15.3287     15.3882    -0.0595  -1.53
+     0.90     19.7970     19.7755     0.0215   0.54
+    residual RMS = 0.0370 mV
+
+  Checks:
+    anchor      D(0) measured =   0.0399 +/- 0.0629 mV  vs beta0 =   0.0328 mV   pull = +0.08
+    top-drive   D(1.00) measured =  21.9941 +/- 0.0750 mV  vs line =  21.9691 mV   +0.11%  (pull +0.29)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =    0.0328 +/- 0.0564 mV (cross line extrapolated to w=0)
+       a_x         =    0.0839 +/- 0.0551 mV (x-only block)
+       difference  =   -0.0511 +/- 0.0788 mV   pull = -0.65   OK
+    2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
+
+=== pair 4 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0471      0.0348         0.0500     0.0354
+    x-only   0.50  0.00   2    -0.0022      0.0308         0.0500     0.0354
+    x-only   1.00  0.00   3    -0.0845      0.0227         0.0500     0.0289
+    w-only   0.00  0.50   2     0.0223      0.0172         0.0500     0.0354
+    w-only   0.00  1.00   2    -0.0260      0.0322         0.0500     0.0354
+    cross    1.00  0.20   4     5.4835      0.0531         0.0512     0.0266
+    cross    1.00  0.45   4    12.3558      0.0660         0.0558     0.0330
+    cross    1.00  0.70   4    19.2880      0.0383         0.0632     0.0316
+    cross    1.00  0.90   6    24.8738      0.0191         0.0704     0.0288
+    cross*   1.00  1.00   2    27.5150      0.0791         0.0744     0.0559
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 3/10 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = -6.0211e-05 +/- 4.323e-05
+    a_w = 1.6095e-06 +/- 4.767e-05
+    d   = -1.1216e-02 +/- 2.973e-02 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0359  -1.02
+      x-only   0.50  0.00     0.0391   1.11
+      x-only   1.00  0.00    -0.0130  -0.45
+      w-only   0.00  0.50     0.0327   0.93
+      w-only   0.00  1.00    -0.0164  -0.46
+      residual RMS = 0.0294 mV   max |pull| = 1.11   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 2.7692e-02 +/- 7.143e-05
+    eta   = 1.6641e-01 +/- 2.146e-04   (775.3 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.0626 +/- 0.0442 mV   [= a_x]
+    R^2   = 1.0000
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      5.4944      5.4759     0.0185   0.52
+     0.45     12.3663     12.3990    -0.0326  -0.85
+     0.70     19.2981     19.3220    -0.0240  -0.62
+     0.90     24.8836     24.8605     0.0231   0.57
+    residual RMS = 0.0251 mV
+
+  Checks:
+    anchor      D(0) measured =  -0.0373 +/- 0.0456 mV  vs beta0 =  -0.0626 mV   pull = +0.40
+    top-drive   D(1.00) measured =  27.5246 +/- 0.0645 mV  vs line =  27.6297 mV   -0.38%  (pull -1.36)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.0626 +/- 0.0442 mV (cross line extrapolated to w=0)
+       a_x         =   -0.0602 +/- 0.0432 mV (x-only block)
+       difference  =   -0.0023 +/- 0.0618 mV   pull = -0.04   OK
+    2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
+
+=== pair 5 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0576      0.0224         0.0500     0.0354
+    x-only   0.50  0.00   2    -0.0536      0.0594         0.0500     0.0420
+    x-only   1.00  0.00   3    -0.0580      0.0135         0.0500     0.0289
+    w-only   0.00  0.50   2    -0.0148      0.0032         0.0500     0.0354
+    w-only   0.00  1.00   2     0.0067      0.0472         0.0500     0.0354
+    cross    1.00  0.20   4     4.1270      0.0906         0.0507     0.0453
+    cross    1.00  0.45   4     9.2996      0.0228         0.0533     0.0267
+    cross    1.00  0.70   4    14.4024      0.0613         0.0577     0.0307
+    cross    1.00  0.90   6    18.5411      0.0441         0.0623     0.0254
+    cross*   1.00  1.00   2    20.5961      0.0229         0.0648     0.0458
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 3/10 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = -4.0648e-06 +/- 4.325e-05
+    a_w = 6.3645e-05 +/- 4.822e-05
+    d   = -5.3503e-02 +/- 3.034e-02 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0041  -0.12
+      x-only   0.50  0.00     0.0019   0.05
+      x-only   1.00  0.00    -0.0005  -0.02
+      w-only   0.00  0.50     0.0069   0.19
+      w-only   0.00  1.00    -0.0034  -0.10
+      residual RMS = 0.0040 mV   max |pull| = 0.19   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 2.0497e-02 +/- 7.918e-05
+    eta   = 1.4317e-01 +/- 2.765e-04   (517.7 sigma)   over w in [0.20, 0.90]
+    beta0 = 0.0849 +/- 0.0524 mV   [= a_x]
+    R^2   = 1.0000
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      4.1677      4.1842    -0.0165  -0.32
+     0.45      9.3245      9.3085     0.0161   0.48
+     0.70     14.4113     14.4327    -0.0213  -0.56
+     0.90     18.5373     18.5320     0.0053   0.14
+    residual RMS = 0.0159 mV
+
+  Checks:
+    anchor      D(0) measured =  -0.0004 +/- 0.0456 mV  vs beta0 =   0.0849 mV   pull = -1.23
+    top-drive   D(1.00) measured =  20.5859 +/- 0.0560 mV  vs line =  20.5817 mV   +0.02%  (pull +0.06)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =    0.0849 +/- 0.0524 mV (cross line extrapolated to w=0)
+       a_x         =   -0.0041 +/- 0.0432 mV (x-only block)
+       difference  =   +0.0889 +/- 0.0679 mV   pull = +1.31   OK
+    2. product-only dependence: NOT MEASURED (needs the verification levels -- set VERIFY_ENABLED = True and re-run)
+
+Saved Step-3 calib + Step-6 v2 fits -> c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_result_0902_2324.json
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair1_0902_2324.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair2_0902_2324.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair3_0902_2324.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair4_0902_2324.png
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step6v2_pair5_0902_2324.png
