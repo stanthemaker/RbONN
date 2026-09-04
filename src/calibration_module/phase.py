@@ -88,6 +88,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .sigma import floor_std
+
 # ======================================================================
 # per-pair step-6 model  (background + eta, used to isolate the fringe)
 # ======================================================================
@@ -283,7 +285,7 @@ class PhaseFit:
     dphi_slm: np.ndarray = field(repr=False)     # dPhi_SLM per point (slm_phase_diff)
     g: np.ndarray = field(repr=False)            # target field amplitude = sqrt(x_t w_t)
     y: np.ndarray = field(repr=False)            # dark-subtracted measured Y
-    std: np.ndarray = field(repr=False)
+    std: np.ndarray = field(repr=False)      # trace spread (+) STD_FLOOR_V: what the fit weighted by
     known: np.ndarray = field(repr=False)        # a^2 + b^2 g^2 + step-6 single-beam (no fringe/offset)
     y_pred: np.ndarray = field(repr=False)       # full model prediction
     residuals: np.ndarray = field(repr=False)
@@ -359,8 +361,9 @@ class PhaseFit:
     def std_total(self) -> np.ndarray:
         """Per-point sigma to judge a residual against: measurement (+) eta.
 
-        ``std`` alone is the DAQ trace spread -- how well the POINT is known.
-        It says nothing about how well the CURVE is known, and with a/b pinned
+        ``std`` alone is how well the POINT is known -- the DAQ trace spread
+        with STD_FLOOR_V in quadrature.  It says nothing about how well the
+        CURVE is known, and with a/b pinned
         the curve carries step 6's eta error bodily.  Comparing a residual to
         ``std`` alone therefore charges the fit for a model uncertainty it was
         never given the freedom to absorb, which is what makes a good fringe
@@ -529,6 +532,13 @@ def _average_points(result: PhaseResult, dark_override: float | None = None):
     :func:`slm_module.tpa_pair.average_cells`; otherwise every cell would be
     floored to a bogus 1.0 V, flattening the fit).  Only cells with neither
     repeats nor a recorded std inherit the median positive std.
+
+    Finally every cell gets :data:`~calibration_module.sigma.STD_FLOOR_V` added
+    in quadrature.  The trace spread scales as sqrt(signal), so without it a
+    point sitting near a fringe null -- or near zero drive -- is the quietest in
+    the sweep and takes the fit, on the strength of a small error bar rather
+    than of any phase information.  This is the one place step 7 forms its
+    weights, so flooring here covers every fit path.
     """
     y_raw = np.asarray(result.voltage_mean_v, dtype=float)
     if dark_override is None:
@@ -562,9 +572,10 @@ def _average_points(result: PhaseResult, dark_override: float | None = None):
     ys = np.asarray(ys, dtype=float)
     std = np.asarray(std, dtype=float)
     finite = std[np.isfinite(std) & (std > 0)]
-    floor = float(np.median(finite)) if finite.size else 1.0
-    std = np.where(np.isfinite(std) & (std > 0), std, floor)
-    return keys[:, 0], keys[:, 1], keys[:, 2], keys[:, 3], ys, std
+    fallback = float(np.median(finite)) if finite.size else 1.0
+    std = np.where(np.isfinite(std) & (std > 0), std, fallback)
+    # Systematic floor last, so it applies to the salvaged cells too.
+    return keys[:, 0], keys[:, 1], keys[:, 2], keys[:, 3], ys, floor_std(std)
 
 
 def fit_phase_ratio(
@@ -714,18 +725,27 @@ def fit_phase_fixed(
     eta_tgt: float,
     eta_ref_err: float = 0.0,
     eta_tgt_err: float = 0.0,
+    g_ref: np.ndarray | float = 1.0,
     bg0: float = 0.0,
     bg1: float = 0.0,
     bg2: float = 0.0,
 ) -> PhaseFit:
     """Fit dPhi_comb ALONE -- every amplitude and background pinned to step 6.
 
-    One free parameter.  ``a = eta_ref`` and ``b = eta_tgt`` are the step-6
+    One free parameter.  ``a = eta_ref g_ref`` and ``b = eta_tgt`` are the step-6
     amplitudes verbatim (no shared scale, unlike :func:`fit_phase_ratio`), the
     single-beam response enters as the fixed per-row ``fixed_bg``, the dark was
     already removed row-by-row from ``y``, and no residual offset is floated::
 
         Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_comb - dPhi_SLM) + fixed_bg
+
+    ``g_ref = sqrt(x_r w_r)`` is the reference's own field amplitude, the mirror
+    of the target's ``g``.  It is 1 when the reference is held fully on -- the
+    grid step 7 used through v1 -- and the whole model collapses to the
+    fully-on form then; drive the reference below 1 (to keep every commanded
+    intensity inside the range step 6 actually fitted) and this factor is what
+    keeps ``a`` honest.  The dPhi_SLM the caller passes already carries the
+    matching ``-phi_half(x_r) - phi_half(w_r)``.
 
     Note the SIGN: the SLM phase SUBTRACTS from the comb phase here
     (``convention = "comb-slm"``, :func:`fringe_arg`), i.e. the panel compensates
@@ -767,10 +787,12 @@ def fit_phase_fixed(
     std = np.asarray(std, dtype=float)
 
     A, B = float(eta_ref), float(eta_tgt)
-    known = A * A + B * B * g * g + fixed_bg      # everything that is not the fringe
+    gr = np.asarray(g_ref, dtype=float) * np.ones_like(g)   # reference field amplitude
+    Aeff = A * gr                                 # the reference arm as actually driven
+    known = Aeff * Aeff + B * B * g * g + fixed_bg  # everything that is not the fringe
 
     def predict(dphi):
-        return known + 2.0 * A * B * g * np.cos(fringe_arg(dphi_slm, dphi, "comb-slm"))
+        return known + 2.0 * Aeff * B * g * np.cos(fringe_arg(dphi_slm, dphi, "comb-slm"))
 
     # phase seed: project the fringe-only residual onto cos/sin(dPhi_SLM).  With
     # cos(dPhi_comb - dPhi_SLM) = cos dPhi_SLM cos dPhi_comb + sin dPhi_SLM sin dPhi_comb
@@ -805,9 +827,10 @@ def fit_phase_fixed(
     # The denominator is the same Fisher information that sets dphi_err above,
     # so this costs three dot products and no extra fit.
     psi = fringe_arg(dphi_slm, dphi, "comb-slm")
-    j_phi = -2.0 * A * B * g * np.sin(psi)               # dm/d(dPhi_comb)
-    j_A = 2.0 * A + 2.0 * B * g * np.cos(psi)            # dm/d(eta_ref)
-    j_B = 2.0 * B * g * g + 2.0 * A * g * np.cos(psi)    # dm/d(eta_tgt)
+    # d/d(eta_ref) carries the chain factor g_ref, since a = eta_ref g_ref.
+    j_phi = -2.0 * Aeff * B * g * np.sin(psi)                        # dm/d(dPhi_comb)
+    j_A = 2.0 * A * gr * gr + 2.0 * B * g * gr * np.cos(psi)         # dm/d(eta_ref)
+    j_B = 2.0 * B * g * g + 2.0 * Aeff * g * np.cos(psi)             # dm/d(eta_tgt)
     fisher = float(np.sum(w * j_phi * j_phi))            # = 1 / dphi_err^2
     if fisher > 0:
         dphi_deta_ref = -float(np.sum(w * j_phi * j_A)) / fisher
@@ -819,10 +842,14 @@ def fit_phase_fixed(
     ss_tot = float(np.sum((y - y.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
+    # `a` / `amp` are the reference arm AS DRIVEN (eta_ref g_ref), so the plot's
+    # model curve and `known - a^2 - b^2 g^2` stay exact; the bare eta is kept
+    # separately in `eta_ref`.  g_ref is constant over a sweep, so take point 0.
+    a_eff = float(Aeff[0]) if Aeff.size else A
     return PhaseFit(
         dphi_comb=dphi, dphi_comb_err=dphi_err,
-        a=A, a_err=0.0, b=B, b_err=0.0,
-        amp=2.0 * A * B, amp_err=0.0,
+        a=a_eff, a_err=0.0, b=B, b_err=0.0,
+        amp=2.0 * a_eff * B, amp_err=0.0,
         offset=0.0, offset_err=0.0,
         r2=r2,
         eta_ref=A, eta_tgt=B, bound_frac=0.0,
@@ -850,8 +877,10 @@ def _step6_background(tgt_model, ref_model, x_t, w_t, x_r, w_r, enabled: bool):
     fixed_bg = np.asarray(
         ref_model.single_beam(x_r, w_r) + tgt_model.single_beam(x_t, w_t), dtype=float
     )
+    # bg0 is the g-independent term: the reference's single beam AT ITS OWN
+    # DRIVE, not at (1, 1) -- the reference is not always held fully on.
     return (fixed_bg,
-            float(ref_model.single_beam(1.0, 1.0)),
+            float(np.mean(np.atleast_1d(ref_model.single_beam(x_r, w_r)))),
             float(tgt_model.a_x + tgt_model.a_w),
             float(tgt_model.q_x + tgt_model.q_w))
 
@@ -908,6 +937,7 @@ def fit_result(
             dphi_slm, g, fixed_bg, y, std,
             eta_ref=ref_model.eta, eta_ref_err=ref_model.eta_err,
             eta_tgt=tgt_model.eta, eta_tgt_err=tgt_model.eta_err,
+            g_ref=np.sqrt(np.clip(x_r * w_r, 0.0, None)),   # reference field amplitude
             bg0=bg0, bg1=bg1, bg2=bg2,
         )
     elif frac is None:

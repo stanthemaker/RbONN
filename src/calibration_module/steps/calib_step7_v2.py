@@ -23,7 +23,7 @@ What changed vs :mod:`calib_step7_v1`
    the SIGN of the recovered ``dPhi_comb`` -- a v2 ``Phi_k`` is the negative of
    a v1 one, so do NOT feed a v2 JSON to a consumer written against v1's
    ``E = sum_k eta_k sqrt(x_k w_k) exp(i[phi_half + phi_half + Phi_k])``
-   forward model (e.g. ``calib_step8_v1.py``) without flipping the sign.
+   forward model (e.g. ``calib_step8_v2.py``) without flipping the sign.
 2. **Nothing floats but the phase.**  ``a = eta_ref``, ``b = eta_tgt``, the
    single-beam response and the dark are ALL taken from step 6 / the measured
    all-off read, so ``dPhi_comb`` is the ONLY free parameter (v1 also floated a
@@ -48,11 +48,18 @@ What changed vs :mod:`calib_step7_v1`
 5. **So does the per-point pull.**  Same reason, one level down: the CSV's
    ``voltage_std_v`` is how well a POINT is known, and with a/b pinned it says
    nothing about how well the CURVE is known.  The pull panel and the drawn
-   error bars use ``PhaseFit.std_total`` -- the trace std and the eta's model
-   error ``d(model)/d(eta) * eta_err`` in quadrature -- so a fringe that is
-   fine stops reading 3 sigma out.  The FIT still weights by the trace std
-   alone: one eta per pair tilts the whole curve coherently, so folding it
+   error bars use ``PhaseFit.std_total`` -- the measurement sigma and the eta's
+   model error ``d(model)/d(eta) * eta_err`` in quadrature -- so a fringe that
+   is fine stops reading 3 sigma out.  The FIT still weights by the measurement
+   sigma alone: one eta per pair tilts the whole curve coherently, so folding it
    into the weights would misdescribe it as per-point noise.
+
+   That measurement sigma is the trace spread with
+   ``calibration_module.sigma.STD_FLOOR_V`` added in quadrature.  The trace
+   spread scales as sqrt(signal), so a point sitting in a fringe null is the
+   quietest in the sweep and would otherwise take the fit on the strength of a
+   small error bar rather than of any phase sensitivity -- and dm/dphi vanishes
+   at a null, so it has none to offer.
 6. The measurement grid is UNCHANGED from v1.
 
 What it measures.  Each target pair carries a fixed comb-phase offset
@@ -61,20 +68,26 @@ What it measures.  Each target pair carries a fixed comb-phase offset
 encodes ``dPhi_comb``.  Running every target builds the phase spectrum
 ``{Phi_k}``.
 
-The drive (one geometry, same as v1).  The reference pair is held fully on
-(``x_r = w_r = 1``); the target's TWO channels are swept TOGETHER
-(``x_t = w_t = v``) over the ramp ``SWEEP_MIN..SWEEP_MAX``.  A channel at
-intensity ``v`` sits at panel phase ``theta = 2*asin(sqrt(v))`` with field
-``sqrt(v)*exp(i theta/2)``, so the target field amplitude is
-``g = sqrt(x_t w_t) = sin^2(theta/2)`` and ``dPhi_SLM = theta - pi``::
+The drive.  The reference pair is held at ``x_r = w_r = REF_LEVEL``; the
+target's TWO channels are swept TOGETHER (``x_t = w_t = v``) over the ramp
+``SWEEP_MIN..SWEEP_MAX``.  A channel at intensity ``v`` sits at panel phase
+``theta = 2*asin(sqrt(v))`` with field ``sqrt(v)*exp(i theta/2)``, so the target
+field amplitude is ``g = sqrt(x_t w_t) = sin^2(theta/2)``, the reference's is
+``g_ref = sqrt(x_r w_r)``, and ``dPhi_SLM = theta - theta_ref``::
 
     Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_comb - dPhi_SLM)
         + step-6 single-beam background
-      = a^2 + |b sin^2(theta/2)|^2
-        + 2 a b sin^2(theta/2) cos(dPhi_comb + pi - theta) + background
 
-with ``a`` the fully-on reference amplitude ``eta_ref``.  Sweeping ``v``
-0.1 -> 1.0 sweeps ``theta`` over ~37..180 deg, tracing the half fringe.
+with ``a = eta_ref * g_ref`` the reference arm AS DRIVEN and ``b = eta_tgt``.
+
+Both arms stop at 0.9 (v2 from 0904 on; v1 and the 0903 run held the reference
+at 1.0 and swept the target to 1.0).  Everything the fit pins comes from step 6,
+which fits its etas over ``fit_w_range = [0.2, 0.9]`` and EXCLUDES the measured
+(1, 1) point -- driving either arm at 1.0 leans the whole fringe on an
+extrapolation, and 1.0 is also where ``d(dPhi_SLM)/dv = 1/sqrt(v(1-v))``
+diverges while the trace std is smallest, so ``1/std^2`` weighting hands that
+one point most of the fit.  See the SWEEP_MIN/SWEEP_MAX comment.  Sweeping ``v``
+0.1 -> 0.9 sweeps ``theta`` over ~37..143 deg, tracing most of the half fringe.
 
 The fit (in :mod:`calibration_module.phase`).  Every point is reduced to
 ``(g, dPhi_SLM)`` from its commanded intensities and handed to
@@ -121,6 +134,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
+from calibration_module.sigma import STD_FLOOR_V  # noqa: E402
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
@@ -141,20 +155,33 @@ CALIB_PATH = REPO_ROOT / "src/calib_data"          # data directory: inputs + ou
 # _slot() converts.  Set PAIR_INDEX_BASE = 0 for the old 0-based convention.
 PAIR_INDEX_BASE = 1                                # pairs are numbered 1..N
 REF_INDEX = 1                                      # common reference pair (Phi = 0)
-TGT_INDICES = [2, 3, 4, 5]                         # target pairs measured vs the reference
+TGT_INDICES = [1, 3, 5]                         # target pairs measured vs the reference
 
 # The ONE input: a combined step-6 result JSON (save_combined_json).  It embeds
 # the raw Step-3 calibration under "step3" (-> channel layout) and every fitted
 # pair under "step6" (-> eta + single-beam background), so the reference + all
 # targets come from this single file -- no separate step-3 import.
-IN_STEP6 = CALIB_PATH / "calib_step6_result_0829_0033.json"  # pairs 1 (ref) + 3,4,5 (targets)
+IN_STEP6 = CALIB_PATH / "run_0903" / "calib_step6v2_result_0903_1655.json"  # pairs 1 (ref) + 3,4,5 (targets)
 
-# ---- The target sweep (IDENTICAL to v1 -- do not change without redoing v1) ----
-# Reference fully on (x_r = w_r = 1); the target's two channels swept TOGETHER
-# (x_t = w_t) over this ramp.
+# ---- The target sweep ----
+# The reference is held at REF_LEVEL; the target's two channels are swept
+# TOGETHER (x_t = w_t) over the SWEEP_MIN..SWEEP_MAX ramp.
+#
+# Every commanded intensity -- the swept target AND the reference -- is kept
+# inside [0.1, 0.9].  v1 (and v2 through the 0903 run) held the reference fully
+# on and swept the target to 1.0, which put both arms outside the window step 6
+# actually FITS its etas over (fit_w_range = [0.2, 0.9]): eta at (1, 1) is a
+# line extrapolated past its data, and the measured (1, 1) point that
+# contradicts it sits in step 6's `excluded` list.  Pinning a/b to that
+# extrapolation biases the whole fringe.  The v = 1 end is also the worst point
+# to lean on: d(dPhi_SLM)/dv = 1/sqrt(v(1-v)) diverges there while its trace std
+# is the smallest of the sweep, so 1/std^2 weighting hands it most of the fit --
+# on the 0903 pair-3 fringe ~70% of the Fisher information, and dropping it
+# alone moved dPhi_comb by 17 deg against a quoted +/-1.4 deg.
 SWEEP_MIN = 0.1                  # min per-side target intensity in the ramp (0..1)
-SWEEP_MAX = 1.0                  # max per-side target intensity in the ramp (0..1)
+SWEEP_MAX = 0.9                  # max per-side target intensity in the ramp (0..1)
 N_SWEEP_POINTS = 10              # points in the ramp
+REF_LEVEL = 0.9                  # reference held at x_r = w_r = REF_LEVEL (was 1.0)
 
 OUT_DIR = CALIB_PATH             # all step-7 outputs live in the data directory
 
@@ -164,9 +191,19 @@ USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode swit
 DAQ_DEVICE = "Dev1"
 DAQ_CHANNEL = "ai0"
 
+# Input range, overriding the DAQMonitorSettings +/-0.1 V default.  Step 7 is the
+# brightest of the calibration steps -- the reference stays on for every point
+# while a second pair ramps up on top of it -- so the bright end can run past
+# 0.1 V, where the board clips and returns a wrong mean rather than an error.
+# The range is quantized (+/-0.1, 0.2, 0.5, 1, 2, 5, 10 V), so 0.2 is the next
+# step up and costs one bit of resolution.
+MIN_VAL_V = -0.2
+MAX_VAL_V = 0.2
+
 # ---- Fixed per-point acquisition (daq_module) ----
-# Sample rate / range / low-pass bandwidth are the DAQMonitorSettings defaults
-# (1 kS/s, +/-0.1 V DIFF, 20 Hz).  The all-off dark sits at zero signal, so it
+# Sample rate / low-pass bandwidth are the DAQMonitorSettings defaults
+# (1 kS/s, 20 Hz); the input range is MIN_VAL_V..MAX_VAL_V above.  The all-off
+# dark sits at zero signal, so it
 # gets the longer T_single window; sweep points always have the reference
 # fully on (bright, both pairs driven) and read T_both.  Every CSV row records
 # the per-point std (voltage_std_v) and std_ratio.
@@ -246,7 +283,7 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     print("Model:  Y = a^2 + b^2 sin^4(theta/2) "
           "+ 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam")
     print("            [both target channels swept together; theta the shared panel phase]")
-    print("            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6")
+    print("            a = eta_ref*sqrt(x_r w_r), b = eta_tgt, background and dark ALL fixed from step 6")
     print("            -> dPhi_comb is the ONLY free parameter")
     print(f"Pair {tgt} vs reference {ref}  (value +/- error):")
     # The quoted error is the TOTAL: fringe noise and the pinned step-6 eta in
@@ -259,7 +296,9 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
           f"step-6 eta {np.degrees(fit.dphi_comb_err_eta):.3f} deg"
           f"   [d(dPhi)/d(eta): ref {fit.dphi_deta_ref:+.2f}, "
           f"tgt {fit.dphi_deta_tgt:+.2f} rad per unit eta]")
-    print(f"  a (ref R_1)      = {fit.a*1e3:.4f} mV^0.5   (pinned to step-6 eta)")
+    g_ref = float(np.median(np.sqrt(fit.x_r * fit.w_r))) if fit.x_r is not None else 1.0
+    print(f"  a (ref arm)      = {fit.a*1e3:.4f} mV^0.5   "
+          f"(pinned: eta_ref {fit.eta_ref*1e3:.4f} x g_ref {g_ref:.4g})")
     print(f"  b (tgt eta CxCw) = {fit.b*1e3:.4f} mV^0.5   (pinned to step-6 eta)")
     print(f"  fringe amp 2ab   = {fit.amp*1e3:.4f} mV   (pinned)")
     # Not fitted here (v1 floated it as `d`), so it is a pure check on step 6:
@@ -272,12 +311,13 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     eta_v = fit.std_model_eta
     print(f"  max |pull|       = {float(np.max(np.abs(fit.pulls))):.2f}   "
           f"[pull = residual / std_total]")
-    print(f"     std_total     = {float(np.median(fit.std))*1e3:.4f} (DAQ trace) "
+    print(f"     std_total     = {float(np.median(fit.std))*1e3:.4f} (measurement) "
           f"(+) {float(np.median(eta_v))*1e3:.4f} (step-6 eta) mV, median over points"
           f"   -> {float(np.median(fit.std_total))*1e3:.4f} mV")
     print(f"  max |pull| on std alone = "
           f"{float(np.max(np.abs(fit.residuals / fit.std))):.2f}   "
-          f"(measurement only -- overstates, the eta error is not in it)")
+          f"(measurement only -- overstates, the eta error is not in it; "
+          f"std includes the {STD_FLOOR_V*1e3:.3f} mV systematic floor)")
     print(f"  R^2 = {fit.r2:.4f}")
 
 
@@ -489,14 +529,20 @@ def fit_csv(path, *, flip: bool = False) -> None:
 # ======================================================================
 
 def build_xw_sweep() -> list[tuple[float, float, float, float]]:
-    """Drive tuples: reference fully on, the target's two channels swept together.
+    """Drive tuples: reference at REF_LEVEL, the target's two channels swept together.
 
     Returns target-first commanded-intensity tuples ``(x_t, w_t, x_r, w_r)`` with
-    ``x_r = w_r = 1`` and ``x_t = w_t`` stepping over the
-    ``SWEEP_MIN..SWEEP_MAX`` ramp.  Unchanged from v1.
+    ``x_r = w_r = REF_LEVEL`` and ``x_t = w_t`` stepping over the
+    ``SWEEP_MIN..SWEEP_MAX`` ramp.  v1 pinned the reference at 1.0 and swept the
+    target to 1.0; both arms now stop at 0.9, inside the range step 6 fits (see
+    the SWEEP_MIN/MAX comment).  The fit follows:
+    :func:`~calibration_module.phase.fit_phase_fixed` takes
+    ``g_ref = sqrt(x_r w_r)`` so ``a = eta_ref g_ref``, and ``dPhi_SLM`` already
+    carried the reference's ``-phi_half(x_r) - phi_half(w_r)``.
     """
     values = np.round(np.linspace(SWEEP_MIN, SWEEP_MAX, N_SWEEP_POINTS), 6)
-    return [(float(v), float(v), 1.0, 1.0) for v in values]
+    r = float(REF_LEVEL)
+    return [(float(v), float(v), r, r) for v in values]
 
 
 _MEAS_CSV_HEADER = [
@@ -557,7 +603,9 @@ def _read_point(daq, x_t: float, w_t: float, x_r: float, w_r: float) -> tuple[fl
 def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> PhaseResult:
     """Drive pair ``k`` (vs REF_INDEX) over ``drive`` and read Y; PhaseResult, no fit.
 
-    Only channels ``k`` and ``REF_INDEX`` are driven; all others held off.  An
+    Only channels ``k`` and ``REF_INDEX`` are driven; all others held off.  The
+    reference level comes from ``drive`` (``x_r``/``w_r`` per row), not from a
+    fully-on assumption -- see :func:`build_xw_sweep`.  An
     all-off dark is read once at the start (T_SINGLE_S window) and stored per
     row for per-row subtraction.  Needs no step-6 model -- raw data only.
 
@@ -618,9 +666,9 @@ def _measure_target(slm, daq, layout, k: int, drive, *, flip: bool = False) -> P
 def measure_only(*, flip: bool = False) -> Path:
     """Sweep every target pair vs the shared reference; write one raw CSV.
 
-    Loops over TGT_INDICES (each vs REF_INDEX), holding the reference fully on
-    (x_ref = w_ref = 1) and sweeping the target's two channels together
-    (x_tgt = w_tgt) over the SWEEP_MIN..SWEEP_MAX ramp -- the SAME grid as v1.
+    Loops over TGT_INDICES (each vs REF_INDEX), holding the reference at
+    REF_LEVEL (x_ref = w_ref = REF_LEVEL) and sweeping the target's two channels
+    together (x_tgt = w_tgt) over the SWEEP_MIN..SWEEP_MAX ramp.
     All rows go into a single timestamped CSV, tagged per row with ``tgt_index``
     and ``ref_index``.  Raw data only: no step-6 models, no fit.  Refit later
     with ``python calib_step7_v2.py <that csv>``.
@@ -640,13 +688,14 @@ def measure_only(*, flip: bool = False) -> Path:
     values = [x_t for x_t, _, _, _ in drive]
     slm = connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
     daq = connect_daq(device=DAQ_DEVICE, channel=DAQ_CHANNEL,
-                      t_both=T_BOTH_S, t_single=T_SINGLE_S)
+                      t_both=T_BOTH_S, t_single=T_SINGLE_S,
+                      min_val=MIN_VAL_V, max_val=MAX_VAL_V)
     results = []
     try:
         for k in TGT_INDICES:
             print(f"\n=== Sweep: pair {k} vs reference {REF_INDEX}  "
-                  f"(x{REF_INDEX}=w{REF_INDEX}=1, sweep x{k}=w{k} over "
-                  f"{values}) ===")
+                  f"(x{REF_INDEX}=w{REF_INDEX}={REF_LEVEL:g}, sweep "
+                  f"x{k}=w{k} over {values}) ===")
             results.append(_measure_target(slm, daq, layout, k, drive, flip=flip))
     finally:
         slm.close_slm()

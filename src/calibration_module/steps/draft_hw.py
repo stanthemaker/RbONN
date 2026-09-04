@@ -75,12 +75,21 @@ def connect_daq(
     channel: str = "ai0",
     t_both: float | None = None,
     t_single: float | None = None,
+    min_val: float | None = None,
+    max_val: float | None = None,
 ) -> DAQController:
     """Connect a DAQController configured for the fixed T_both/T_single windows.
 
     ``t_both`` / ``t_single`` default to the :class:`DAQMonitorSettings` values
     (3 s / 5 s).  ``hold=0``: the drafts own their settle waits, matching how
     the pipeline configures its monitor.
+
+    ``min_val`` / ``max_val`` override the input range (default +/-0.1 V, the
+    most sensitive the board offers).  Raise it when a step drives enough light
+    to clip: step 7 holds the reference on while sweeping a second pair, so its
+    bright end can run past 0.1 V, and a clipped read is a silently wrong mean,
+    not an error.  The board quantizes the range -- it only offers +/-0.1, 0.2,
+    0.5, 1, 2, 5, 10 V and rounds a request UP -- so ask for one of those.
     """
     defaults = DAQMonitorSettings()
     settings = DAQMonitorSettings(
@@ -90,6 +99,8 @@ def connect_daq(
             defaults.single_duration if t_single is None else float(t_single)
         ),
         hold=0.0,
+        min_val=defaults.min_val if min_val is None else float(min_val),
+        max_val=defaults.max_val if max_val is None else float(max_val),
     )
     daq = DAQController(device=device)
     daq.connect()

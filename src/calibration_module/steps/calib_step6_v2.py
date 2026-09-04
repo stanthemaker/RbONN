@@ -113,11 +113,16 @@ Every level is repeated, and the SLM is rewritten between repeats, so the
 scatter across repeats measures *encoding* repeatability and not just detector
 jitter.  A level's sigma is therefore built from that scatter::
 
-    sigma = max(rep_std, trace_std) / sqrt(n_repeats)
+    sigma = hypot(max(rep_std, trace_std) / sqrt(n_repeats), STD_FLOOR_V)
 
 ``trace_std`` (the low-passed trace spread that v1 weights by) is kept only as a
 floor, so two repeats that happen to agree cannot manufacture an infinite
-weight.  This is *not* the retired trace-SEM: repeats are genuinely independent
+weight.  :data:`~calibration_module.sigma.STD_FLOOR_V` is the systematic floor
+on top of that: repeats average down statistical noise but not a systematic, and
+without it the all-off level -- the quietest read in the grid, since the trace
+spread scales as sqrt(signal) -- takes ~46% of the background block on its own.
+
+The ``/sqrt(n)`` is *not* the retired trace-SEM: repeats are genuinely independent
 acquisitions with a panel rewrite in between, so dividing by sqrt(n) is
 legitimate -- and it is what the grid intends, since the highest-leverage cross
 level carries n = 6.  Every fit prints rep_std beside trace_std per level so
@@ -158,6 +163,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
+from calibration_module.sigma import STD_FLOOR_V, floor_std  # noqa: E402
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
@@ -171,8 +177,8 @@ CALIB_PATH = REPO_ROOT / "src/calib_data"   # data directory: inputs + outputs l
 # Keep it in step with calib_step7_v2.PAIR_INDEX_BASE -- step 7 reads this
 # script's pair labels straight out of the step-6 JSON.
 PAIR_INDEX_BASE = 1                         # pairs are numbered 1..N
-PAIR_INDICES = [1, 2, 4]                    # pair labels to calibrate
-IN_STEP3 = CALIB_PATH / "calib_step3b_0828_1121.json"   # Step 3 calib
+PAIR_INDICES = [4]                    # pair labels to calibrate
+IN_STEP3 = CALIB_PATH / "run_0903" / "calib_step3b_0903_1517.json"   # Step 3 calib
 
 SLM_DISPLAY_NO = None            # None -> auto-detect the LCOS-SLM display
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch
@@ -340,11 +346,19 @@ class Level:
 
     @property
     def sigma(self) -> float:
-        """Uncertainty of this level's mean, floored on the trace spread."""
+        """Uncertainty of this level's mean: trace spread, then the systematic.
+
+        The ``/sqrt(n)`` is legitimate (independent acquisitions with a panel
+        rewrite between them), but it applies only to what averaging can reduce.
+        STD_FLOOR_V goes on AFTER it: a systematic does not average away, and
+        no level should read as better known than the floor however many
+        repeats it got.
+        """
         rep = self.rep_std
         spread = max(rep if np.isfinite(rep) else 0.0, self.trace_std)
         sigma = spread / np.sqrt(self.n)
-        return sigma if sigma > 0.0 else 1e-12    # never an infinite weight
+        sigma = sigma if sigma > 0.0 else 1e-12   # never an infinite weight
+        return float(floor_std(sigma))
 
     @property
     def is_verification(self) -> bool:
@@ -753,7 +767,8 @@ def report(fit: PairV2Fit) -> None:
           f"D(w) = Y(1,w) - [{BHAT_LABEL}] = eta^2 w + ({X_SIDE_LABEL})")
     print(f"Fit window: w in [{lo:.2f}, {hi:.2f}]  ({fit.fit_w.size} levels)")
 
-    print("\n  Level means  (sigma = max(rep_std, trace_std)/sqrt(n)):")
+    print(f"\n  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), "
+          f"{STD_FLOOR_V*1e3:.3f} mV systematic floor)):")
     print("    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)")
     for L in fit.levels:
         tag = L.block
