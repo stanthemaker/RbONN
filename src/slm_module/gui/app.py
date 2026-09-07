@@ -17,7 +17,7 @@ from matplotlib.ticker import MaxNLocator
 import matplotlib
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from daq_module.controller import DAQController, DAQMonitorSettings
+from daq_module.controller import DAQController, DAQMonitorSettings, lowpass
 from heater_module.controller import (
     HeaterCycle,
     PID_DEFAULTS as HEATER_PID_DEFAULTS,
@@ -417,7 +417,6 @@ class MainWindow(QtWidgets.QMainWindow):
     edge_optimization_progress = QtCore.pyqtSignal(object)
     qt_test_progress = QtCore.pyqtSignal(int, int, str)
     monitor_sample = QtCore.pyqtSignal(object)
-    daq_monitor_sample = QtCore.pyqtSignal(object)
     hold_progress = QtCore.pyqtSignal(int, int)
     heater_sample = QtCore.pyqtSignal(object)
 
@@ -477,12 +476,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.monitor_stop_event: threading.Event | None = None
         self._monitor_values: list[float] = []
         self._monitor_stds: list[float] = []
-        # live DAQ Monitor page (strip-chart history)
-        self.daq_monitor_stop_event: threading.Event | None = None
-        self._daqmon_t0: float | None = None
-        self._daqmon_times: list[float] = []
-        self._daqmon_values: list[float] = []
-        self._daqmon_stds: list[float] = []
         self.hold_stop_event: threading.Event | None = None
         # Heater (Thorlabs TC300B): one serial link, so at most one background
         # loop (ramp or read-only monitor) owns it at a time.
@@ -510,7 +503,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edge_optimization_progress.connect(self._edge_optimization_progress)
         self.qt_test_progress.connect(self._qt_test_progress)
         self.monitor_sample.connect(self._on_monitor_sample)
-        self.daq_monitor_sample.connect(self._on_daq_monitor_sample)
         self.hold_progress.connect(self._on_hold_progress)
         self.heater_sample.connect(self._on_heater_sample)
 
@@ -534,8 +526,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Dockable live readout (hidden until toggled from the TPA encoder
         # page): passively mirrors every monitor_cycle() sample from any
-        # module. Not to be confused with the DAQ Monitor page, which drives
-        # its own continuous acquisition loop.
+        # module. Not to be confused with the DAQ Monitor page, which runs
+        # its own one-shot waveform reads.
         self.live_readout_dock = LiveReadoutDock(self)
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.live_readout_dock)
         self.live_readout_dock.hide()
@@ -577,7 +569,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("\N{SATELLITE ANTENNA}  OSA Viewer",
              "Live OSA spectrum viewer: single / continuous sweeps with settings"),
             ("\N{BAR CHART}  DAQ Monitor",
-             "Live continuous strip-chart readout of the NI-DAQ analog input"),
+             "One-shot DAQ waveform diagnostic: trace, spectrum, filtered stats"),
             ("\N{THERMOMETER}  Heater",
              "Thorlabs TC300B: staircase ramp/hold + live temperature monitor"),
         )
@@ -1020,7 +1012,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(
             self._caption(
                 "Use a Step 2 wavelength map to locate the 778 nm center, optionally "
-                "fine tune that center with one OSA trace, generate 15 px + 5 px "
+                "fine tune that center with one OSA trace, generate 30 px + 15 px "
                 "channel centers, then calibrate non-neighboring channel groups from "
                 "full-span OSA sweeps."
             )
@@ -1058,15 +1050,15 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_panel = self._panel("Channel grid")
         grid = QtWidgets.QGridLayout(grid_panel)
         self.fast_channel_target_spin = self._double_spin(
-            700.0, 900.0, 778.0, " nm", 3
+            700.0, 900.0, 778.04, " nm", 3
         )
-        self.fast_channel_width_spin = self._spin(1, 256, 15)
-        self.fast_channel_gap_spin = self._spin(0, 256, 5)
+        self.fast_channel_width_spin = self._spin(1, 256, 30)
+        self.fast_channel_gap_spin = self._spin(0, 256, 15)
         self.fast_channel_count_spin = self._spin(1, 200, 20)
-        self.fast_channel_skip_spin = self._spin(0, 20, 2)
+        self.fast_channel_skip_spin = self._spin(0, 20, 3)
         self.fast_channel_fine_check = QtWidgets.QCheckBox("OSA fine tune center")
         self.fast_channel_fine_check.setChecked(True)
-        self.fast_channel_peak_nm_spin = self._double_spin(0.001, 50.0, 0.2, " nm", 3)
+        self.fast_channel_peak_nm_spin = self._double_spin(0.001, 50.0, 0.1, " nm", 3)
         self.fast_channel_peak_nm_spin.setToolTip(
             "Half-window around the target wavelength for center peak centroiding."
         )
@@ -1125,9 +1117,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "Intensity averaging window around each channel wavelength. 0 uses "
             "nearest OSA samples."
         )
-        self.fast_channel_level_start_spin = self._spin(0, 1023, 0)
-        self.fast_channel_level_stop_spin = self._spin(0, 1023, 1023)
-        self.fast_channel_level_step_spin = self._spin(1, 1023, 32)
+        self.fast_channel_level_start_spin = self._spin(0, 1023, 350)
+        self.fast_channel_level_stop_spin = self._spin(0, 1023, 950)
+        self.fast_channel_level_step_spin = self._spin(1, 1023, 15)
         scan_grid.addWidget(QtWidgets.QLabel("OSA center"), 0, 0)
         scan_grid.addWidget(self.fast_channel_center_edit, 0, 1)
         scan_grid.addWidget(QtWidgets.QLabel("Span"), 0, 2)
@@ -1518,15 +1510,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cfg = QtWidgets.QHBoxLayout()
         widgets = self.step_widgets[2]
-        widgets["window"] = self._spin(1, 8191, 8)
+        widgets["window"] = self._spin(1, 8191, 30)
         widgets["peak_nm"] = self._double_spin(0.0, 50.0, 0.2, " nm", 3)
         widgets["peak_nm"].setToolTip("Centroid half-window around the peak, in nm")
-        widgets["stride"] = self._spin(1, 8191, 1)
+        widgets["stride"] = self._spin(1, 8191, 15)
         widgets["stride"].setToolTip(
             "Measure every Nth column; the near-linear wavelength fit fills "
             "in the skipped columns (1 = measure every column)."
         )
-        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.0, " nm", 2)
+        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 1.0, " nm", 2)
         widgets["sweep_nm"].setToolTip(
             "0 = off: wide OSA span at every position. >0: measure the two "
             "region-edge positions with the wide span first (anchors), then "
@@ -1538,7 +1530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Ignore peak-search samples below this wavelength (0 = off). Use "
             "to mask artifacts below the source band."
         )
-        widgets["max_wl"] = self._double_spin(0.0, 2000.0, 0.0, " nm", 2)
+        widgets["max_wl"] = self._double_spin(0.0, 2000.0, 781.0, " nm", 2)
         widgets["max_wl"].setToolTip(
             "Ignore peak-search samples above this wavelength (0 = off). Use "
             "to mask a fixed leakage artifact the SLM never modulates, "
@@ -6414,25 +6406,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ===================== DAQ live monitor page ========================
     def _build_daq_monitor_page(self) -> QtWidgets.QWidget:
-        """Dedicated page: stream the DAQ analog input continuously.
+        """Dedicated page: one-shot DAQ waveform diagnostic (time + spectrum).
 
-        Unlike the encoder page's behaviour recorder (one point per SLM send),
-        this reads back-to-back averaged samples from the connected DAQ and
-        scrolls them on a strip chart -- a live voltmeter with a per-window std
-        band. Connect the DAQ on the Connections page first.
+        Mirrors ``src/drafts/daq_read_waveform.py``: one untriggered finite
+        acquisition, sign-inverted (the TIA outputs negative volts for
+        positive light), digitally low-passed, with the leading
+        settle-cycles/f_cut turn-on transient discarded before any
+        statistics. Replaces the deprecated live strip-chart monitor -- the
+        bring-up view is the raw trace and its amplitude spectrum, not a
+        scrolling voltmeter. Connect the DAQ on the Connections page first.
         """
         page = self._page_shell("DAQ Monitor")
         subtitle = QtWidgets.QLabel(
-            "Live continuous readout of the NI-DAQ analog input. Each point is one "
-            "averaged acquisition over the window below; the shaded band is "
-            "\N{PLUS-MINUS SIGN}std of the low-passed trace. Connect the DAQ on "
-            "the Connections page first."
+            "One-shot waveform diagnostic of the NI-DAQ analog input (the "
+            "daq_read_waveform draft view): one finite acquisition, "
+            "sign-inverted and low-passed, warmup dropped before the stats. "
+            "Connect the DAQ on the Connections page first."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
         page.layout().addWidget(subtitle)
 
-        # --- acquisition parameters ---
+        # --- acquisition parameters (defaults mirror the draft) ---
         self.daqmon_cfg = self._panel("Acquisition")
         grid = QtWidgets.QGridLayout(self.daqmon_cfg)
         grid.setHorizontalSpacing(8)
@@ -6449,218 +6444,225 @@ class MainWindow(QtWidgets.QMainWindow):
             self.daqmon_range.addItem(f"\N{PLUS-MINUS SIGN}{hi:g} V", (lo, hi))
         self.daqmon_range.setCurrentIndex(0)   # smallest / most sensitive by default
         self.daqmon_duration = QtWidgets.QDoubleSpinBox()
-        self.daqmon_duration.setRange(0.001, 10.0)
+        self.daqmon_duration.setRange(0.001, 60.0)
         self.daqmon_duration.setDecimals(3)
-        self.daqmon_duration.setValue(0.100)
+        self.daqmon_duration.setValue(10.0)
         self.daqmon_duration.setSuffix(" s")
-        self.daqmon_duration.setToolTip(
-            "Averaging window per point -- also sets the update rate (~1/window)"
+        self.daqmon_duration.setToolTip("One finite acquisition of this length")
+        self.daqmon_fcut_hw = QtWidgets.QDoubleSpinBox()
+        self.daqmon_fcut_hw.setRange(0.1, 100_000.0)
+        self.daqmon_fcut_hw.setDecimals(1)
+        self.daqmon_fcut_hw.setValue(150.0)
+        self.daqmon_fcut_hw.setSuffix(" Hz")
+        self.daqmon_fcut_hw.setToolTip(
+            "Analog 3 dB bandwidth already in the signal chain (detector/TIA) "
+            "-- physics, not a filter applied here; drawn on the spectrum and "
+            "used for the settle guard when it is the narrower cutoff"
         )
-        self.daqmon_fcut = QtWidgets.QDoubleSpinBox()
-        self.daqmon_fcut.setRange(0.1, 100_000.0)
-        self.daqmon_fcut.setDecimals(1)
-        self.daqmon_fcut.setValue(20.0)
-        self.daqmon_fcut.setSuffix(" Hz")
-        self.daqmon_fcut.setToolTip(
-            "Low-pass bandwidth for the reported mean and std"
+        self.daqmon_fcut_dig = QtWidgets.QDoubleSpinBox()
+        self.daqmon_fcut_dig.setRange(0.1, 100_000.0)
+        self.daqmon_fcut_dig.setDecimals(1)
+        self.daqmon_fcut_dig.setValue(20.0)
+        self.daqmon_fcut_dig.setSuffix(" Hz")
+        self.daqmon_fcut_dig.setToolTip(
+            "Digital Butterworth low-pass applied after acquisition "
+            "(typically \N{LESS-THAN OR EQUAL TO} hardware bandwidth to "
+            "reject more noise)"
         )
-        self.daqmon_history = QtWidgets.QSpinBox()
-        self.daqmon_history.setRange(10, 100_000)
-        self.daqmon_history.setValue(600)
-        self.daqmon_history.setToolTip("How many recent points to keep on the strip chart")
+        self.daqmon_invert = QtWidgets.QCheckBox(
+            "Invert (TIA: \N{MINUS SIGN}V \N{RIGHTWARDS ARROW} +light)")
+        self.daqmon_invert.setChecked(True)
+        self.daqmon_invert.setToolTip(
+            "The transimpedance amplifier outputs negative volts for positive "
+            "light; inverting recovers a positive light signal"
+        )
         pairs = [("Channel", self.daqmon_channel), ("Sample rate", self.daqmon_sample_rate),
-                 ("Range", self.daqmon_range), ("Window", self.daqmon_duration),
-                 ("Low-pass", self.daqmon_fcut), ("History", self.daqmon_history)]
+                 ("Range", self.daqmon_range), ("Duration", self.daqmon_duration),
+                 ("HW bandwidth", self.daqmon_fcut_hw), ("Digital low-pass", self.daqmon_fcut_dig)]
         for i, (label, widget) in enumerate(pairs):
             r, c = i // 3, (i % 3) * 2
             grid.addWidget(QtWidgets.QLabel(label), r, c)
             grid.addWidget(widget, r, c + 1)
+        grid.addWidget(self.daqmon_invert, 2, 0, 1, 4)
         grid.setColumnStretch(6, 1)   # absorb leftover width instead of stretching fields
         page.layout().addWidget(self.daqmon_cfg)
 
-        # --- big live numeric readout ---
+        # --- big numeric readout of the last read ---
         self.daqmon_readout = QtWidgets.QLabel("\N{EN DASH}")
         self.daqmon_readout.setAlignment(QtCore.Qt.AlignCenter)
         self.daqmon_readout.setStyleSheet(
             "font-size: 30px; font-weight: 600; color: #88c0d0; padding: 6px;"
         )
-        page.layout().addWidget(self._panel_with_widget("Current reading", self.daqmon_readout))
+        page.layout().addWidget(
+            self._panel_with_widget("Filtered mean \N{PLUS-MINUS SIGN} std",
+                                    self.daqmon_readout))
 
         # --- controls ---
         ctrl = QtWidgets.QHBoxLayout()
-        self.daqmon_start_button = QtWidgets.QPushButton("Start")
-        self.daqmon_start_button.clicked.connect(self._daq_monitor_start)
-        self.daqmon_stop_button = QtWidgets.QPushButton("Stop")
-        self.daqmon_stop_button.setProperty("variant", "danger")
-        self.daqmon_stop_button.setEnabled(False)
-        self.daqmon_stop_button.clicked.connect(self._daq_monitor_stop)
-        self.daqmon_clear_button = QtWidgets.QPushButton("Clear")
-        self.daqmon_clear_button.setProperty("variant", "ghost")
-        self.daqmon_clear_button.clicked.connect(self._daq_monitor_clear)
-        self.daqmon_save_button = QtWidgets.QPushButton("Save CSV…")
-        self.daqmon_save_button.setProperty("variant", "ghost")
-        self.daqmon_save_button.setEnabled(False)
-        self.daqmon_save_button.clicked.connect(self._daq_monitor_save)
-        ctrl.addWidget(self.daqmon_start_button)
-        ctrl.addWidget(self.daqmon_stop_button)
-        ctrl.addWidget(self.daqmon_clear_button)
-        ctrl.addWidget(self.daqmon_save_button)
+        self.daqmon_read_button = QtWidgets.QPushButton("Read waveform")
+        self.daqmon_read_button.clicked.connect(self._daq_waveform_read)
+        ctrl.addWidget(self.daqmon_read_button)
         ctrl.addStretch(1)
         page.layout().addLayout(ctrl)
 
-        self.daqmon_status = QtWidgets.QLabel("Idle. Connect the DAQ, then press Start.")
+        self.daqmon_status = QtWidgets.QLabel(
+            "Idle. Connect the DAQ, then press Read waveform.")
         self.daqmon_status.setWordWrap(True)
         page.layout().addWidget(self.daqmon_status)
 
-        # --- strip chart ---
-        self.daqmon_fig = Figure(figsize=(10, 4.2), tight_layout=True)
+        # --- time domain + amplitude spectrum ---
+        self.daqmon_fig = Figure(figsize=(10, 6.0), tight_layout=True)
         self.daqmon_canvas = FigureCanvas(self.daqmon_fig)
-        self.daqmon_canvas.setMinimumHeight(280)
-        plot_panel = self._panel("Voltage vs time")
+        self.daqmon_canvas.setMinimumHeight(360)
+        plot_panel = self._panel("Waveform + amplitude spectrum")
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         plot_layout.addWidget(self.daqmon_canvas, 1)
         page.layout().addWidget(plot_panel, 1)
 
-        self._daq_monitor_draw()
+        self._daq_waveform_draw(None)
         return page
 
-    def _daqmon_settings(self) -> DAQMonitorSettings:
-        min_val, max_val = self.daqmon_range.currentData()
-        return DAQMonitorSettings(
-            channel=self.daqmon_channel.text().strip() or "ai0",
-            sample_rate=self.daqmon_sample_rate.value(),
-            duration=self.daqmon_duration.value(),
-            hold=0.0,                       # live monitor: no per-read settle
-            min_val=min_val,
-            max_val=max_val,
-            f_cut=self.daqmon_fcut.value(),
-        )
+    # Leading settle guard dropped after filtering: the acquisition settles
+    # and the zero-phase low-pass anchors to the first sample, so the first
+    # cycles/f_cut seconds are a turn-on transient, not steady state. The
+    # narrowest cutoff in the chain (min(hw, digital)) is the slowest filter,
+    # so it sets the guard.
+    _DAQMON_SETTLE_CYCLES = 3.0
 
-    def _daq_monitor_set_running(self, running: bool) -> None:
-        self.daqmon_start_button.setEnabled(not running)
-        self.daqmon_stop_button.setEnabled(running)
-        self.daqmon_clear_button.setEnabled(not running)
-        self.daqmon_cfg.setEnabled(not running)   # freeze acquisition params while live
-        self.daqmon_save_button.setEnabled(not running and bool(self._daqmon_values))
+    @staticmethod
+    def _daqmon_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
+        """Single-sided Hann-windowed amplitude spectrum, DC bin dropped."""
+        n = int(v.size)
+        if n < 2 or fs <= 0.0:
+            return np.array([]), np.array([])
+        win = np.hanning(n)
+        scale = 2.0 / np.sum(win)   # coherent gain -> single-sided amplitude in volts
+        spec = np.abs(np.fft.rfft(v * win)) * scale
+        freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+        return freqs[1:], spec[1:]  # drop DC bin
 
-    def _daq_monitor_start(self) -> None:
+    def _daq_waveform_read(self) -> None:
         daq = self._daq_ready()
         if daq is None:
             self.daqmon_status.setText("Connect the DAQ on the Connections page first.")
             return
-        settings = self._daqmon_settings()
-        daq.configure_monitor(settings)
-        stop_event = threading.Event()
-        self.daq_monitor_stop_event = stop_event
-        self._daqmon_t0 = None   # first sample stamps the time origin
-        self._daq_monitor_set_running(True)
-        self.daqmon_status.setText("Monitoring… press Stop to end.")
-        timeout = settings.duration + 15.0
+        min_val, max_val = self.daqmon_range.currentData()
+        channel = self.daqmon_channel.text().strip() or "ai0"
+        fs = float(self.daqmon_sample_rate.value())
+        duration = float(self.daqmon_duration.value())
+        f_hw = float(self.daqmon_fcut_hw.value())
+        f_dig = float(self.daqmon_fcut_dig.value())
+        invert = self.daqmon_invert.isChecked()
+        order = DAQMonitorSettings().filter_order
+        settle_cycles = self._DAQMON_SETTLE_CYCLES
+        self.daqmon_read_button.setEnabled(False)
+        self.daqmon_cfg.setEnabled(False)
+        self.daqmon_status.setText(
+            f"Reading {duration:g} s @ {fs:g} S/s\N{HORIZONTAL ELLIPSIS}")
 
         def work() -> dict[str, Any]:
-            idx = 0
-            while not stop_event.is_set():
-                sample = daq.monitor_cycle(
-                    index=idx, timeout=timeout, stop_event=stop_event
-                )
-                if sample is None or stop_event.is_set():
-                    break
-                self.daq_monitor_sample.emit(sample)
-                idx += 1
-            return {"status": "stopped"}
+            voltages = np.asarray(daq.driver.read_waveform(
+                channel=channel, sample_rate=fs, duration=duration,
+                min_val=min_val, max_val=max_val, timeout=duration + 10.0,
+            ), dtype=float)
+            if invert:
+                voltages = -voltages          # TIA: -volts -> +light
+            filtered = lowpass(voltages, fs, f_dig, order)
+            f_eff = min(f_hw, f_dig)          # narrowest cutoff governs settling
+            n_settle = int(round(settle_cycles / f_eff * fs)) if f_eff > 0 else 0
+            if n_settle >= voltages.size:
+                n_settle = 0                  # window too short to guard: keep everything
+            return {
+                "times": np.arange(voltages.size) / fs, "raw": voltages,
+                "filtered": filtered, "n_settle": n_settle, "fs": fs,
+                "f_hw": f_hw, "f_dig": f_dig, "duration": duration,
+                "channel": channel,
+            }
 
-        self._run_task(
-            "DAQ monitor", work,
-            self._daq_monitor_done, self._daq_monitor_error,
+        self._run_task("DAQ waveform", work,
+                       self._daq_waveform_done, self._daq_waveform_error)
+
+    def _daq_waveform_done(self, payload: dict[str, Any]) -> None:
+        self.daqmon_read_button.setEnabled(True)
+        self.daqmon_cfg.setEnabled(True)
+        n0 = int(payload["n_settle"])
+        fs = payload["fs"]
+        raw_kept = payload["raw"][n0:]
+        filt_kept = payload["filtered"][n0:]
+        mean, std = float(filt_kept.mean()), float(filt_kept.std())
+        rel = (std / abs(mean) * 100.0) if mean else float("nan")
+        self.daqmon_readout.setText(
+            f"{mean*1000:+.4f} \N{PLUS-MINUS SIGN} {std*1000:.4f} mV   ({rel:.2f}%)"
         )
+        raw_mean, raw_std = float(raw_kept.mean()), float(raw_kept.std())
+        f_eff = min(payload["f_hw"], payload["f_dig"])
+        self.daqmon_status.setText(
+            f"Read {payload['raw'].size} samples ({payload['duration']:g} s "
+            f"@ {fs:g} S/s); dropped {n0} warmup samples "
+            f"({n0 / fs * 1000.0:.0f} ms); "
+            f"raw {raw_mean*1000:+.4f} \N{PLUS-MINUS SIGN} {raw_std*1000:.4f} mV, "
+            f"filtered ({f_eff:g} Hz) {mean*1000:+.4f} \N{PLUS-MINUS SIGN} "
+            f"{std*1000:.4f} mV."
+        )
+        self._daq_waveform_draw(payload)
 
-    def _daq_monitor_stop(self) -> None:
-        if self.daq_monitor_stop_event is not None:
-            self.daq_monitor_stop_event.set()
-            self.daqmon_status.setText("Stopping…")
-
-    def _daq_monitor_done(self, _payload: dict[str, Any]) -> None:
-        self.daq_monitor_stop_event = None
-        self._daq_monitor_set_running(False)
-        self.daqmon_status.setText(f"Stopped. {len(self._daqmon_values)} points recorded.")
-
-    def _daq_monitor_error(self, _error: str) -> None:
-        self.daq_monitor_stop_event = None
-        self._daq_monitor_set_running(False)
+    def _daq_waveform_error(self, _error: str) -> None:
+        self.daqmon_read_button.setEnabled(True)
+        self.daqmon_cfg.setEnabled(True)
         self.daqmon_status.setText("DAQ read failed (see Status log).")
 
-    def _on_daq_monitor_sample(self, sample: MonitorSample) -> None:
-        """Append one live sample and redraw (GUI thread, via signal)."""
-        if self._daqmon_t0 is None:
-            self._daqmon_t0 = sample.timestamp
-        std = sample.std if sample.std is not None else float("nan")
-        self._daqmon_times.append(sample.timestamp - self._daqmon_t0)
-        self._daqmon_values.append(sample.value)
-        self._daqmon_stds.append(std)
-        # keep only the most recent `history` points on the chart
-        keep = int(self.daqmon_history.value())
-        if len(self._daqmon_times) > keep:
-            self._daqmon_times = self._daqmon_times[-keep:]
-            self._daqmon_values = self._daqmon_values[-keep:]
-            self._daqmon_stds = self._daqmon_stds[-keep:]
-        rel = (std / abs(sample.value) * 100.0) if sample.value else float("nan")
-        self.daqmon_readout.setText(
-            f"{sample.value*1000:+.4f} \N{PLUS-MINUS SIGN} {std*1000:.4f} mV"
-            f"   ({rel:.2f}%)"
-        )
-        self._daq_monitor_draw()
-
-    def _daq_monitor_draw(self) -> None:
+    def _daq_waveform_draw(self, payload: dict[str, Any] | None) -> None:
+        """Time-domain trace (top) + amplitude spectrum (bottom), draft-style."""
         self.daqmon_fig.clear()
         self.daqmon_fig.patch.set_facecolor("#101820")
-        ax = self.daqmon_fig.add_subplot(111)
-        self._style_dark_axes(ax)
-        ax.set_xlabel("Elapsed time (s)")
-        ax.set_ylabel("Voltage (mV)")
-        if self._daqmon_times:
-            t = np.asarray(self._daqmon_times, dtype=float)
-            v = np.asarray(self._daqmon_values, dtype=float) * 1000.0
-            std = np.asarray(self._daqmon_stds, dtype=float) * 1000.0
-            band = np.where(np.isfinite(std), std, 0.0)
-            ax.fill_between(t, v - band, v + band, color="#88c0d0", alpha=0.25,
-                            linewidth=0)
-            ax.plot(t, v, color="#88c0d0", linewidth=1.2)
-            ax.plot(t[-1], v[-1], "o", color="#ebcb8b", markersize=5)
-        else:
-            ax.text(0.5, 0.5, "Press Start to stream the DAQ input",
-                    ha="center", va="center", color="#d8dee9",
-                    transform=ax.transAxes, fontsize=9)
+        ax_t = self.daqmon_fig.add_subplot(211)
+        ax_f = self.daqmon_fig.add_subplot(212)
+        for ax in (ax_t, ax_f):
+            self._style_dark_axes(ax)
+        ax_t.set_xlabel("Time (s)")
+        ax_t.set_ylabel("Voltage (mV)")
+        ax_f.set_xlabel("Frequency (Hz)")
+        ax_f.set_ylabel("Amplitude (\N{MICRO SIGN}V)")
+        if payload is None:
+            ax_t.text(0.5, 0.5, "Press Read waveform to acquire one trace",
+                      ha="center", va="center", color="#d8dee9",
+                      transform=ax_t.transAxes, fontsize=9)
+            self.daqmon_canvas.draw_idle()
+            return
+        t = payload["times"]
+        raw = payload["raw"]
+        filt = payload["filtered"]
+        fs = payload["fs"]
+        n0 = int(payload["n_settle"])
+        f_hw, f_dig = payload["f_hw"], payload["f_dig"]
+        # --- time domain (full trace shown; shaded span = discarded warmup) ---
+        ax_t.plot(t, raw * 1000.0, color="#4c6a78", linewidth=0.8, alpha=0.8,
+                  label=f"raw (hw {f_hw:g} Hz)")
+        ax_t.plot(t, filt * 1000.0, color="#88c0d0", linewidth=1.4,
+                  label=f"low-pass {f_dig:g} Hz")
+        if n0 > 0:
+            ax_t.axvspan(0.0, n0 / fs, color="#d8dee9", alpha=0.12,
+                         label=f"warmup ({n0 / fs * 1000.0:.0f} ms)")
+        ax_t.set_title(f"{payload['channel']}  ({fs:g} S/s, {payload['duration']:g} s)",
+                       color="#d8dee9", fontsize=9)
+        # --- amplitude spectrum of the kept (steady-state) trace ---
+        fr, sr = self._daqmon_spectrum(raw[n0:], fs)
+        ff, sf = self._daqmon_spectrum(filt[n0:], fs)
+        if fr.size:
+            ax_f.loglog(fr, sr * 1e6, color="#4c6a78", linewidth=0.8, alpha=0.8,
+                        label="raw")
+        if ff.size:
+            ax_f.loglog(ff, sf * 1e6, color="#88c0d0", linewidth=1.4,
+                        label=f"low-pass {f_dig:g} Hz")
+        ax_f.axvline(f_hw, color="#d8dee9", linestyle="--", linewidth=1.0, alpha=0.6,
+                     label=f"hardware {f_hw:g} Hz")
+        if f_dig != f_hw:
+            ax_f.axvline(f_dig, color="#bf616a", linestyle=":", linewidth=1.2,
+                         alpha=0.8, label=f"digital {f_dig:g} Hz")
+        for ax in (ax_t, ax_f):
+            ax.legend(fontsize=7, facecolor="#101820", edgecolor="#41515c",
+                      labelcolor="#d8dee9")
         self.daqmon_canvas.draw_idle()
-
-    def _daq_monitor_clear(self) -> None:
-        self._daqmon_t0 = None
-        self._daqmon_times = []
-        self._daqmon_values = []
-        self._daqmon_stds = []
-        self.daqmon_readout.setText("\N{EN DASH}")
-        self.daqmon_save_button.setEnabled(False)
-        self.daqmon_status.setText("Cleared.")
-        self._daq_monitor_draw()
-
-    def _daq_monitor_save(self) -> None:
-        if not self._daqmon_values:
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save DAQ monitor log", "daq_monitor.csv", "CSV (*.csv)")
-        if not path:
-            return
-        try:
-            import csv
-
-            with open(path, "w", newline="") as fh:
-                writer = csv.writer(fh)
-                writer.writerow(["elapsed_s", "voltage_v", "voltage_std_v"])
-                for t, val, std in zip(self._daqmon_times, self._daqmon_values,
-                                       self._daqmon_stds):
-                    writer.writerow([f"{t:.6f}", f"{val:.9g}", f"{std:.9g}"])
-            self._log(f"Saved DAQ monitor log → {path}")
-        except Exception as exc:
-            self._log(f"Save failed: {exc}")
 
     # ===================== Scope Monitor page ========================
     _TRIG_SOURCES = [("CH1", "CHANnel1"), ("CH2", "CHANnel2"), ("CH3", "CHANnel3"),
@@ -9228,8 +9230,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scope_stop_event.set()
         if self.monitor_stop_event is not None:
             self.monitor_stop_event.set()
-        if self.daq_monitor_stop_event is not None:
-            self.daq_monitor_stop_event.set()
         if self.heater_stop_event is not None:
             self.heater_stop_event.set()
         if self.scope_controller is not None:

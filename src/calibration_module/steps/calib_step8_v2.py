@@ -102,7 +102,7 @@ PHASE_METHOD = None         # stored step-7 fit to predict from; None -> the sin
 # level, as in step 7's target sweep); everything else is off.  A block is one
 # driven set swept over these levels, so the run is
 # (len(PAIRS) + len(COMBOS)) * SWEEP_POINTS points plus one dark.
-SWEEP_MIN, SWEEP_MAX = 0.1, 1.0
+SWEEP_MIN, SWEEP_MAX = 0.1, 0.9
 SWEEP_POINTS = 6
 
 OUT_DIR = CALIB_PATH        # all step-8 outputs live in the data directory
@@ -149,7 +149,14 @@ def load_inputs(method, pairs):
             f"{IN_STEP7} has no embedded 'step3' calibration; point IN_STEP7 at "
             f"a combined step-7 result (calib_step7_test.py REFIT output)"
         )
-    layout = channel_layout_from_calibration(calibration_result_from_dict(step3))
+    # Inherited from the chain (step 6 set it, step 7 carried it forward), so
+    # step 8 predicts against the same levels the earlier steps actually drove.
+    # Named enc_method to keep it clear of this function's `method`, which
+    # selects WHICH stored step-7 phase spectrum to predict from.
+    enc_method = (payload.get("encoding") or {}).get("method", "interp")
+    layout = channel_layout_from_calibration(
+        calibration_result_from_dict(step3), method=enc_method
+    )
     models = load_pair_models([IN_STEP7])              # reads the embedded "step6"
     ref_index, entries = load_comb_phase_json(IN_STEP7, method=method)
     phases = {ref_index: 0.0}

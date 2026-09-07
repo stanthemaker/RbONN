@@ -154,7 +154,7 @@ import csv
 import json
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -164,6 +164,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
 from calibration_module.sigma import STD_FLOOR_V, floor_std  # noqa: E402
+from daq_module import DAQMonitorSettings  # noqa: E402
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
@@ -177,8 +178,21 @@ CALIB_PATH = REPO_ROOT / "src/calib_data"   # data directory: inputs + outputs l
 # Keep it in step with calib_step7_v2.PAIR_INDEX_BASE -- step 7 reads this
 # script's pair labels straight out of the step-6 JSON.
 PAIR_INDEX_BASE = 1                         # pairs are numbered 1..N
-PAIR_INDICES = [4]                    # pair labels to calibrate
-IN_STEP3 = CALIB_PATH / "run_0903" / "calib_step3b_0903_1517.json"   # Step 3 calib
+
+# How the encoder turns a commanded x/w into a grayscale level:
+#   "fit"    -- invert the fitted sin^2 transfer model (the default).  Full
+#               scale is the fitted retardance = pi rather than the step-3b
+#               curve's argmax, and `v` means sin^2(Delta/2) exactly -- the
+#               relation phase.phi_half already assumes downstream.
+#   "interp" -- interpolate the measured step-3b curve (the original mapping).
+# Step 6 is where the chain's convention is SET: it writes the choice into its
+# combined result and steps 7 and 8 read it back from there rather than each
+# carrying a copy, so one chain cannot mix the two.  Results measured under
+# different methods are not comparable -- eta, the single-beam background and
+# the comb phases are all defined at the levels actually written.
+ENCODING_METHOD = "fit"
+PAIR_INDICES = [2,3,4,5,6]                    # pair labels to calibrate
+IN_STEP3 = CALIB_PATH / "run_0906_1835" / "calib_step3b_0906_1721.json"   # Step 3 calib
 
 SLM_DISPLAY_NO = None            # None -> auto-detect the LCOS-SLM display
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch
@@ -189,9 +203,25 @@ DAQ_CHANNEL = "ai0"
 # ---- Fixed per-point acquisition (daq_module) ----
 # Sample rate / range / low-pass are the DAQMonitorSettings defaults (1 kS/s,
 # +/-0.1 V DIFF, 20 Hz).  T_SINGLE_S when at most one beam is on, else T_BOTH_S.
+# A read that lands near the +/-0.1 V rail is remeasured at +/-0.2 V (below).
 T_SINGLE_S = 10.0
-T_BOTH_S = 10.0
+T_BOTH_S =8.0
 SETTLE_S = 0.25                  # wait after each SLM pattern change, before reading
+
+# Auto-range.  +/-0.1 V is the board's most sensitive range and right for
+# almost every level, but a bright cross point can run into the rail -- and a
+# clipped read is a silently wrong mean, not an error.  After every read the
+# RAW trace peak is checked against DAQ_NEAR_RAIL_FRAC of the range (the 20 Hz
+# low-pass smears a clipped flat-top back below the rail, so the reported mean
+# alone is not a safe clip test); a near-rail read is remeasured once at
+# +/-DAQ_RANGE_WIDE_V and the wide reading is kept, then the sensitive range
+# is restored so dim levels keep it.  The board's ranges are quantized
+# (+/-0.1, 0.2, 0.5, 1, 2, 5, 10 V), so 0.2 is the next step up and costs one
+# bit of resolution -- see calib_step7_v2, which runs bright enough to sit at
+# +/-0.2 V for the whole sweep.
+DAQ_RANGE_V = 0.1                # default +/- input range (DAQMonitorSettings default)
+DAQ_RANGE_WIDE_V = 0.2           # remeasure range for a near-rail read
+DAQ_NEAR_RAIL_FRAC = 0.95        # "near the rail": raw |peak| >= this fraction of range
 
 # ---- The measurement grid: (x, w, n_repeats) ----
 # 31 acquisitions for the estimator; the verification block below adds 6 more.
@@ -1284,7 +1314,9 @@ def save_combined_json(fits: list[PairV2Fit], out_path: str | Path,
         ],
     }
     step3 = json.loads(IN_STEP3.read_text(encoding="utf-8"))
-    out_path.write_text(json.dumps({"step3": step3, "step6": step6}, indent=2),
+    out_path.write_text(json.dumps({"step3": step3, "step6": step6,
+                                    "encoding": {"method": ENCODING_METHOD}},
+                                   indent=2),
                         encoding="utf-8")
     return out_path
 
@@ -1314,7 +1346,9 @@ def _load_layout():
             f"Step-3 calibration not found: {IN_STEP3}\n"
             f"(CALIB_PATH is the calib_data directory; IN_STEP3 is the JSON in it.)"
         )
-    layout = channel_layout_from_calibration(load_calibration_result(IN_STEP3))
+    layout = channel_layout_from_calibration(
+        load_calibration_result(IN_STEP3), method=ENCODING_METHOD
+    )
     for pi in PAIR_INDICES:
         if not (0 <= _slot(pi) < layout.n_channels):
             raise ValueError(
@@ -1322,6 +1356,52 @@ def _load_layout():
                 f"pairs, numbered from {PAIR_INDEX_BASE})"
             )
     return layout
+
+
+def _set_daq_range(daq, rng: float) -> None:
+    """Reconfigure only the DAQ input range, keeping every other setting.
+
+    ``configure_monitor`` just stores the settings object and every acquisition
+    hands them to the driver afresh, so swapping the range between reads is
+    safe and instant.  ``_settings`` is the object ``connect_daq`` installed;
+    building the new one with ``replace`` keeps the channel and windows in
+    lockstep with it by construction rather than by copy.
+    """
+    base = daq._settings or DAQMonitorSettings()  # noqa: SLF001 -- see docstring
+    daq.configure_monitor(replace(base, min_val=-rng, max_val=rng))
+
+
+def _read_point_autorange(daq, *, single: bool) -> tuple[float, float, float]:
+    """``read_point`` with one near-rail escalation to +/-DAQ_RANGE_WIDE_V.
+
+    The clip test runs on the RAW trace peak (``daq.last_values``), not on the
+    reported mean: the mean comes off the low-passed trace, which pulls a
+    clipped flat-top back below the rail, so a mean comfortably under 0.1 V
+    can still hide railed samples.  A read whose raw peak is within
+    DAQ_NEAR_RAIL_FRAC of the range is remeasured once at the wide range and
+    the wide reading replaces it; the sensitive range is restored either way.
+
+    Returns ``(mean_v, std_v, range_v)`` where ``range_v`` is the +/- range
+    the kept reading was taken at.
+    """
+    mean_v, std_v = read_point(daq, single=single)
+    raw = daq.last_values
+    peak = float(np.max(np.abs(raw))) if raw is not None and np.size(raw) else abs(mean_v)
+    if peak < DAQ_NEAR_RAIL_FRAC * DAQ_RANGE_V:
+        return mean_v, std_v, DAQ_RANGE_V
+    print(f"    near the +/-{DAQ_RANGE_V:g} V rail (raw peak {peak:.4f} V, "
+          f"mean {mean_v*1e3:.2f} mV) -> remeasuring at +/-{DAQ_RANGE_WIDE_V:g} V")
+    _set_daq_range(daq, DAQ_RANGE_WIDE_V)
+    try:
+        mean_v, std_v = read_point(daq, single=single)
+        raw = daq.last_values
+        peak = float(np.max(np.abs(raw))) if raw is not None and np.size(raw) else abs(mean_v)
+        if peak >= DAQ_NEAR_RAIL_FRAC * DAQ_RANGE_WIDE_V:
+            print(f"    ** WARNING: still near the rail at +/-{DAQ_RANGE_WIDE_V:g} V "
+                  f"(raw peak {peak:.4f} V) -- this reading is suspect **")
+    finally:
+        _set_daq_range(daq, DAQ_RANGE_V)
+    return mean_v, std_v, DAQ_RANGE_WIDE_V
 
 
 def _measure_pair(slm, daq, layout, index: int, schedule) -> list:
@@ -1351,13 +1431,14 @@ def _measure_pair(slm, daq, layout, index: int, schedule) -> list:
         if SETTLE_S:
             time.sleep(SETTLE_S)
         single = x_val == 0.0 or w_val == 0.0
-        mean_v, std_v = read_point(daq, single=single)
+        mean_v, std_v, range_v = _read_point_autorange(daq, single=single)
         rows.append((rep, float(x_val), float(w_val), mean_v, std_v))
         ratio = abs(std_v / mean_v) if mean_v else float("inf")
+        wide = f"  [+/-{range_v:g} V]" if range_v != DAQ_RANGE_V else ""
         print(f"[{step}/{total}] pair {index} rep {rep} "
               f"x={x_val:.3f} w={w_val:.3f} "
               f"({T_SINGLE_S if single else T_BOTH_S:.0f}s) -> "
-              f"{mean_v*1000:.4f} mV  std ratio {ratio*100:.2f}%")
+              f"{mean_v*1000:.4f} mV  std ratio {ratio*100:.2f}%{wide}")
     return rows
 
 

@@ -1,0 +1,31 @@
+{
+  "started": "2026-09-06 18:35:13",
+  "run_dir": "src/calib_data/run_0906_1835",
+  "steps_run": [
+    6,
+    7,
+    8
+  ],
+  "pairs": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "ref_index": 2,
+  "inputs": {
+    "step3": "src/calib_data/run_0906/calib_step3b_0906_1721.json",
+    "step6_result": "src/calib_data/run_0906_1835/calib_step6v2_result_0906_1912.json"
+  },
+  "status": "running",
+  "outputs": [
+    "calib_step6v2_meas_0906_1912.csv",
+    "calib_step6v2_pair2_0906_1912.png",
+    "calib_step6v2_pair3_0906_1912.png",
+    "calib_step6v2_pair4_0906_1912.png",
+    "calib_step6v2_pair5_0906_1912.png",
+    "calib_step6v2_pair6_0906_1912.png",
+    "calib_step6v2_result_0906_1912.json"
+  ]
+}

@@ -19,6 +19,7 @@ from .outliers import (
     linear_fit_residuals,
     transfer_fit_residuals,
 )
+from .transfer import TransferFit, TransferFitError, fit_transfer_curves
 
 if TYPE_CHECKING:  # avoid importing daq_module at runtime
     from daq_module.controller import DAQController
@@ -99,6 +100,13 @@ class CalibrationResult:
     intensity_levels: np.ndarray | None = None
     raw_intensity_levels: np.ndarray | None = None
     wavelength_fit_coefficients: np.ndarray | None = None
+    # One fitted sin^2 transfer curve per channel, in `coordinates` order --
+    # what the encoder inverts to turn a requested value into a grayscale level
+    # (slm_module.calibration.transfer, slm_module.encoding.EncodingChannel).
+    # Filled in by save_calibration_result so the encoding is frozen with the
+    # calibration rather than re-derived on every load; None on files written
+    # before that, which the encoder then fits at load time.
+    transfer_fits: list[TransferFit] | None = None
 
 
 def find_min_max_intensity_levels(
@@ -1585,15 +1593,45 @@ def write_intensity_calibration_csv(
 def save_calibration_result(
     calibration_results: CalibrationResult,
     path: str | Path,
+    *,
+    fit_transfer: bool = True,
 ) -> Path:
     """Write a full CalibrationResult to JSON so a later step can resume from it.
 
     Every field is stored (arrays as nested lists), so loading the file rebuilds
     an equivalent CalibrationResult.
+
+    ``fit_transfer`` (default on) fits each channel's measured curve to the
+    4-parameter sin^2 transfer model and stores the coefficients under
+    ``transfer_fits``.  That is what
+    :func:`slm_module.encoding.channel_layout_from_calibration` inverts to turn
+    a requested value into a grayscale level, so fitting HERE -- once, at write
+    time -- freezes the encoding with the calibration.  Steps 6, 7 and 8 run at
+    different moments against the same JSON and must agree on what "x = 0.5"
+    means; re-deriving the fit on every load would let an optimizer path or a
+    scipy version quietly move it between them.  The raw ``intensity_levels``
+    stay in the file alongside the fits, so a curve can always be refitted or
+    encoded by interpolation instead.
+
+    A channel whose curve will not fit is reported and ``transfer_fits`` is
+    stored as null -- the measurement is never lost to a fit failure, and the
+    raw sweep is still in the file.  The encoder then fails loudly on load,
+    which is the right moment for it: before a run rather than after one.  Pass
+    ``fit_transfer=False`` to skip the fit entirely.
     """
 
+    fits = calibration_results.transfer_fits
+    if fit_transfer and fits is None and calibration_results.intensity_levels is not None:
+        try:
+            fits = fit_transfer_curves(
+                calibration_results.level_range, calibration_results.intensity_levels
+            )
+        except TransferFitError as exc:
+            print(f"  [calibration] transfer fit failed, storing curves only: {exc}")
+            fits = None
+
     payload = {
-        "schema": "calibration_result_v1",
+        "schema": "calibration_result_v2",
         "wavelength": _to_jsonable(calibration_results.wavelength),
         "coordinates": _to_jsonable(calibration_results.coordinates),
         "max_level": _to_jsonable(calibration_results.max_level),
@@ -1604,6 +1642,7 @@ def save_calibration_result(
         "wavelength_fit_coefficients": _to_jsonable(
             calibration_results.wavelength_fit_coefficients
         ),
+        "transfer_fits": None if fits is None else [f.to_dict() for f in fits],
     }
     out = Path(path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1618,8 +1657,17 @@ def calibration_result_from_dict(payload: dict) -> CalibrationResult:
     Accepts the parsed JSON either straight from a calibration file or embedded
     in another output (e.g. the step-6 combined result stores the raw step-3
     payload under its ``"step3"`` key).
+
+    ``transfer_fits`` is absent from files written before schema v2; it stays
+    None then, and the encoder fits the stored curves at load time instead.
     """
 
+    raw_fits = payload.get("transfer_fits")
+    fits = (
+        [TransferFit.from_dict(entry) for entry in raw_fits]
+        if isinstance(raw_fits, list) and raw_fits
+        else None
+    )
     return CalibrationResult(
         wavelength=_array_or_empty(payload.get("wavelength")),
         coordinates=_array_or_empty(payload.get("coordinates")),
@@ -1631,6 +1679,7 @@ def calibration_result_from_dict(payload: dict) -> CalibrationResult:
         wavelength_fit_coefficients=_array_or_none(
             payload.get("wavelength_fit_coefficients")
         ),
+        transfer_fits=fits,
     )
 
 

@@ -481,6 +481,21 @@ class CenterGapGeometryTests(unittest.TestCase):
         self.assertEqual(legacy.x_channels[0].x_center, 490)
 
 
+SWEEP_LEVELS = np.arange(380, 901, 20, dtype=int)
+
+
+def sin2_curve(levels, *, off_level: float = 390.0, on_level: float = 860.0,
+               contrast: float = 1.0) -> np.ndarray:
+    """A plausible SLM transfer curve: sin^2 retardance, 0 at off, pi at on.
+
+    The layout loader defaults to ``method="fit"``, which fits this shape, so a
+    geometry fixture has to supply something a 4-parameter sin^2 can actually
+    describe -- a 3-point [0, 0.5, 1] ramp cannot.
+    """
+    slope = np.pi / (on_level - off_level)
+    return contrast * np.sin(slope * (np.asarray(levels, float) - off_level) / 2.0) ** 2
+
+
 class ChannelLayoutFromCalibrationTests(unittest.TestCase):
     """Verbatim rebuild of a ChannelLayout from a Step-3b/3c channel result."""
 
@@ -494,14 +509,15 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
         coords = np.asarray(coords, dtype=float)
         # give every row a distinct curve so channel<->row pairing is checkable
         intensity = np.stack(
-            [np.array([0.0, 0.5, 1.0]) + 0.001 * i for i in range(coords.size)]
+            [sin2_curve(SWEEP_LEVELS, contrast=1.0 + 0.001 * i)
+             for i in range(coords.size)]
         )
         return CalibrationResult(
             wavelength=slope * coords + intercept,
             coordinates=coords,
             max_level=1023,
             min_level=0,
-            level_range=np.array([0, 512, 1023]),
+            level_range=SWEEP_LEVELS.copy(),
             intensity_levels=intensity,
         )
 
@@ -531,7 +547,7 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             row = sorted_coords.index(float(ch.x_center))
             self.assertAlmostEqual(ch.wavelength_nm, -0.005 * ch.x_center + 781.0)
             np.testing.assert_allclose(
-                ch.intensity_curve, np.array([0.0, 0.5, 1.0]) + 0.001 * row
+                ch.intensity_curve, sin2_curve(SWEEP_LEVELS, contrast=1.0 + 0.001 * row)
             )
 
     def test_width_defaults_to_pitch_minus_gap(self) -> None:
@@ -568,9 +584,10 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             np.ones(4), np.zeros(4), layout, slm_width=700, slm_height=2
         )
         self.assertEqual(pattern.shape, (2, 700))
-        # x[0] at 500 px lit at its on level, w[0] at 520 px at its off level
-        self.assertTrue(np.all(pattern[:, 493:508] == 1023))
-        self.assertTrue(np.all(pattern[:, 513:528] == 0))
+        # x[0] at 500 px lit at its on level, w[0] at 520 px at its off level.
+        # Both come from the channel's fitted window, not from the swept extremes.
+        self.assertTrue(np.all(pattern[:, 493:508] == layout.x_channels[0].on_level))
+        self.assertTrue(np.all(pattern[:, 513:528] == layout.w_channels[0].off_level))
 
     def test_rejects_odd_or_asymmetric_grids(self) -> None:
         with self.assertRaisesRegex(ValueError, "even number"):

@@ -245,7 +245,14 @@ def load_layout():
             f"{IN_STEP6} has no embedded 'step3' calibration; point IN_STEP6 at "
             f"a combined step-6 result (calib_step6_test.save_combined_json)"
         )
-    layout = channel_layout_from_calibration(calibration_result_from_dict(step3))
+    # The encoding convention belongs to the calibration chain, not to this
+    # script: step 6 recorded which mapping it drove with, so reading it back is
+    # what keeps a chain internally consistent.  A file written before the
+    # fitted encoding existed carries no marker and was measured under "interp".
+    enc_method = (payload.get("encoding") or {}).get("method", "interp")
+    layout = channel_layout_from_calibration(
+        calibration_result_from_dict(step3), method=enc_method
+    )
     for name, idx in [("REF_INDEX", REF_INDEX)] + [("TGT_INDICES", k) for k in TGT_INDICES]:
         if not (0 <= _slot(idx) < layout.n_channels):
             raise ValueError(

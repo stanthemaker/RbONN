@@ -77,7 +77,7 @@ STEP3_SKIP_DIRS = ("archive",)       # subtrees the step-3 search ignores
 # Leaving it in TGT_INDICES too is deliberate -- step 7 then measures the
 # reference against itself, which is not fitted (fit_csv drops k == REF_INDEX)
 # but gives a free reference-only baseline to check step 6's eta against.
-PAIRS = [2, 4, 5]               # pairs calibrated end to end
+PAIRS = [2, 3, 4, 5, 6]               # pairs calibrated end to end
 REF_INDEX = 2                   # step 7's reference pair (Phi = 0); must be in PAIRS
 
 # Per step: module stem, the glob that finds the result it hands downstream, and

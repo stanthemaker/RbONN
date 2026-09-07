@@ -1201,8 +1201,9 @@ def save_comb_phase_json(
     ``fits`` maps ``(tgt_index, method)`` to a fitted :class:`PhaseFit` --
     ``method`` is the free-form amplitude-handling label the driver used
     (e.g. ``"bounded"`` / ``"fix"``); a target may carry one entry per method.
-    The ``step3`` and ``step6`` payloads are carried over VERBATIM from the
-    combined step-6 JSON at ``step6_path``, so this one file is a superset:
+    The ``step3``, ``step6`` and ``encoding`` payloads are carried over VERBATIM
+    from the combined step-6 JSON at ``step6_path``, so this one file is a
+    superset:
     channel layout (step3) + per-pair eta / single-beam / dark models (step6)
     + the comb-phase spectrum ``{Phi_k}`` vs ``ref_index`` (step7).  Downstream
     consumers (e.g. a multi-pair forward-model check) need nothing else.
@@ -1218,6 +1219,9 @@ def save_comb_phase_json(
     payload = {
         "step3": payload6.get("step3"),
         "step6": payload6.get("step6"),
+        # which encoder drove the measurement; step 8 reads it back so the whole
+        # chain predicts against the levels that were actually written
+        "encoding": payload6.get("encoding"),
         "step7": {
             "ref_index": int(ref_index),
             "csv": csv_path,

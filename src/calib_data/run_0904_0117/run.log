@@ -9,6 +9,8 @@ Log        : src/calib_data/run_0904_0117/run.log
 ==   in   : src/calib_data/run_0903/calib_step3b_0903_1517.json
 ==   out  : src/calib_data/run_0904_0117
 ==   pairs: [2, 4, 5]
+==   channel width: 40 px
+==   channel pading: 10 px
 ======================================================================
 Step 6 v2: 37 acquisitions/pair over 12 levels (10 estimator + 2 verification), interleaved, brightest first (~6.3 min/pair)
 Pairs: [2, 4, 5]
