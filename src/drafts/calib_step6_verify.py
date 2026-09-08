@@ -134,11 +134,11 @@ def group_at(product: float, *xs: float) -> Group:
 
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src" / "calib_data"
-IN_STEP3 = CALIB_PATH / "run_0906_1835" / "calib_step3b_0906_1721.json"
+IN_STEP3 = CALIB_PATH / "run_0907_productcheck_fit" / "calib_step3c_0907_1358.json"
 
-ENCODING_METHOD = "interp"          # must match the run being investigated
+ENCODING_METHOD = "fit"          # must match the run being investigated
 PAIR_INDEX_BASE = 1
-PAIR_INDICES = [3, 4, 5, 6]
+PAIR_INDICES = [1, 2, 3, 4, 5, 6]
 
 # Optional: a previous step-6 v2 result, read ONLY to print the eta it fitted
 # beside each measured residue (the model's expected eta^2*(x*w)).  It is never
@@ -773,6 +773,35 @@ def _check_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None) -
         print(f"\nEvery product check inside |pull| = {PULL_LIMIT:g}.")
 
 
+def _rel(path: Path) -> str:
+    """Repo-relative display path, falling back to absolute for off-tree files."""
+    try:
+        return str(Path(path).resolve().relative_to(REPO_ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(path)
+
+
+def _print_inputs() -> None:
+    """Name the step-3 calibration every level here is encoded through.
+
+    Both entry points print it -- a sweep and an offline re-check -- because
+    both encode through it, and a check run against the wrong step-3 file looks
+    exactly like a check that passed.  ``IN_STEP3`` is edited by hand and this
+    draft's copy is independent of step 6's, so the two drift apart quietly.
+
+    Printed before the layout is loaded, so a missing or misnamed file names
+    itself on the way to the exception rather than after it; ``check_csv``
+    swallows that exception and carries on with NaN wavelengths, which is what
+    the ``(MISSING)`` mark explains.  ``ENCODING_METHOD`` rides along because
+    it has to match the run being investigated and is just as silent when it
+    does not -- a "fit" check over levels driven under "interp" compares
+    against the wrong grayscale.
+    """
+    mark = "" if IN_STEP3.is_file() else "   (MISSING)"
+    print(f"Step 3 in : {_rel(IN_STEP3)}{mark}")
+    print(f"Encoding  : {ENCODING_METHOD}")
+
+
 def _print_plan(grid: Grid, schedule) -> None:
     """What is about to be measured, and roughly how long it will take."""
     n_single = sum(1 for _, x, w in schedule if x == 0.0 or w == 0.0)
@@ -795,6 +824,7 @@ def _run_sweep(check_after: bool) -> None:
     """Drive every pair's interleaved schedule; optionally check and save."""
     validate_checks()
     _push_config()
+    _print_inputs()
     grid = measure_grid()
     layout = s6._load_layout()                             # noqa: SLF001
     schedule = s6.build_schedule(grid)
@@ -831,6 +861,7 @@ def check_csv(path: str | Path) -> None:
     """
     validate_checks()
     _push_config()
+    _print_inputs()
     rows_by_pair = s6.load_meas_csv(path)
     n = sum(len(v) for v in rows_by_pair.values())
     print(f"Loaded {path}: {len(rows_by_pair)} pair(s), {n} acquisitions")

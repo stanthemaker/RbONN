@@ -1,0 +1,29 @@
+
+==== 2026-09-07 17:24:39 start-at 6 ====
+Run folder : src/calib_data/run_0907_1724
+Step 3 in  : src/calib_data/run_0907_productcheck_fit/calib_step3c_0907_1358.json
+Log        : src/calib_data/run_0907_1724/run.log
+
+======================================================================
+== STEP 6  (calib_step6_v2)
+==   in   : src/calib_data/run_0907_productcheck_fit/calib_step3c_0907_1358.json
+==   out  : src/calib_data/run_0907_1724
+==   pairs: [2, 3, 4, 5, 6]
+======================================================================
+Step 6 v2: 37 acquisitions/pair over 12 levels (10 estimator + 2 verification), interleaved, brightest first (~5.5 min/pair)
+Pairs: [2, 3, 4, 5, 6]
+  display 1: 1920x1080 (EM2FPAB24B,ELE,0001,8011730240001)
+  display 2: 1920x1200 (LCOS-SLM,SOC,8001,2018021001)
+SLM: connected on display 2 (1920x1200)
+SLM: DVI mode set (USB device 1)
+DAQ: Dev1 (USB-6251 (BNC)) ai0 @ 1000 S/s, +/-0.1 V, low-pass 20 Hz -- T_both 8 s, T_single 10 s
+
+=== Sweep: pair 2 ===
+[1/37] pair 2 rep 0 x=1.000 w=1.000 (8s) -> 30.9825 mV  std ratio 2.79%
+[2/37] pair 2 rep 0 x=1.000 w=0.900 (8s) -> 28.4304 mV  std ratio 2.87%
+[3/37] pair 2 rep 0 x=1.000 w=0.700 (8s) -> 22.2735 mV  std ratio 3.15%
+[4/37] pair 2 rep 0 x=1.000 w=0.450 (8s) -> 14.3595 mV  std ratio 3.43%
+[5/37] pair 2 rep 0 x=1.000 w=0.250 (8s) -> 7.9378 mV  std ratio 4.24%
+[6/37] pair 2 rep 0 x=0.500 w=0.500 (8s) -> 8.0957 mV  std ratio 4.83%
+[7/37] pair 2 rep 0 x=1.000 w=0.200 (8s) -> 6.1634 mV  std ratio 5.42%
+[8/37] pair 2 rep 0 x=1.000 w=0.000 (10s) -> -0.0805 mV  std ratio 46.35%

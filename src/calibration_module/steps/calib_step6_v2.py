@@ -192,7 +192,7 @@ PAIR_INDEX_BASE = 1                         # pairs are numbered 1..N
 # the comb phases are all defined at the levels actually written.
 ENCODING_METHOD = "fit"
 PAIR_INDICES = [2,3,4,5,6]                    # pair labels to calibrate
-IN_STEP3 = CALIB_PATH / "run_0906_1835" / "calib_step3b_0906_1721.json"   # Step 3 calib
+IN_STEP3 = CALIB_PATH / "run_0907_productcheck_fit" / "calib_step3c_0907_1358.json"   # Step 3 calib
 
 SLM_DISPLAY_NO = None            # None -> auto-detect the LCOS-SLM display
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch

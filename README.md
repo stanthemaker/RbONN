@@ -158,13 +158,64 @@ is skipped, with the next pitch outward tried instead. Guard bands must be
 symmetric about the target so the x/w pairs keep equal wavelength offsets.
 
 At encode time the transfer curve is **inverted**: `EncodingChannel.level_for(val)`
-maps a target normalized value $val \in [0, 1]$ to a grayscale level by linear
-interpolation between the two swept points whose measured outputs bracket the
-target, taken over the off→on rising segment (made monotonic with a
-cumulative-max envelope so noise near the flat top can't invert the mapping).
-The returned level is rounded to the nearest integer grayscale, so even a
-coarse level sweep can command grayscales between the swept points.
-`val = 0` → `off_level`, `val = 1` → `on_level`.
+maps a target normalized value $val \in [0, 1]$ to a grayscale level. Two methods,
+picked by `method=`; the returned level is rounded to the nearest integer
+grayscale either way, so even a coarse sweep can command levels between the
+swept points.
+
+- **`"fit"`** — the default from `channel_layout_from_calibration`, i.e. what the
+  calibration chain and the GUI actually use. Inverts the fitted model in
+  [`calibration/transfer.py`](src/slm_module/calibration/transfer.py):
+
+  $$I(L) = \mathrm{floor} + \mathrm{contrast}\cdot\sin^2\!\big(\Delta(L)/2\big),
+  \qquad \Delta(L) = c_2 L^2 + c_1 L + c_0$$
+
+  `level_for` solves $\sin^2(\Delta/2) = val$ for $\Delta = 2\arcsin\sqrt{val}$ —
+  exactly the retardance `calibration_module.phase.phi_half` assumes downstream —
+  then inverts $\Delta(L)$ on its rising branch. Full scale is the model's
+  $\Delta = \pi$, not the swept `argmax`, so one noisy sample cannot redefine it.
+- **`"interp"`** — linear interpolation between the two swept points bracketing
+  the target, over the off→on rising segment (made monotonic with a cumulative-max
+  envelope so noise near the flat top can't invert the mapping). Kept for
+  comparison; `val = 0` → swept `argmin`, `val = 1` → swept `argmax`.
+
+The quadratic term $c_2$ (`phase_curv`) is the panel's own level→phase
+nonlinearity, added after the 0907 Step-3c sweep resolved it: the linear model's
+residual there is a coherent sinusoid, in phase on all 12 channels, and one
+quadratic term cuts rms from 1.25 % of contrast to 0.23 %. Physically the phase
+response is sublinear — about 7.5 mrad/level near extinction falling to 5.6 near
+full scale — and encoding that with a linear $\Delta$ over-delivers by up to
++2.4 % of full scale around $val \approx 0.65$. The noisier 0903 OSA sweeps could
+not resolve it, so `phase_curv` is fitted only when it moves a `level_for` result
+by at least half a grayscale; otherwise it stays exactly `0.0` and the model
+reduces to the original 4-parameter linear one. Fits stored before the term
+existed load as `phase_curv = 0.0` and are unchanged.
+
+Only $\Delta(L)$ is curved. The $val \leftrightarrow \Delta$ relation is a
+definition, not a measurement, so `phi_half` and the step 6/7/8 phase model are
+untouched — the curvature changes only which grayscale is written to reach a
+given $val$. `src/drafts/plot_step3_transfer.py` fits any Step-3 CSV both ways
+and reports the difference.
+
+**Bad cells are dropped, not just down-weighted.** `fit_transfer_curve` fits,
+measures the residual scale with a MAD, drops anything past `clip` robust sigma
+(default 6) and refits until nothing more is found; `n_clipped` on the stored fit
+records how many went. The soft-L1 loss alone was not enough. On 0907 Step-3c,
+four latched DAQ cells on channel 11 left a stored fit with an rms of 824 % of
+contrast and an encoding window of 417..573 against 399..887 on its neighbours —
+and since `save_calibration_result` fits once at write time, that is what every
+step 6/7/8 run reading the file would have encoded that channel with. Dropping
+them gives rms 0.18 % and a window in family. The threshold is judged against the
+final model, curvature included, with the sigma floored at 0.1 % of contrast;
+both details are load-bearing and the reasons are in the constants.
+
+The limit is worth knowing: this finds outliers the fit *disagrees* with. Points
+numerous or coherent enough to capture the fit have small residuals and no
+threshold reaches them — that case shows up as an absurd `contrast` or encoding
+window instead (`TransferFit.extrapolated` / `.clipped`). **Calibration JSONs
+written before this existed keep their unclipped fits**; run
+`src/drafts/plot_step3_transfer.py` on the matching CSV and compare its table
+against the file's `transfer_fits` to see whether one needs regenerating.
 
 ### Step 6 — TPA efficiency ($\eta$) per pair
 

@@ -368,5 +368,336 @@ class AlignmentBuilderTests(unittest.TestCase):
                          {round(ON_TRUE)})
 
 
+def quad_curve(levels=LEVELS, *, contrast=1.0, curv=-2.0e-6,
+               off_level=OFF_TRUE, on_level=ON_TRUE) -> np.ndarray:
+    """A sin^2 curve whose retardance is quadratic in level.
+
+    Built from the endpoints so it stays comparable with :func:`curve`:
+    ``Delta = 0`` at ``off_level`` and ``pi`` at ``on_level`` either way, with
+    ``curv`` bending the path between them.  ``curv = -2e-6`` is the size the
+    0907 Step-3c channels actually show.
+    """
+    lv = np.asarray(levels, dtype=float)
+    # Delta = curv*L^2 + a*L + b, pinned to 0 at off and pi at on
+    a = (math.pi - curv * (on_level ** 2 - off_level ** 2)) / (on_level - off_level)
+    b = -(curv * off_level ** 2 + a * off_level)
+    return contrast * np.sin((curv * lv * lv + a * lv + b) / 2.0) ** 2
+
+
+class CurvatureTests(unittest.TestCase):
+    """The quadratic retardance term -- see "Why a curvature term" in transfer.py.
+
+    The 0907 Step-3c sweep resolved a real sublinearity in the panel's phase
+    response that the noisier 0903 OSA sweeps could not.  These tests pin the
+    two things that matter: it is recovered when present, and it stays exactly
+    absent when it is not.
+    """
+
+    def test_recovers_a_known_curvature(self) -> None:
+        fit = fit_transfer_curve(LEVELS, quad_curve(contrast=0.9, curv=-2.0e-6))
+        self.assertAlmostEqual(fit.phase_curv, -2.0e-6, places=9)
+        self.assertAlmostEqual(fit.contrast, 0.9, places=4)
+        self.assertAlmostEqual(fit.off_level_exact, OFF_TRUE, places=1)
+        self.assertAlmostEqual(fit.on_level_exact, ON_TRUE, places=1)
+        self.assertLess(fit.rms, 1e-5)
+
+    def test_curvature_beats_the_linear_model_on_a_curved_panel(self) -> None:
+        """The whole reason the term exists: the linear fit cannot follow this."""
+        data = quad_curve(curv=-2.0e-6)
+        straight = fit_transfer_curve(LEVELS, data, curvature=False)
+        bent = fit_transfer_curve(LEVELS, data)
+        self.assertEqual(straight.phase_curv, 0.0)
+        self.assertLess(bent.rms, straight.rms / 5.0)
+
+    def test_linear_curve_keeps_curvature_exactly_zero(self) -> None:
+        """A fifth parameter must not appear out of fitting noise.
+
+        The linear fit of an exact sin^2 curve already sits at the optimizer's
+        convergence floor, so a quadratic term can always shave the rms a
+        little.  It is rejected on whether it moves a grayscale level, not on
+        whether it improves the residual.
+        """
+        fit = fit_transfer_curve(LEVELS, curve())
+        self.assertEqual(fit.phase_curv, 0.0)
+        self.assertAlmostEqual(fit.on_level_exact, ON_TRUE, places=2)
+
+    def test_curvature_disabled_reproduces_the_linear_fit(self) -> None:
+        data = quad_curve()
+        off = fit_transfer_curve(LEVELS, data, curvature=False)
+        self.assertEqual(off.phase_curv, 0.0)
+        # ... and reduces to the plain linear retardance
+        np.testing.assert_allclose(
+            off.retardance(LEVELS),
+            off.phase_slope * LEVELS + off.phase_offset,
+        )
+
+    def test_too_few_points_falls_back_to_linear(self) -> None:
+        """Five parameters need six points; five still fit the linear model."""
+        few = np.array([390, 480, 570, 660, 750], dtype=float)
+        fit = fit_transfer_curve(few, quad_curve(few))
+        self.assertEqual(fit.phase_curv, 0.0)
+        self.assertEqual(fit.n_used, 5)
+
+    def test_branch_convention_holds_with_curvature(self) -> None:
+        """Delta still rises from 0 at the darkest level to pi at full scale."""
+        fit = fit_transfer_curve(LEVELS, quad_curve())
+        self.assertAlmostEqual(float(fit.retardance(fit.off_level_exact)), 0.0, places=6)
+        self.assertAlmostEqual(float(fit.retardance(fit.on_level_exact)), math.pi, places=6)
+        # rising across the whole sweep, so level_for is single-valued
+        self.assertTrue(bool(np.all(fit.phase_rate(LEVELS) > 0.0)))
+        self.assertGreater(fit.turning_level, float(LEVELS.max()))
+
+    def test_phase_rate_varies_and_matches_the_derivative(self) -> None:
+        fit = fit_transfer_curve(LEVELS, quad_curve(curv=-2.0e-6))
+        # np.gradient is one-sided at the ends, so compare the interior only
+        numeric = np.gradient(fit.retardance(LEVELS), LEVELS.astype(float))
+        np.testing.assert_allclose(fit.phase_rate(LEVELS)[1:-1], numeric[1:-1], rtol=1e-6)
+        # sublinear: slower near full scale than near extinction
+        self.assertLess(float(fit.phase_rate(ON_TRUE)), float(fit.phase_rate(OFF_TRUE)))
+
+    def test_level_for_inverts_the_curved_model(self) -> None:
+        """v -> level -> v is the identity the encoder relies on."""
+        fit = fit_transfer_curve(LEVELS, quad_curve())
+        for v in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0):
+            delivered = float(np.sin(fit.retardance(fit.level_for(v)) / 2.0) ** 2)
+            self.assertAlmostEqual(delivered, v, places=2)   # integer grayscale
+
+    def test_curved_and_linear_models_command_different_levels(self) -> None:
+        """If they agreed there would be nothing to fix; on 0907 they differ ~21."""
+        data = quad_curve(curv=-2.0e-6)
+        straight = fit_transfer_curve(LEVELS, data, curvature=False)
+        bent = fit_transfer_curve(LEVELS, data)
+        shift = max(abs(bent.level_for(v) - straight.level_for(v))
+                    for v in np.linspace(0.0, 1.0, 21))
+        self.assertGreater(shift, 5)
+
+    def test_rejects_a_curvature_that_turns_over_inside_the_sweep(self) -> None:
+        """A Delta that stops rising mid-sweep is not a transfer curve.
+
+        Data that peaks and comes back down inside the swept range can be
+        matched by a parabola turning over; the fitter must decline it rather
+        than store a model it cannot invert.
+        """
+        wide = np.arange(380, 1400, 15, dtype=int)   # sweeps past a full period
+        fit = fit_transfer_curve(wide, curve(wide))
+        self.assertTrue(
+            fit.phase_curv == 0.0
+            or not (wide.min() <= fit.turning_level <= wide.max())
+        )
+
+    def test_dict_round_trip_carries_curvature(self) -> None:
+        fit = fit_transfer_curve(LEVELS, quad_curve())
+        self.assertNotEqual(fit.phase_curv, 0.0)
+        back = TransferFit.from_dict(json.loads(json.dumps(fit.to_dict())))
+        self.assertEqual(back, fit)
+        self.assertIn("phase_curv", fit.to_dict())
+
+    def test_legacy_payload_without_curvature_loads_as_linear(self) -> None:
+        """Files written before the term existed must not change meaning."""
+        legacy = fit_transfer_curve(LEVELS, curve()).to_dict()
+        del legacy["phase_curv"]
+        back = TransferFit.from_dict(legacy)
+        self.assertEqual(back.phase_curv, 0.0)
+        np.testing.assert_allclose(
+            back.retardance(LEVELS),
+            back.phase_slope * LEVELS + back.phase_offset,
+        )
+        self.assertAlmostEqual(back.on_level_exact, ON_TRUE, places=2)
+
+    def test_curvature_survives_the_calibration_file(self) -> None:
+        """End to end: a curved sweep saved by step 3 comes back curved.
+
+        This is the path Step 3c writes and steps 6/7/8 read.
+        """
+        levels = np.asarray(LEVELS, dtype=float)
+        calib = CalibrationResult(
+            wavelength=np.array([778.0, 778.2]),
+            coordinates=np.array([500.0, 520.0]),
+            max_level=int(levels.max()),
+            min_level=int(levels.min()),
+            level_range=levels,
+            intensity_levels=np.stack([quad_curve(), quad_curve(contrast=0.8)]),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = save_calibration_result(calib, Path(tmp) / "step3c.json")
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            self.assertIn("phase_curv", payload["transfer_fits"][0])
+            self.assertNotEqual(payload["transfer_fits"][0]["phase_curv"], 0.0)
+
+            fits = load_calibration_result(out).transfer_fits
+            self.assertAlmostEqual(fits[0].phase_curv, -2.0e-6, places=9)
+
+
+# the 0907 channel-11 failure, reproduced: four adjacent cells reading ~25x the
+# curve.  Levels chosen inside the sweep so they are ordinary points, not ends.
+SPIKE_LEVELS = (845, 860, 875, 890)
+
+
+def spiked_curve(levels=LEVELS, *, factor=25.0, where=SPIKE_LEVELS, **kw):
+    """-> (curve with latched cells, boolean mask of the bad points)."""
+    lv = np.asarray(levels, dtype=float)
+    y = quad_curve(levels, **kw)
+    bad = np.isin(lv, np.asarray(where, dtype=float))
+    y = y.copy()
+    y[bad] = float(np.max(y)) * factor
+    return y, bad
+
+
+class ClipTests(unittest.TestCase):
+    """Dropping bad cells outright -- see "Bad cells" in transfer.py.
+
+    The soft-L1 loss down-weights a disagreeing point; it does not remove it.
+    On 0907 channel 11 that was not enough, and because the fit is frozen into
+    the JSON at write time, the damage would have reached every later step
+    6/7/8 run silently.  These tests pin both directions: the bad cells go, and
+    clean curves keep every point they have.
+    """
+
+    # --- it removes what it should ---
+
+    def test_drops_exactly_the_latched_cells(self) -> None:
+        y, bad = spiked_curve()
+        fit = fit_transfer_curve(LEVELS, y)
+        self.assertEqual(fit.n_clipped, int(bad.sum()))
+        self.assertEqual(fit.n_used, LEVELS.size - int(bad.sum()))
+
+    def test_the_clipped_fit_recovers_the_true_curve(self) -> None:
+        y, _ = spiked_curve(contrast=0.9, curv=-2.0e-6)
+        fit = fit_transfer_curve(LEVELS, y)
+        self.assertAlmostEqual(fit.contrast, 0.9, places=3)
+        self.assertAlmostEqual(fit.off_level_exact, OFF_TRUE, places=1)
+        self.assertAlmostEqual(fit.on_level_exact, ON_TRUE, places=1)
+        self.assertAlmostEqual(fit.phase_curv, -2.0e-6, places=9)
+
+    def test_clipping_beats_the_robust_loss_alone(self) -> None:
+        """The whole reason the second stage exists.
+
+        Note what "ruined" looks like: the soft-L1 fit stretches ``contrast``
+        to swallow the spikes rather than leaving a large residual, so its
+        rms/contrast reads *small*.  The damage is in the parameters, which is
+        why that ratio alone is not a health check.
+        """
+        kept = fit_transfer_curve(LEVELS, spiked_curve()[0], clip=0)
+        dropped = fit_transfer_curve(LEVELS, spiked_curve()[0])
+        self.assertGreater(kept.contrast, 50.0)                # true value is 1
+        self.assertGreater(kept.on_level_exact, 3000.0)        # true value is 860
+        self.assertAlmostEqual(dropped.contrast, 1.0, places=3)
+        self.assertAlmostEqual(dropped.on_level_exact, ON_TRUE, places=1)
+
+    def test_a_ruined_encoding_window_is_repaired(self) -> None:
+        """0907 ch11 in miniature: the window is what reaches the panel."""
+        y, _ = spiked_curve()
+        kept = fit_transfer_curve(LEVELS, y, clip=0)
+        dropped = fit_transfer_curve(LEVELS, y)
+        self.assertGreater(abs(kept.on_level - ON_TRUE), 100)
+        self.assertLess(abs(dropped.on_level - ON_TRUE), 5)
+
+    def test_clip_zero_keeps_every_point(self) -> None:
+        y, _ = spiked_curve()
+        fit = fit_transfer_curve(LEVELS, y, clip=0)
+        self.assertEqual(fit.n_clipped, 0)
+        self.assertEqual(fit.n_used, LEVELS.size)
+
+    # --- it keeps what it should ---
+
+    def test_a_clean_linear_curve_loses_nothing(self) -> None:
+        """Guards the sigma floor.
+
+        On an exact curve the residual is the optimizer's convergence floor and
+        the MAD collapses with it, so an unfloored ratio test would call every
+        point thousands of sigma out and eat the whole sweep.
+        """
+        fit = fit_transfer_curve(LEVELS, curve(contrast=0.9))
+        self.assertEqual(fit.n_clipped, 0)
+        self.assertEqual(fit.n_used, LEVELS.size)
+
+    def test_a_clean_curved_curve_loses_nothing(self) -> None:
+        """Guards clipping against the final model rather than the linear stage.
+
+        A quadratic sweep judged against the linear fit shows smooth mismatch
+        that is largest at the ends -- structure, not noise -- and the endpoints
+        would be trimmed off a perfectly good curve.
+        """
+        fit = fit_transfer_curve(LEVELS, quad_curve(contrast=0.9, curv=-3.0e-6))
+        self.assertEqual(fit.n_clipped, 0)
+        self.assertEqual(fit.level_min, int(LEVELS.min()))
+        self.assertEqual(fit.level_max, int(LEVELS.max()))
+
+    def test_ordinary_noise_survives(self) -> None:
+        rng = np.random.default_rng(11)
+        y = quad_curve(contrast=0.9) + rng.normal(0.0, 0.01, LEVELS.size)
+        fit = fit_transfer_curve(LEVELS, y)
+        self.assertEqual(fit.n_clipped, 0)
+
+    def test_a_channel_that_is_not_sin2_is_not_tidied_into_looking_healthy(self):
+        """Clipping must not turn a broken channel into a confident wrong fit.
+
+        Half a sweep that stops following sin^2 is not bad cells.  The clip is
+        allowed to take a point or two, but what comes out must still be
+        obviously unwell -- here the residual stays at 10% of contrast against
+        the 0.2% the good 0907 channels sit at.
+        """
+        y = quad_curve(contrast=0.9).copy()
+        y[LEVELS > 700] = 0.45                     # 13 of 35 levels go flat
+        fit = fit_transfer_curve(LEVELS, y)
+        self.assertLess(fit.n_clipped, 4)
+        self.assertGreater(fit.rms / fit.contrast, 0.05)
+
+    def test_outliers_that_capture_the_fit_are_beyond_the_clip(self) -> None:
+        """The documented limit of fit-then-clip.
+
+        Clipping can only find points the fit disagrees with.  Four adjacent
+        cells at twice full scale pull the curve onto themselves, so their
+        residuals are small and no threshold flags them; a lower one deletes
+        good points instead and the fit stays just as wrong.  This is a
+        boundary, not a regression -- what catches it downstream is the absurd
+        contrast and encoding window, which the assertions below pin.
+        """
+        y, _ = spiked_curve(factor=2.0)
+        for clip in (6.0, 3.0):
+            fit = fit_transfer_curve(LEVELS, y, clip=clip)
+            self.assertGreater(fit.contrast, 5.0)          # true value is 1
+            self.assertGreater(fit.on_level_exact, MAX_LEVEL)
+            self.assertTrue(fit.clipped)                   # window off the panel
+
+    # --- plumbing ---
+
+    def test_each_channel_is_clipped_on_its_own_residuals(self) -> None:
+        y, bad = spiked_curve()
+        fits = fit_transfer_curves(LEVELS, np.stack([curve(contrast=0.9), y]))
+        self.assertEqual(fits[0].n_clipped, 0)
+        self.assertEqual(fits[1].n_clipped, int(bad.sum()))
+
+    def test_n_clipped_round_trips(self) -> None:
+        y, bad = spiked_curve()
+        fit = fit_transfer_curve(LEVELS, y)
+        payload = fit.to_dict()
+        self.assertEqual(payload["n_clipped"], int(bad.sum()))
+        self.assertEqual(TransferFit.from_dict(payload), fit)
+
+    def test_legacy_payload_reports_no_clipping(self) -> None:
+        payload = fit_transfer_curve(LEVELS, curve()).to_dict()
+        payload.pop("n_clipped")
+        self.assertEqual(TransferFit.from_dict(payload).n_clipped, 0)
+
+    def test_saved_calibration_stores_the_repaired_fit(self) -> None:
+        """End to end: the JSON steps 6/7/8 read carries the clipped fit."""
+        y, bad = spiked_curve(contrast=0.9)
+        calib = CalibrationResult(
+            wavelength=np.array([778.0]),
+            coordinates=np.array([500.0]),
+            max_level=int(LEVELS.max()),
+            min_level=int(LEVELS.min()),
+            level_range=LEVELS,
+            intensity_levels=np.stack([y]),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = save_calibration_result(calib, Path(tmp) / "step3c.json")
+            stored = load_calibration_result(out).transfer_fits[0]
+        self.assertEqual(stored.n_clipped, int(bad.sum()))
+        self.assertAlmostEqual(stored.on_level_exact, ON_TRUE, places=1)
+        self.assertLess(stored.rms / stored.contrast, 0.01)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -64,7 +64,7 @@ CALIB_PATH = REPO_ROOT / "src/calib_data"       # where run folders are created
 
 # ---- Edit these to match your setup ----
 RUN_PREFIX = "run"                   # run folder is <RUN_PREFIX>_<MMDD_HHMM>
-STEP3_GLOB = "calib_step3b_*.json"   # step 6's input; newest by mtime wins
+STEP3_GLOB = "calib_step3c_*.json"   # step 6's input; newest by mtime wins
 STEP3_SKIP_DIRS = ("archive",)       # subtrees the step-3 search ignores
 
 # One pair list for all three steps (step 6 PAIR_INDICES, step 7 TGT_INDICES,
