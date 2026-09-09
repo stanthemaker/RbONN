@@ -1,26 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Callable
 
 import numpy as np
 
 from .calibration.calibration_new import CalibrationResult
 from .calibration.transfer import TransferFit, TransferFitError, fit_transfer_curve
-
-
-class EncodingStrategy(Protocol):
-    name: str
-
-    def encode(self, values: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-        ...
-
-
-class TPAEncodingStub:
-    name = "TPA Multiplication"
-
-    def encode(self, values: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-        raise NotImplementedError("TPA multiplication encoding is not implemented yet")
 
 
 @dataclass

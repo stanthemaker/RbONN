@@ -138,10 +138,10 @@ from calibration_module.sigma import STD_FLOOR_V  # noqa: E402
 from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
+from calibration_module.report import plot_fringe  # noqa: E402
 from calibration_module.phase import (  # noqa: E402
     PhaseFit,
     PhaseResult,
-    fringe_arg,
     load_pair_models,
     load_phase_csv,
     phi_half,
@@ -281,10 +281,6 @@ def load_models():
 # report + plot
 # ======================================================================
 
-def _sigma(value: float, err: float) -> float:
-    return abs(value) / err if err else float("nan")
-
-
 def report(fit: PhaseFit, tgt: int, ref: int) -> None:
     """Print dPhi_comb (rad + deg) and the fit quality of the one-parameter fit."""
     print("Model:  Y = a^2 + b^2 sin^4(theta/2) "
@@ -329,81 +325,23 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
 
 
 def make_plot(fit: PhaseFit, tgt: int, path) -> None:
-    """Measured Y(dPhi_SLM) with the fitted one-parameter model curve + pulls, PNG."""
+    """Measured Y(dPhi_SLM) with the fitted model curve + pulls, written as a PNG.
+
+    The figure itself is :func:`calibration_module.report.plot_fringe`, the same
+    renderer the GUI draws into, so a fringe reviewed on screen and one archived
+    beside the JSON are the same picture.  It reads the fit's own convention and
+    ``std_total``, which is what this step needs: a/b are pinned here, so the
+    curve carries step 6's eta error and the bars have to show it.
+    """
     import matplotlib
 
     matplotlib.use("Agg")  # headless: write a PNG rather than open a window
     import matplotlib.pyplot as plt
 
-    dphi = np.degrees(fit.dphi_slm)             # dPhi_SLM at the measured points
-    # Both panels use std_total = DAQ trace std (+) the pinned step-6 eta's
-    # model error, in quadrature (PhaseFit.std_total): a and b do not float, so
-    # the curve is only as well known as step 6's etas and the residual has to
-    # be judged against that too, not against the point spread alone.
-    pulls = fit.pulls
-    std_tot = fit.std_total
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Smooth model over the swept geometry.  Rebuild g/dPhi_SLM the same way the
-    # fit did (from the per-point commanded intensities) so the curve tracks the
-    # data: sweep the shared phase over the full 0..180 deg half turn
-    # (x_t = w_t = sin^2(theta/2)).
-    wt_s = xt_s = np.sin(np.radians(np.linspace(0.0, 180.0, 400)) / 2.0) ** 2
-    xr_c = float(np.median(fit.x_r)) if fit.x_r is not None else 1.0
-    wr_c = float(np.median(fit.w_r)) if fit.w_r is not None else 1.0
-    g_s = np.sqrt(np.clip(xt_s * wt_s, 0.0, None))
-    dslm = phi_half(xt_s) + phi_half(wt_s) - phi_half(xr_c) - phi_half(wr_c)
-
-    # Fixed step-6 single-beam background = fit.known - a^2 - b^2 g^2 at each
-    # fitted point; interpolate it onto the smooth grid (exact at the points, and
-    # geometry-agnostic, so no assumption about how the background splits in g).
-    bg_pts = fit.known - fit.a**2 - fit.b**2 * fit.g**2
-    order = np.argsort(fit.dphi_slm)
-    bg_s = np.interp(dslm, fit.dphi_slm[order], bg_pts[order])
-
-    # fringe_arg honours the fit's sign convention ("comb-slm" for v2)
-    model = (fit.a**2 + fit.b**2 * g_s**2
-             + 2.0 * fit.a * fit.b * g_s
-             * np.cos(fringe_arg(dslm, fit.dphi_comb, fit.convention))
-             + bg_s + fit.offset)
-    label = r"fit: $a^2+b^2\sin^4+2ab\sin^2\cos(\Delta\Phi_{comb}-\Delta\Phi_{SLM})$"
-    ax1.plot(np.degrees(dslm), model * 1e3, "-", color="tab:blue", lw=1.6, label=label)
-    ax1.errorbar(dphi, fit.y * 1e3, yerr=std_tot * 1e3, fmt="o", ms=5, color="tab:orange",
-                 ecolor="lightgray", elinewidth=1, capsize=2, zorder=3,
-                 label=r"measured (dark-subtracted), $\sigma_{tot}$")
-    ax1.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax1.set_ylabel(r"$Y$, dark-subtracted  (mV)")
-    ax1.set_title(f"Pair {tgt} interference  (both channels, half fringe)")
-    ax1.legend(loc="best", fontsize=8)
-
-    ax2.axhspan(-1, 1, color="tab:blue", alpha=0.12, label=r"$\pm1\sigma$")
-    ax2.axhline(0, color="gray", ls="--", lw=1)
-    ax2.scatter(dphi, pulls, c="tab:red", s=40, edgecolor="k", lw=0.4)
-    ax2.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax2.set_ylabel(r"Pull = residual / $\sigma_{tot}$")
-    ax2.set_title(r"Pulls   [$\sigma_{tot}^2$ = DAQ trace std$^2$ + "
-                  r"(pinned step-6 $\eta$)$^2$]", fontsize=10)
-    ax2.legend(loc="upper right", fontsize=8)
-
-    # Total error, not the fitter's: with a and b pinned, dphi_comb_err is the
-    # fringe noise alone and would draw a bar several times too small.
-    err = fit.dphi_comb_err_total
-    txt = (
-        f"$\\Delta\\Phi_{{comb}}$ = {fit.dphi_comb_deg:+.2f} $\\pm$ "
-        f"{np.degrees(err):.2f} deg  "
-        f"({_sigma(fit.dphi_comb, err):.0f}$\\sigma$)\n"
-        f"  = {np.degrees(fit.dphi_comb_err):.2f} (fringe) $\\oplus$ "
-        f"{np.degrees(fit.dphi_comb_err_eta):.2f} (step-6 $\\eta$) deg\n"
-        f"a = {fit.a*1e3:.3f}, b = {fit.b*1e3:.3f} mV$^{{1/2}}$ (both pinned to step 6)\n"
-        f"mean resid = {float(np.mean(fit.residuals))*1e3:+.3f} mV (not fitted)\n"
-        f"R$^2$ = {fit.r2:.4f}  [1 free param: $\\Delta\\Phi_{{comb}}$]"
-    )
-    ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
-             bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
-
-    fig.tight_layout()
+    fig = plt.figure(figsize=(12, 5))
+    plot_fringe(fig, fit, tgt)
     fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 # ======================================================================

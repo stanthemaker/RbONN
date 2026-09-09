@@ -1,13 +1,23 @@
 """Matplotlib renderers for step-7 (comb phase) results, shared GUI/CLI.
 
-Factored out of ``src/calibration_module/steps/calib_step7_v1.py`` so the GUI's pipeline page
-and the draft script draw byte-identical figures.  Every function renders into
-a caller-supplied :class:`matplotlib.figure.Figure` (works with any backend --
-Agg for PNGs, the Qt canvas in the GUI) and never calls ``savefig`` itself.
+Factored out of ``src/calibration_module/steps/calib_step7_v1.py`` so the GUI's
+pipeline page and the step scripts draw byte-identical figures.  Every function
+renders into a caller-supplied :class:`matplotlib.figure.Figure` (works with any
+backend -- Agg for PNGs, the Qt canvas in the GUI) and never calls ``savefig``
+itself.
+
+:func:`plot_fringe` serves both estimators, so it must not assume either one's
+shape: it takes the cosine argument from the fit's own ``convention`` and its
+error bars from ``std_total``, both of which collapse to the v1 behaviour for a
+fit that floated a/b.  Hard-coding v1's sign here silently mirrored a v2
+(``fit_phase_fixed``) fringe about ``dPhi_SLM = 0`` -- the curve missed the data
+by ``2 dPhi_comb`` while every printed number stayed right.
 """
 from __future__ import annotations
 
 import numpy as np
+
+from .phase import phi_half
 
 
 def _sigma(value: float, err: float) -> float:
@@ -15,31 +25,62 @@ def _sigma(value: float, err: float) -> float:
 
 
 def plot_fringe(fig, fit, tgt: int) -> None:
-    """Measured Y(theta2) with the fitted a/b/dPhi_comb model curve + pulls.
+    """Measured Y(dPhi_SLM) with the fitted a/b/dPhi_comb model curve + pulls.
 
     Left: the dark-subtracted measurements over the half fringe with the full
-    fitted model (interference + pinned step-6 single-beam background).
-    Right: the pulls. Port of the draft's ``make_plot``.
+    fitted model (interference + the pinned step-6 single-beam background).
+    Right: the pulls.
+
+    Renders either fit convention: the cosine argument comes from
+    :meth:`~calibration_module.phase.PhaseFit.fringe_arg`, so a
+    ``fit_phase_fixed`` result (step-7 v2, ``"comb-slm"``) draws the same way
+    round as it was fitted rather than mirrored.
+
+    Error bars and pulls are taken against ``std_total`` -- the point spread
+    with the pinned step-6 eta's model error folded in.  For a fit that floated
+    a/b that term is zero and ``std_total`` is exactly ``std``, so this is
+    unchanged for those; for a pinned fit it is the sigma the residual is
+    actually owed, and using ``std`` alone would draw the bars several times too
+    small.
     """
     fig.clear()
     ax1, ax2 = fig.subplots(1, 2)
 
-    dphi = np.degrees(fit.dphi_slm)             # theta2 - 180 deg
-    pulls = fit.residuals / fit.std
+    dphi = np.degrees(fit.dphi_slm)             # dPhi_SLM at the measured points
+    pulls = fit.pulls
+    std_tot = fit.std_total
+    # a and b are pinned (and carry a step-6 error) only for fit_phase_fixed.
+    pinned = fit.dm_deta_ref is not None
 
-    # smooth model over the reachable half turn theta2 in [0, 180] deg
-    th = np.radians(np.linspace(0.0, 180.0, 400))
-    g = np.sin(th / 2.0) ** 2                    # sin^2(theta2/2)
-    dslm = th - np.pi
-    model = (fit.a**2 + fit.b**2 * g**2
-             + 2.0 * fit.a * fit.b * g * np.cos(dslm + fit.dphi_comb)
-             + fit.bg0 + fit.bg1 * g + fit.bg2 * g**2 + fit.offset)
+    # Smooth model over the swept geometry.  Rebuild g / dPhi_SLM the way the
+    # fit did -- from the commanded intensities -- so the curve tracks the data:
+    # sweep the shared phase over the full 0..180 deg half turn, at the actual
+    # reference drive rather than assuming a fully-on one.
+    wt_s = xt_s = np.sin(np.radians(np.linspace(0.0, 180.0, 400)) / 2.0) ** 2
+    xr_c = float(np.median(fit.x_r)) if fit.x_r is not None else 1.0
+    wr_c = float(np.median(fit.w_r)) if fit.w_r is not None else 1.0
+    g_s = np.sqrt(np.clip(xt_s * wt_s, 0.0, None))
+    dslm = phi_half(xt_s) + phi_half(wt_s) - phi_half(xr_c) - phi_half(wr_c)
+
+    # Fixed step-6 single-beam background = fit.known - a^2 - b^2 g^2 at each
+    # fitted point; interpolate it onto the smooth grid (exact at the points, and
+    # geometry-agnostic, so no assumption about how the background splits in g).
+    bg_pts = fit.known - fit.a**2 - fit.b**2 * fit.g**2
+    order = np.argsort(fit.dphi_slm)
+    bg_s = np.interp(dslm, fit.dphi_slm[order], bg_pts[order])
+
+    model = (fit.a**2 + fit.b**2 * g_s**2
+             + 2.0 * fit.a * fit.b * g_s * np.cos(fit.fringe_arg(dslm))
+             + bg_s + fit.offset)
+    arg = (r"\Delta\Phi_{comb}-\Delta\Phi_{SLM}" if fit.convention == "comb-slm"
+           else r"\Delta\Phi_{SLM}+\Delta\Phi_{comb}")
     ax1.plot(np.degrees(dslm), model * 1e3, "-", color="tab:blue", lw=1.6,
-             label=r"fit: $a^2+b^2\sin^4+2ab\sin^2\cos+\mathrm{sb}(\theta_2)$")
-    ax1.errorbar(dphi, fit.y * 1e3, yerr=fit.std * 1e3, fmt="o", ms=5,
+             label=rf"fit: $a^2+b^2\sin^4+2ab\sin^2\cos({arg})$")
+    ax1.errorbar(dphi, fit.y * 1e3, yerr=std_tot * 1e3, fmt="o", ms=5,
                  color="tab:orange", ecolor="lightgray", elinewidth=1,
-                 capsize=2, zorder=3, label="measured (dark-subtracted)")
-    ax1.set_xlabel(r"$\Delta\Phi_{SLM} = \theta_2 - 180^\circ$  (deg)")
+                 capsize=2, zorder=3,
+                 label=r"measured (dark-subtracted), $\sigma_{tot}$")
+    ax1.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
     ax1.set_ylabel(r"$Y$, dark-subtracted  (mV)")
     ax1.set_title(f"Pair {tgt} interference (half fringe)")
     ax1.legend(loc="best", fontsize=8)
@@ -48,21 +89,41 @@ def plot_fringe(fig, fit, tgt: int) -> None:
     ax2.axhline(0, color="gray", ls="--", lw=1)
     ax2.scatter(dphi, pulls, c="tab:red", s=40, edgecolor="k", lw=0.4)
     ax2.set_xlabel(r"$\Delta\Phi_{SLM}$  (deg)")
-    ax2.set_ylabel("Pull = residual / std")
-    ax2.set_title("Pulls")
+    ax2.set_ylabel(r"Pull = residual / $\sigma_{tot}$")
+    if pinned:
+        ax2.set_title(r"Pulls   [$\sigma_{tot}^2$ = DAQ trace std$^2$ + "
+                      r"(pinned step-6 $\eta$)$^2$]", fontsize=10)
+    else:
+        ax2.set_title("Pulls")
     ax2.legend(loc="upper right", fontsize=8)
 
-    bflag = (("  [a@bound]" if fit.a_at_bound else "")
-             + ("  [b@bound]" if fit.b_at_bound else ""))
+    # With a and b pinned, dphi_comb_err is the fringe noise alone and would
+    # quote a bar several times too small; dphi_comb_err_total adds the eta term
+    # and collapses back to dphi_comb_err when a/b floated.
+    err = fit.dphi_comb_err_total
     txt = (
         f"$\\Delta\\Phi_{{comb}}$ = {fit.dphi_comb_deg:+.2f} $\\pm$ "
-        f"{np.degrees(fit.dphi_comb_err):.2f} deg  "
-        f"({_sigma(fit.dphi_comb, fit.dphi_comb_err):.0f}$\\sigma$)\n"
-        f"a = {fit.a*1e3:.3f} ($\\eta$ {fit.eta_ref*1e3:.3f}), "
-        f"b = {fit.b*1e3:.3f} ($\\eta$ {fit.eta_tgt*1e3:.3f}) mV$^{{1/2}}${bflag}\n"
-        f"d = {fit.offset*1e3:+.3f} mV  (should be $\\approx$0)\n"
-        f"R$^2$ = {fit.r2:.4f}"
+        f"{np.degrees(err):.2f} deg  "
+        f"({_sigma(fit.dphi_comb, err):.0f}$\\sigma$)\n"
     )
+    if pinned:
+        txt += (
+            f"  = {np.degrees(fit.dphi_comb_err):.2f} (fringe) $\\oplus$ "
+            f"{np.degrees(fit.dphi_comb_err_eta):.2f} (step-6 $\\eta$) deg\n"
+            f"a = {fit.a*1e3:.3f}, b = {fit.b*1e3:.3f} mV$^{{1/2}}$ "
+            f"(both pinned to step 6)\n"
+            f"mean resid = {float(np.mean(fit.residuals))*1e3:+.3f} mV (not fitted)\n"
+            f"R$^2$ = {fit.r2:.4f}  [1 free param: $\\Delta\\Phi_{{comb}}$]"
+        )
+    else:
+        bflag = (("  [a@bound]" if fit.a_at_bound else "")
+                 + ("  [b@bound]" if fit.b_at_bound else ""))
+        txt += (
+            f"a = {fit.a*1e3:.3f} ($\\eta$ {fit.eta_ref*1e3:.3f}), "
+            f"b = {fit.b*1e3:.3f} ($\\eta$ {fit.eta_tgt*1e3:.3f}) mV$^{{1/2}}${bflag}\n"
+            f"d = {fit.offset*1e3:+.3f} mV  (should be $\\approx$0)\n"
+            f"R$^2$ = {fit.r2:.4f}"
+        )
     ax1.text(0.05, 0.95, txt, transform=ax1.transAxes, va="top",
              bbox=dict(boxstyle="round", fc="white", alpha=0.85), fontsize=8)
 
