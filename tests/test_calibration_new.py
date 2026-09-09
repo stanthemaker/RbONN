@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import tempfile
 import threading
@@ -17,8 +18,10 @@ from slm_module.calibration.outliers import OutlierRemeasurePolicy
 from slm_module.calibration.calibration_new import (
     CalibrationAborted,
     CalibrationResult,
+    _driven_geometry,
     batch_intensity_calibration,
     build_channel_calibration_grid,
+    calibration_result_from_dict,
     intensity_calibration,
     intensity_calibration_daq,
     load_calibration_result,
@@ -1054,6 +1057,72 @@ class CalibrationNewTests(unittest.TestCase):
         )
         self.assertEqual(loaded.min_level, 20)
         self.assertEqual(loaded.max_level, 900)
+
+    def test_window_and_pad_survive_the_round_trip(self) -> None:
+        """Step 3 is the only place that knows the split, so the file carries it."""
+        step2 = CalibrationResult(
+            wavelength=np.asarray([783.0, 778.0, 773.0]),
+            coordinates=np.asarray([0.0, 50.0, 100.0]),
+            max_level=900,
+            min_level=100,
+            level_range=np.asarray([100, 900]),
+        )
+        grid, _center = build_channel_calibration_grid(
+            step2,
+            target_wavelength_nm=778.0,
+            n_channels_per_side=2,
+            channel_width_px=15,
+            gap_px=5,
+            slm_width=120,
+        )
+        self.assertEqual((grid.channel_width_px, grid.gap_px), (15, 5))
+        # the split is the pitch, so the encoder can never disagree with it
+        pitch = int(np.min(np.diff(np.sort(grid.coordinates))))
+        self.assertEqual(grid.channel_width_px + grid.gap_px, pitch)
+
+        grid.intensity_levels = np.asarray([[0.1, 0.9]] * grid.coordinates.size)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = save_calibration_result(
+                grid, Path(temp_dir) / "step3.json", fit_transfer=False
+            )
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            loaded = load_calibration_result(path)
+
+        self.assertEqual(payload["channel_width_px"], 15)
+        self.assertEqual(payload["gap_px"], 5)
+        self.assertEqual((loaded.channel_width_px, loaded.gap_px), (15, 5))
+
+    def test_geometry_is_none_on_a_file_written_before_it_was_recorded(self) -> None:
+        payload = {
+            "wavelength": [770.0, 772.0],
+            "coordinates": [1.0, 3.0],
+            "max_level": 900,
+            "min_level": 20,
+            "level_range": [0, 1023],
+        }
+        loaded = calibration_result_from_dict(payload)
+        self.assertIsNone(loaded.channel_width_px)
+        self.assertIsNone(loaded.gap_px)
+
+    def test_driven_geometry_records_what_the_sweep_lit(self) -> None:
+        """The width belongs to the curves, so it is the swept one, not the seed's."""
+        seed = CalibrationResult(
+            wavelength=np.asarray([781.0, 779.0, 777.0, 775.0]),
+            coordinates=np.asarray([20.0, 40.0, 60.0, 80.0]),
+            max_level=900,
+            min_level=100,
+            level_range=np.asarray([100, 900]),
+            channel_width_px=15,
+            gap_px=5,
+        )
+        # swept at the width it was designed for -> the seed's own pad is kept
+        self.assertEqual(_driven_geometry(seed, 15, seed.coordinates), (15, 5))
+        # swept narrower -> the pad is whatever the pitch leaves over
+        self.assertEqual(_driven_geometry(seed, 8, seed.coordinates), (8, 12))
+        # a dense scan has no channels and so no pad
+        self.assertEqual(
+            _driven_geometry(seed, 15, np.arange(0.0, 40.0)), (None, None)
+        )
 
     def test_restricts_quick_calibration_to_measured_min_max_range(self) -> None:
         result = CalibrationResult(

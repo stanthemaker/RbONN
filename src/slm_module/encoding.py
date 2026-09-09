@@ -498,9 +498,14 @@ def channel_layout_from_calibration(
     guard-band rebuild, no nearest-coordinate snapping -- so the encoder always
     agrees with what was actually measured.
 
-    The file does not record how the scan's pitch split into window + gap, so
-    the window width defaults to ``pitch - assumed_gap_px`` (the Step-3c
-    default gap); pass ``channel_width_px`` to override.
+    How the pitch splits into window + pad comes from the calibration itself:
+    Step 3 stores the geometry it swept with in ``channel_width_px`` /
+    ``gap_px``, and this loader drives that, so the encoded aperture is the one
+    the transfer curves were measured through.  ``channel_width_px`` here
+    overrides the stored value; a file written before the split was recorded has
+    neither, and only then does the width fall back to the old
+    ``pitch - assumed_gap_px`` guess -- announced under ``warn``, because a
+    guessed aperture is not the calibrated one.
 
     ``method`` picks how ``level_for`` inverts the transfer curve, and defaults
     to ``"fit"`` -- the sin^2 model of :mod:`.calibration.transfer`.  This is the
@@ -558,17 +563,42 @@ def channel_layout_from_calibration(
     if pitch < 1:
         raise ValueError("duplicate channel coordinates in the calibration")
 
-    if channel_width_px is None:
+    stored_width = getattr(calib, "channel_width_px", None)
+    stored_gap = getattr(calib, "gap_px", None)
+    if channel_width_px is not None:
+        width = int(channel_width_px)
+        if width < 1:
+            raise ValueError("channel_width_px must be positive")
+    elif stored_width is not None:
+        width = int(stored_width)
+        if width < 1:
+            raise ValueError(
+                f"calibration records channel_width_px = {stored_width!r}, "
+                "which is not a usable window"
+            )
+        # width + pad IS the pitch by construction; a mismatch means the file
+        # was hand-edited or stitched, and the recorded window still wins --
+        # it is the aperture the curves were measured through.
+        if warn and stored_gap is not None and width + int(stored_gap) != pitch:
+            print(
+                f"  [encoding] calibration says {width} px window + "
+                f"{int(stored_gap)} px pad, but its channels are pitched "
+                f"{pitch} px apart -- driving the recorded {width} px window"
+            )
+    else:
         width = pitch - int(assumed_gap_px)
         if width < 1:
             raise ValueError(
                 f"grid pitch {pitch} px is too fine to infer a window width -- "
                 "this looks like a dense Step-3 scan, not a channel grid"
             )
-    else:
-        width = int(channel_width_px)
-        if width < 1:
-            raise ValueError("channel_width_px must be positive")
+        if warn:
+            print(
+                f"  [encoding] calibration records no window/pad split; "
+                f"guessing {width} px window + {int(assumed_gap_px)} px pad "
+                f"from the {pitch} px pitch -- re-run or re-save Step 3 to "
+                f"record the geometry it actually swept"
+            )
     if width > pitch:
         raise ValueError(
             f"channel width {width} px exceeds the {pitch} px grid pitch"

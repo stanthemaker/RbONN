@@ -603,6 +603,39 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
                 self._calib(self.GRID), channel_width_px=21
             )
 
+    def test_stored_geometry_drives_the_window(self) -> None:
+        """The width comes from the calibration, not from a guess on the pitch."""
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 8
+        layout = channel_layout_from_calibration(calib, warn=False)
+
+        self.assertEqual(layout.channel_width_px, 12)
+        self.assertEqual(layout.pitch_px, 20)
+        inner = min(layout.x_channels, key=lambda c: abs(c.x_center - 510))
+        self.assertEqual(inner.x_end - inner.x_start, 12)
+
+    def test_argument_overrides_stored_geometry(self) -> None:
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 8
+        layout = channel_layout_from_calibration(
+            calib, channel_width_px=16, warn=False
+        )
+        self.assertEqual(layout.channel_width_px, 16)
+
+    def test_falls_back_to_the_pitch_guess_without_stored_geometry(self) -> None:
+        """A file written before the split was recorded keeps the old behaviour."""
+        calib = self._calib(self.GRID)          # channel_width_px stays None
+        layout = channel_layout_from_calibration(calib, warn=False)
+        self.assertIsNone(calib.channel_width_px)
+        self.assertEqual(layout.channel_width_px, 20 - 5)   # pitch - assumed_gap_px
+
+    def test_inconsistent_stored_split_still_drives_the_window(self) -> None:
+        """width + pad should be the pitch; if it is not, the window still wins."""
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 99
+        layout = channel_layout_from_calibration(calib, warn=False)
+        self.assertEqual(layout.channel_width_px, 12)
+
     def test_requires_intensity_data(self) -> None:
         calib = self._calib(self.GRID)
         bare = CalibrationResult(

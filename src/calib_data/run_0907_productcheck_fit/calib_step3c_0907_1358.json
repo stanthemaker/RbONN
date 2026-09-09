@@ -1370,5 +1370,7 @@
       "n_used": 41,
       "n_clipped": 4
     }
-  ]
+  ],
+  "channel_width_px": 35,
+  "gap_px": 15
 }

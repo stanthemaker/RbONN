@@ -192,7 +192,7 @@ PAIR_INDEX_BASE = 1                         # pairs are numbered 1..N
 # the comb phases are all defined at the levels actually written.
 ENCODING_METHOD = "fit"
 PAIR_INDICES = [2,3,4,5,6]                    # pair labels to calibrate
-IN_STEP3 = CALIB_PATH / "run_0907_productcheck_fit" / "calib_step3c_0907_1358.json"   # Step 3 calib
+IN_STEP3 = CALIB_PATH / "calib_step3c_0907_1358_pad10.json"   # Step 3 calib
 
 SLM_DISPLAY_NO = None            # None -> auto-detect the LCOS-SLM display
 USB_SLM_NO = 1                   # SLM_Ctrl_* device index for the DVI-mode switch
@@ -1472,6 +1472,12 @@ def _run_sweep(fit_after: bool, *, include_anchor: bool = False) -> None:
           f"{len(full_grid())} levels ({len(GRID)} estimator + {n_verify} "
           f"verification), interleaved, brightest first (~{secs/60:.1f} min/pair)")
     print(f"Pairs: {list(PAIR_INDICES)}")
+    # The aperture is not a knob here -- it comes from the Step-3 file, which
+    # records the window it swept -- but it belongs in run.log all the same, so
+    # a result can be read back knowing what was lit.
+    print(f"Layout: {layout.channel_width_px} px window + "
+          f"{layout.pitch_px - layout.channel_width_px} px pad "
+          f"(pitch {layout.pitch_px} px), encoding {ENCODING_METHOD!r}")
 
     slm = connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
     daq = connect_daq(device=DAQ_DEVICE, channel=DAQ_CHANNEL,

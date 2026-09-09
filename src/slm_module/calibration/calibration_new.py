@@ -107,6 +107,47 @@ class CalibrationResult:
     # calibration rather than re-derived on every load; None on files written
     # before that, which the encoder then fits at load time.
     transfer_fits: list[TransferFit] | None = None
+    # The SLM window geometry this grid was designed and swept with, in pixels:
+    # `channel_width_px` lit columns per channel and `gap_px` dark columns
+    # between neighbours, so width + gap is the coordinate pitch.  Step 3 is the
+    # only place that knows the split -- `coordinates` records the channel
+    # CENTRES and nothing else -- so it is stored here and read back by
+    # slm_module.encoding.channel_layout_from_calibration instead of being
+    # guessed from the pitch.  None on a dense scan, which has no channels, and
+    # on files written before this was recorded; the encoder then falls back to
+    # its `pitch - assumed_gap_px` guess and says so.
+    channel_width_px: int | None = None
+    gap_px: int | None = None
+
+
+def _driven_geometry(
+    seed: "CalibrationResult",
+    window_size: int,
+    coordinates: Any,
+) -> tuple[int | None, int | None]:
+    """The (window, pad) geometry a Step-3 sweep actually drove, in pixels.
+
+    ``window_size`` is what was lit, so it is the width the measured transfer
+    curves belong to -- not whatever the seed was designed at, if the two ever
+    disagree.  The pad is what the channel pitch leaves over, except that a seed
+    already designed at this width keeps its own ``gap_px`` verbatim.
+
+    Returns ``(None, None)`` when the coordinates are not a channel grid (a
+    dense scan steps a pixel at a time, so neighbouring windows overlap and
+    "pad" means nothing).
+    """
+    width = int(window_size)
+    if width < 1:
+        return None, None
+    coords = np.asarray(coordinates, dtype=float).ravel()
+    if coords.size < 2:
+        return None, None
+    pitch = int(round(float(np.min(np.diff(np.sort(coords))))))
+    if pitch <= width:
+        return None, None
+    if seed.channel_width_px == width and seed.gap_px is not None:
+        return width, int(seed.gap_px)
+    return width, pitch - width
 
 
 def find_min_max_intensity_levels(
@@ -815,6 +856,9 @@ def intensity_calibration(
         result_wavelengths = wavelengths
         fit_coefficients = calibration_results.wavelength_fit_coefficients
 
+    driven_width, driven_gap = _driven_geometry(
+        calibration_results, window_size, coordinates
+    )
     return CalibrationResult(
         wavelength=result_wavelengths,
         coordinates=coordinates,
@@ -824,6 +868,8 @@ def intensity_calibration(
         intensity_levels=intensity_levels,
         raw_intensity_levels=raw_intensity_levels,
         wavelength_fit_coefficients=fit_coefficients,
+        channel_width_px=driven_width,
+        gap_px=driven_gap,
     )
 
 
@@ -968,6 +1014,8 @@ def build_channel_calibration_grid(
             min_level=calibration_results.min_level,
             level_range=np.asarray(calibration_results.level_range, dtype=int),
             wavelength_fit_coefficients=np.asarray([slope, intercept], dtype=float),
+            channel_width_px=width,
+            gap_px=gap,
         ),
         float(center),
     )
@@ -1312,6 +1360,9 @@ def batch_intensity_calibration(
     else:
         fit_coefficients = calibration_results.wavelength_fit_coefficients
 
+    driven_width, driven_gap = _driven_geometry(
+        calibration_results, window_size, coordinates
+    )
     return CalibrationResult(
         wavelength=refined_wavelengths,
         coordinates=coordinates,
@@ -1321,6 +1372,8 @@ def batch_intensity_calibration(
         intensity_levels=intensity_levels,
         raw_intensity_levels=raw_intensity_levels,
         wavelength_fit_coefficients=fit_coefficients,
+        channel_width_px=driven_width,
+        gap_px=driven_gap,
     )
 
 
@@ -1446,6 +1499,9 @@ def intensity_calibration_daq(
             )
             step += 1
 
+    driven_width, driven_gap = _driven_geometry(
+        calibration_results, window_size, coordinates
+    )
     return CalibrationResult(
         wavelength=np.asarray(wavelengths, dtype=float),
         coordinates=coordinates,
@@ -1455,6 +1511,8 @@ def intensity_calibration_daq(
         intensity_levels=intensity_levels,
         raw_intensity_levels=raw_intensity_levels,
         wavelength_fit_coefficients=calibration_results.wavelength_fit_coefficients,
+        channel_width_px=driven_width,
+        gap_px=driven_gap,
     )
 
 
@@ -1643,6 +1701,10 @@ def save_calibration_result(
             calibration_results.wavelength_fit_coefficients
         ),
         "transfer_fits": None if fits is None else [f.to_dict() for f in fits],
+        # The window/pad split, so the encoder drives the aperture that was
+        # actually calibrated instead of inferring one from the pitch.
+        "channel_width_px": calibration_results.channel_width_px,
+        "gap_px": calibration_results.gap_px,
     }
     out = Path(path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1680,6 +1742,8 @@ def calibration_result_from_dict(payload: dict) -> CalibrationResult:
             payload.get("wavelength_fit_coefficients")
         ),
         transfer_fits=fits,
+        channel_width_px=_int_or_none(payload.get("channel_width_px")),
+        gap_px=_int_or_none(payload.get("gap_px")),
     )
 
 
@@ -1774,6 +1838,13 @@ def _array_or_none(value: Any) -> np.ndarray | None:
     if value is None:
         return None
     return np.asarray(value, dtype=float)
+
+
+def _int_or_none(value: Any) -> int | None:
+    """A stored pixel count, or None when the file predates it / has no grid."""
+    if value is None:
+        return None
+    return int(value)
 
 
 def _scalar_level(value: Any) -> int | np.ndarray:
