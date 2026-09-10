@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .phase import (
+from ..fit.phase import (
     PairModel,
     PhaseResult,
     fit_result,

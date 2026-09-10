@@ -8,7 +8,7 @@ not use it -- they compose the SLM and DAQ calls themselves, which is the
 pattern the rebuilt calibration pipeline should follow.  Nothing new should
 import from here; delete this module once the GUI centre-scan page / ``pipeline._run_tpa_center`` is rebuilt.
 
-The physics lives in :mod:`calibration_module.center`.
+The physics lives in :mod:`calibration_module.fit.center`.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import numpy as np
 
 from slm_module.calibration.calibration_new import CalibrationResult
 
-from .center import (
+from ..fit.center import (
     TPACenterResult,
     average_trace_points,
     fit_center_trace,

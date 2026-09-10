@@ -1,17 +1,21 @@
-"""Shared hardware wiring for the calibration drafts (SLM + DAQ).
+"""Shared bench wiring for the calibration steps (SLM + DAQ).
 
-The calib_step6/7 drafts drive the same instruments the GUI does, but from
-plain scripts.  This module holds the wiring that used to be copy-pasted into
-each draft:
+The step scripts drive the same instruments the GUI does, but from plain
+scripts.  This module holds the wiring that used to be copy-pasted into each
+one, and is the single chokepoint every step-6/7/8 read passes through:
 
 * :func:`connect_slm` -- LCOS-SLM display auto-detection + DVI-mode switch.
 * :func:`connect_daq` -- a :class:`daq_module.DAQController` configured for the
   fixed-window read scheme (``t_both`` when both beams are on, the longer
   ``t_single`` when at most one beam is on -- incl. all-off darks).  All other
   acquisition parameters (1 kS/s, +/-0.1 V DIFF, 20 Hz low-pass) are the
-  :class:`~daq_module.DAQMonitorSettings` defaults -- the values these drafts
+  :class:`~daq_module.DAQMonitorSettings` defaults -- the values these steps
   validated on hardware, now owned by ``daq_module``.
 * :func:`read_point` -- one fixed-window averaged read -> ``(mean, std)``.
+
+It was ``steps/draft_hw.py`` until the fit/measure split; nothing about it was
+ever a draft, and it sits here now because it is the acquisition layer itself,
+not one of the scripts that calls it.
 """
 from __future__ import annotations
 

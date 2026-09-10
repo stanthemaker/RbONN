@@ -9,14 +9,16 @@ running. Nothing marked **legacy** or **dead** should be imported from new code.
 
 | Path | Role |
 |------|------|
-| `src/calibration_module/` | calibration physics — models, fits, file formats. Instrument-free by design: it takes commanded levels and measured volts, and returns fitted parameters. |
-| `src/calibration_module/steps/calib_step6_v2.py` | **current** step 6 — the difference estimator (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`), 31 acquisitions over 10 repeated levels. Self-contained: it does not import `pair.py`. |
+| `src/calibration_module/fit/` | calibration physics — models, fits, file formats. Imports no driver, so it can be run against saved CSVs with the bench powered down. |
+| `src/calibration_module/measure/` | acquisition — drives the SLM, DAQ and OSA and returns rows. Does no fitting. |
+| `src/calibration_module/steps/calib_step6_v2.py` | **current** step 6 — the difference estimator (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`), 31 acquisitions over 10 repeated levels. Self-contained: it fits in-module and does not import `fit/pair.py`. |
 | `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Steps 7 and 8 still run on v1; step 6 v1 is kept for the joint-fit comparison and to re-fit historical CSVs. |
-| `src/calibration_module/steps/draft_hw.py` | SLM/DAQ connection helpers shared by the step scripts |
+| `src/calibration_module/measure/bench.py` | SLM/DAQ connection helpers shared by the step scripts |
 | `src/{daq,osa,scope,heater}_module/`, `src/slm_module/{controller,driver,encoding,generator}` | instrument drivers and pattern encoding |
+| `src/gui/` | the PyQt5 control suite (entry point `src/main.py`). It drives every instrument, not just the SLM, which is why it sits beside them rather than inside `slm_module/`. |
 | `src/drafts/monitor_lib.py` + `daq_osa_monitor.py` / `daq_pmt_monitor.py` | overnight drift monitors |
 
-### Legacy — alive only because the GUI and pipeline still call them
+### Legacy — alive only because the GUI still calls them
 
 The calibration chain is mid-rewrite, so these are frozen on the v1 model. They
 duplicate what the `calib_step*_v1.py` drafts do — **two implementations of the
@@ -25,30 +27,55 @@ once its GUI page is rebuilt.
 
 | Path | Kept alive by |
 |------|---------------|
-| `src/calibration_module/measure_pair.py` | Step 6 — [app.py:5021](src/slm_module/gui/app.py#L5021), [pipeline.py:652](src/slm_module/pipeline.py#L652) |
-| `src/calibration_module/measure_phase.py` | Step 7 — [app.py:5468](src/slm_module/gui/app.py#L5468), [pipeline.py:716](src/slm_module/pipeline.py#L716) |
-| `src/calibration_module/measure_center.py` | TPA centre scan — [app.py:5747](src/slm_module/gui/app.py#L5747), [pipeline.py:604](src/slm_module/pipeline.py#L604) |
-| `src/slm_module/pipeline.py` + `src/slm_module/gui/pipeline_page.py` | the 5-stage auto-pipeline. Parked, not maintained, while the step order and models are still changing. |
-| `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:7325](src/slm_module/gui/app.py#L7325) still reach it. `phase_for_level` and `predict_intensity` are exported but never called outside tests. |
+| `src/calibration_module/measure/pair.py` | Step 6 — [app.py:4855](src/gui/app.py#L4855) only |
+| `src/calibration_module/measure/phase.py` | Step 7 — [app.py:5302](src/gui/app.py#L5302) only |
+| `src/calibration_module/measure/center.py` | TPA centre scan — [app.py:5581](src/gui/app.py#L5581) only |
+| `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:7170](src/gui/app.py#L7170) still reach it. `phase_for_level` and `predict_intensity` are exported and called nowhere at all — not in `src/`, not in the tests. |
 
 ### Dead — nothing imports these
 
 | Path | Why |
 |------|-----|
-| `src/slm_module/scope_tpa.py` (451 lines) | scope-era diagonal-only TPA sweep (`x = w = √u`), superseded by `calibration_module/pair.py`. Zero importers. |
+| `src/slm_module/scope_tpa.py` (451 lines) | scope-era diagonal-only TPA sweep (`x = w = √u`), superseded by `calibration_module/fit/pair.py`. Zero importers. |
 | `src/slm_module/scope_background.py` (465 lines) | its only consumer is `scope_tpa.py`. Zero other importers. |
 | `src/bg_scatter.csv`, `src/bg_scatter.json` | `scope_background` output, committed to the `src/` root rather than `src/calib_data/` |
 | `tests/test_bit_depth.py` | loads `tests/fixtures/bit_depth_golden.npz` at import. `.gitignore` excludes `*.npz`, so the fixture can never be committed and `tests/fixtures/` does not exist — the file errors on every run. |
+| `src/slm_module/calibration/calibration_new.py` → `intensity_calibration` (~225 lines) | the OSA per-coordinate Step-3a sweep. Its only caller was the GUI's Step 3a page / Run All, both deleted; `tests/test_calibration_new.py` is all that reaches it now. The live Step 3 is `intensity_calibration_daq` (3c) and `batch_intensity_calibration` (3b). Same for `restrict_to_measured_intensity_range`. |
 
 The whole scope readout path is dead: the measurement moved to the DAQ bucket
 detector, and no `scope_*` module in `slm_module` has an importer left.
 
+### Deliberately not maintained
+
+`src/calib_data/refit_0904/{compare_runs,diagnose_45,refit_as_driven}.py` are
+analysis scripts stored beside the run they analysed. Their imports still point
+at the pre-split `calibration_module.phase` / `.sigma` and will not run as-is;
+they are kept as a record of what was executed on 0904, not as working code. If
+you need one, copy it out and repoint it at `calibration_module.fit.*`.
+
 **Dangling references:** `src/drafts/heat_controller.py` has been deleted, but
 four docstrings still name it as the thing they mirror —
 `heater_module/__init__.py`, `heater_module/controller.py`,
-`heater_module/driver.py` and [app.py:6097](src/slm_module/gui/app.py#L6097).
+`heater_module/driver.py` and [app.py:5931](src/gui/app.py#L5931).
 The code is fine; only the pointers are stale. `heater_module/` is now the
 sole copy of that logic.
+
+### Hidden GUI pages — built, but not shown as tabs
+
+Three pages are constructed by `_build_calibration_page` and never added to the
+tab bar. They stay built because other pages read their widgets, or because
+re-tabbing them should be a one-line change rather than a rebuild.
+
+| Page | Why it is hidden | What still needs it |
+|------|------------------|---------------------|
+| **Step 4b · Stage3 Reopt** | its result is wired to nothing. The shape actually in use is the frozen `OPTIMIZED_ENCODING_SHAPE` constant in [optimization.py:123](src/slm_module/optimization.py#L123), hand-transcribed from `encoding/2026-07-03_run162902/best_so_far.json`. A 4b run writes a new `best_so_far.json` under its own output root and nothing reads it. | `_set_calibration_running` gates `stage3_reopt_stop_button`; `calibration_run_buttons` holds `stage3_reopt_run_button` |
+| **Step 6b · TPA Center** | its Apply button does not apply. The encoding layout is read verbatim from the Step 3c calibration, so a valid centre fit only prints *"re-run Step 3c with this target centre"* — it looks like it re-centres the channels and does not. | nothing; self-contained |
+| **Mod Error** | never had a tab | the Encoding Gain (TPA Encoding page) and Quick Test sweeps read its `ana_*` OSA sweep-settings widgets |
+
+To bring 4b or 6b back, swap the `self._..._page = self._build_...()` line for an
+`addTab` call at [app.py:842](src/gui/app.py#L842). Neither is deleted, and the
+underlying calibration code (`optimization.py`, `calibration_module/fit/center.py`)
+is live and tested — it is the GUI wiring that is incomplete.
 
 ### Superseded drafts
 
@@ -65,7 +92,6 @@ Kept for provenance; they answered their question and are not maintained.
 | Path | Problem |
 |------|---------|
 | `docs/calib_0715_steps_6_7_8.md` | names `calib_step{6,7,8}_test.py` (now `_v1.py`) and `slm_module.tpa_{pair,phase}` (now `calibration_module.{pair,phase}`). Every uncertainty in it is an SEM with Birge-scaled errors and χ²/dof — all three were removed in favour of the trace std, so the numbers are not reproducible from today's code. |
-| `docs/pipeline_parameters.md` | documents `slm_module/pipeline.py`, itself legacy; SEM and Birge scaling throughout |
 
 ## Alignment
 
@@ -133,22 +159,23 @@ Two acquisition backends produce the same `CalibrationResult`:
 
 - **OSA** (`intensity_calibration`) — reduces the spectrum around each
   coordinate's calibrated wavelength, and refines the wl→px map from this
-  narrower sweep.
+  narrower sweep. **No longer reachable**: this was the Step-3a page, deleted
+  along with Run All. The function survives for reference and is exercised only
+  by `tests/test_calibration_new.py`.
 - **DAQ bucket detector** (`intensity_calibration_daq`) — no spectral
   resolution, so intensity is a plain dark-frame subtraction: an all-`min_level`
   frame is read once as the DC background and subtracted from every window
   reading (clamped at 0). No all-bright reference is taken — the downstream
   $I_0\,\sin^2(\theta/2)$ model fits $I_0$ as a free amplitude, so absolute scale
-  is irrelevant, and a full-bright panel could saturate the photodiode.
+  is irrelevant, and a full-bright panel could saturate the photodiode. This
+  is what Step 3c runs.
 
-**Channels only** (DAQ): instead of walking every calibrated coordinate, scan
-only where an encoding channel lands. The panel builds the same channel-map
-geometry as the preview (Window px = channel width, Pad px = gap), then lights
-one channel window at a time — hopping from channel centre to channel centre and
-skipping the dark pads and Rb guard bands. Each row of the result is a channel,
+The old **Channels only** toggle on the Step-3a page — scan only where an
+encoding channel lands, rather than walking every calibrated coordinate — is now
+the whole of Step 3c, which takes its scan coordinates from 3b's channel
+structuring instead of from a window/pad guess. Each row of the result is a channel,
 so the sweep is roughly `n_coordinates / n_channels` times shorter (≈20× on a
 typical map) while producing a `CalibrationResult` the encoder reads unchanged.
-Stride is ignored in this mode.
 
 **Step 3c — channel grid + DAQ**: the same DAQ sweep, but the scan coordinates
 come from Step 3b's channel structuring: mirror-symmetric channel pairs are
@@ -171,7 +198,7 @@ swept points.
   \qquad \Delta(L) = c_2 L^2 + c_1 L + c_0$$
 
   `level_for` solves $\sin^2(\Delta/2) = val$ for $\Delta = 2\arcsin\sqrt{val}$ —
-  exactly the retardance `calibration_module.phase.phi_half` assumes downstream —
+  exactly the retardance `calibration_module.fit.phase.phi_half` assumes downstream —
   then inverts $\Delta(L)$ on its rising branch. Full scale is the model's
   $\Delta = \pi$, not the swept `argmax`, so one noisy sample cannot redefine it.
 - **`"interp"`** — linear interpolation between the two swept points bracketing
@@ -355,8 +382,8 @@ Defaults: `channel_width_px = 15`, `gap_px = 5`, `n_channels = 20` per side.
 Padding, guard-band, and centre columns render at their local off level, so
 they stay dark with no extra masking.
 
-Every consumer of a Step-3b/3c result — the TPA Encoding tab, the pipeline's
-Step-6/7 stages, and the draft scripts — loads it **verbatim**
+Every consumer of a Step-3b/3c result — the TPA Encoding tab and the draft
+step scripts — loads it **verbatim**
 (`channel_layout_from_calibration`): the calibration already *is* the channel
 structure (one row per channel centre, with the target centre, pitch and guard
 skips baked into the coordinates), so centre, pitch, x/w pairing and guard

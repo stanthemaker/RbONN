@@ -34,7 +34,7 @@ What changed vs :mod:`calib_step7_v1`
 3. **No dispersion model.**  This script measures ``dPhi_comb`` and stops.  It
    does not compare the spectrum against ``beta2 (Omega_ref^2 - Omega_i^2)``,
    does not need the comb geometry, and quotes no pull against any model --
-   there is no beta2 anywhere in v2.  (:func:`~calibration_module.phase.fit_beta2`
+   there is no beta2 anywhere in v2.  (:func:`~calibration_module.fit.phase.fit_beta2`
    survives for :mod:`calib_synth_v1`'s ``--check``, which verifies the
    GENERATOR against the beta2 it built its truth phases from -- a different
    claim from anything measured here.)
@@ -55,7 +55,7 @@ What changed vs :mod:`calib_step7_v1`
    into the weights would misdescribe it as per-point noise.
 
    That measurement sigma is the trace spread with
-   ``calibration_module.sigma.STD_FLOOR_V`` added in quadrature.  The trace
+   ``calibration_module.fit.sigma.STD_FLOOR_V`` added in quadrature.  The trace
    spread scales as sqrt(signal), so a point sitting in a fringe null is the
    quietest in the sweep and would otherwise take the fit on the strength of a
    small error bar rather than of any phase sensitivity -- and dm/dphi vanishes
@@ -89,9 +89,9 @@ diverges while the trace std is smallest, so ``1/std^2`` weighting hands that
 one point most of the fit.  See the SWEEP_MIN/SWEEP_MAX comment.  Sweeping ``v``
 0.1 -> 0.9 sweeps ``theta`` over ~37..143 deg, tracing most of the half fringe.
 
-The fit (in :mod:`calibration_module.phase`).  Every point is reduced to
+The fit (in :mod:`calibration_module.fit.phase`).  Every point is reduced to
 ``(g, dPhi_SLM)`` from its commanded intensities and handed to
-:func:`~calibration_module.phase.fit_phase_fixed`: weighted (1/std) nonlinear
+:func:`~calibration_module.fit.phase.fit_phase_fixed`: weighted (1/std) nonlinear
 least squares in the single parameter ``dPhi_comb``, errors from the weighted
 Jacobian as-is (no chi2/dof, no Birge rescaling).
 
@@ -117,7 +117,7 @@ is the only input -- it embeds the raw Step-3 calibration under ``"step3"``
 Point ``IN_STEP6`` at the latest step-6 run.
 
 All model / background removal / weighted fit / verification / persistence live
-in :mod:`calibration_module.phase`; this file only wires up hardware and
+in :mod:`calibration_module.fit.phase`; this file only wires up hardware and
 prints/plots.
 """
 from __future__ import annotations
@@ -132,14 +132,13 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
-from calibration_module.sigma import STD_FLOOR_V  # noqa: E402
-from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
+from calibration_module.fit.sigma import STD_FLOOR_V  # noqa: E402
+from calibration_module.measure.bench import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
-from calibration_module.report import plot_fringe  # noqa: E402
-from calibration_module.phase import (  # noqa: E402
+from calibration_module.fit.report import plot_fringe  # noqa: E402
+from calibration_module.fit.phase import (  # noqa: E402
     PhaseFit,
     PhaseResult,
     load_pair_models,
@@ -327,7 +326,7 @@ def report(fit: PhaseFit, tgt: int, ref: int) -> None:
 def make_plot(fit: PhaseFit, tgt: int, path) -> None:
     """Measured Y(dPhi_SLM) with the fitted model curve + pulls, written as a PNG.
 
-    The figure itself is :func:`calibration_module.report.plot_fringe`, the same
+    The figure itself is :func:`calibration_module.fit.report.plot_fringe`, the same
     renderer the GUI draws into, so a fringe reviewed on screen and one archived
     beside the JSON are the same picture.  It reads the fit's own convention and
     ``std_total``, which is what this step needs: a/b are pinned here, so the
@@ -419,14 +418,14 @@ def fit_csv(path, *, flip: bool = False) -> None:
 
     Unlike v1 there is only ONE fit: amplitudes/background/dark all pinned to
     step 6, ``dPhi_comb`` the sole free parameter
-    (:func:`~calibration_module.phase.fit_phase_fixed`, ``comb_only=True``).
+    (:func:`~calibration_module.fit.phase.fit_phase_fixed`, ``comb_only=True``).
 
     ``flip`` handles an inverted photodiode/DAQ read: it writes a sign-flipped
     sibling CSV (:func:`_flip_meas_csv`, negating ``voltage_mean_v`` + ``dark_v``)
     and re-fits that instead, so the fitted fringe is the positive light signal.
 
     Everything is persisted into ONE combined ``calib_step7_result_*.json``
-    (:func:`~calibration_module.phase.save_comb_phase_json`).
+    (:func:`~calibration_module.fit.phase.save_comb_phase_json`).
     """
     if flip:
         path = _flip_meas_csv(path)
@@ -481,7 +480,7 @@ def build_xw_sweep() -> list[tuple[float, float, float, float]]:
     ``SWEEP_MIN..SWEEP_MAX`` ramp.  v1 pinned the reference at 1.0 and swept the
     target to 1.0; both arms now stop at 0.9, inside the range step 6 fits (see
     the SWEEP_MIN/MAX comment).  The fit follows:
-    :func:`~calibration_module.phase.fit_phase_fixed` takes
+    :func:`~calibration_module.fit.phase.fit_phase_fixed` takes
     ``g_ref = sqrt(x_r w_r)`` so ``a = eta_ref g_ref``, and ``dPhi_SLM`` already
     carried the reference's ``-phi_half(x_r) - phi_half(w_r)``.
     """
@@ -500,11 +499,11 @@ _MEAS_CSV_HEADER = [
 def write_meas_csv(results, path) -> str:
     """Write raw rows for one or more target pairs into a single CSV.
 
-    Same column layout as :func:`calibration_module.phase.write_phase_csv` plus a
+    Same column layout as :func:`calibration_module.fit.phase.write_phase_csv` plus a
     trailing ``std_ratio`` (std/|mean|) column, and concatenates several
     :class:`PhaseResult` objects so every row carries its own ``tgt_index`` (and
     the shared ``ref_index``).  Round-trips via
-    :func:`calibration_module.phase.load_phase_csv` (used by the offline refit),
+    :func:`calibration_module.fit.phase.load_phase_csv` (used by the offline refit),
     and is byte-compatible with a v1 CSV -- either version can refit either file.
     """
     out = Path(path).resolve()

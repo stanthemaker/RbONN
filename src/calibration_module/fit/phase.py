@@ -533,7 +533,7 @@ def _average_points(result: PhaseResult, dark_override: float | None = None):
     floored to a bogus 1.0 V, flattening the fit).  Only cells with neither
     repeats nor a recorded std inherit the median positive std.
 
-    Finally every cell gets :data:`~calibration_module.sigma.STD_FLOOR_V` added
+    Finally every cell gets :data:`~calibration_module.fit.sigma.STD_FLOOR_V` added
     in quadrature.  The trace spread scales as sqrt(signal), so without it a
     point sitting near a fringe null -- or near zero drive -- is the quietest in
     the sweep and takes the fit, on the strength of a small error bar rather

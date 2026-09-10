@@ -32,7 +32,7 @@ def plot_fringe(fig, fit, tgt: int) -> None:
     Right: the pulls.
 
     Renders either fit convention: the cosine argument comes from
-    :meth:`~calibration_module.phase.PhaseFit.fringe_arg`, so a
+    :meth:`~calibration_module.fit.phase.PhaseFit.fringe_arg`, so a
     ``fit_phase_fixed`` result (step-7 v2, ``"comb-slm"``) draws the same way
     round as it was fitted rather than mirrored.
 

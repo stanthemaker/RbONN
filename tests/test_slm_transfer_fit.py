@@ -197,12 +197,12 @@ class FitEncodingTests(unittest.TestCase):
     def test_v_maps_to_the_retardance_the_phase_model_assumes(self) -> None:
         """The identity that interpolation could not promise.
 
-        ``calibration_module.phase.phi_half`` takes phi/2 = asin(sqrt(v)) for a
+        ``calibration_module.fit.phase.phi_half`` takes phi/2 = asin(sqrt(v)) for a
         channel commanded at v.  Inverting the fit makes that exact, so the
         amplitude the encoder writes and the phase steps 6/7/8 assume come from
         one model.
         """
-        from calibration_module.phase import phi_half
+        from calibration_module.fit.phase import phi_half
 
         fit = self.ch.transfer_fit
         for v in (0.05, 0.2, 0.5, 0.8, 1.0):

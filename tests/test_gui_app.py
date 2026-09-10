@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from slm_module.gui.app import _format_duration
+from gui.app import _format_duration
 
 
 class FormatDurationTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class FormatDurationTests(unittest.TestCase):
 
 class FormatVoltsTests(unittest.TestCase):
     def test_scales_to_readable_units(self) -> None:
-        from slm_module.gui.live_readout import _format_volts
+        from gui.live_readout import _format_volts
 
         self.assertEqual(_format_volts(1.5), "1.5 V")
         self.assertEqual(_format_volts(0.0123), "12.3 mV")
@@ -57,7 +57,7 @@ class CalibrationDialogEtaTests(unittest.TestCase):
 
     def test_eta_estimates_remaining_from_pace(self) -> None:
         from slm_module.calibration.calibration_new import CalibrationProgress
-        from slm_module.gui.app import CalibrationProgressDialog
+        from gui.app import CalibrationProgressDialog
 
         dialog = CalibrationProgressDialog()
         try:
@@ -85,7 +85,7 @@ class MainWindowStartupTests(unittest.TestCase):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def test_navigation_has_one_page_per_item(self) -> None:
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         window = MainWindow()
         try:
@@ -97,7 +97,7 @@ class MainWindowStartupTests(unittest.TestCase):
             window.close()
 
     def test_encoding_shape_defaults_to_off(self) -> None:
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         window = MainWindow()
         try:
@@ -108,7 +108,7 @@ class MainWindowStartupTests(unittest.TestCase):
             window.close()
 
     def test_pipeline_loads_stage1_result_profile_key(self) -> None:
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         window = MainWindow()
         try:
@@ -124,63 +124,9 @@ class MainWindowStartupTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_unified_pipeline_page_dependency_toggle(self) -> None:
-        from slm_module.gui.app import MainWindow
-
-        window = MainWindow()
-        try:
-            page = window.pipeline_page
-            wl_row = page.rows["wl_map"]
-            int_row = page.rows["intensity"]
-            wl_row.group.setChecked(True)
-            int_row.group.setChecked(True)
-            combo = int_row.input_combos["wl_map"]
-            combo.setCurrentText("From memory")
-            self.assertEqual(combo.currentText(), "From memory")
-            # disabling the producer forces the dependent input back to file
-            wl_row.group.setChecked(False)
-            self.assertEqual(combo.currentText(), "From file…")
-        finally:
-            window.close()
-
-    def test_unified_pipeline_request_building(self) -> None:
-        from slm_module.gui.app import MainWindow
-        from slm_module.pipeline import validate_request
-
-        window = MainWindow()
-        try:
-            page = window.pipeline_page
-            for row in page.rows.values():
-                row.group.setChecked(False)
-            page.rows["wl_map"].group.setChecked(True)
-            page.rows["intensity"].group.setChecked(True)
-            page.rows["intensity"].input_combos["wl_map"].setCurrentText(
-                "From memory"
-            )
-            page.lay_center_gap_check.setChecked(True)
-            page.lay_center_gap.setValue(10)
-            page.wl_osa.points.setText("501")
-
-            request = page._build_request(0.15)
-            validate_request(request)
-
-            self.assertEqual(
-                [plan.stage_id for plan in request.stages],
-                ["wl_map", "intensity"],
-            )
-            self.assertEqual(
-                request.stages[1].inputs["wl_map"].source, "memory"
-            )
-            self.assertEqual(request.layout.center_gap_px, 10)
-            settings = request.stages[0].config.osa.to_measurement_settings()
-            self.assertEqual(settings.sampling_points, "501")
-            self.assertIsNotNone(request.stages[0].config.outlier_policy)
-        finally:
-            window.close()
-
     def test_encoding_page_loads_layout_verbatim_from_calibration(self) -> None:
         from slm_module.calibration.calibration_new import CalibrationResult
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         # mirror-symmetric channel grid: centre 510 px, pitch 20, one guard skip
         coords = np.array([420.0, 440.0, 480.0, 500.0, 520.0, 540.0, 580.0, 600.0])
@@ -225,7 +171,7 @@ class MainWindowStartupTests(unittest.TestCase):
 
     def test_live_readout_dock_receives_bridged_samples(self) -> None:
         from scope_module.controller import MonitorSample
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         window = MainWindow()
         try:
@@ -252,7 +198,7 @@ class MainWindowStartupTests(unittest.TestCase):
             window.close()
 
     def test_live_readout_dock_watch_unwatch(self) -> None:
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         class _FakeMonitorController:
             def __init__(self) -> None:
@@ -275,7 +221,7 @@ class MainWindowStartupTests(unittest.TestCase):
             window.close()
 
     def test_step_settings_include_sampling_points(self) -> None:
-        from slm_module.gui.app import MainWindow
+        from gui.app import MainWindow
 
         window = MainWindow()
         try:

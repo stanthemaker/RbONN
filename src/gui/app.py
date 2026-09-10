@@ -34,15 +34,14 @@ from scope_module.controller import (
     Waveform,
 )
 
-from ..calibration import CalibrationFit, fit_calibration, load_calibration_csv
-from ..calibration.calibration_new import (
+from slm_module.calibration import CalibrationFit, fit_calibration, load_calibration_csv
+from slm_module.calibration.calibration_new import (
     CalibrationAborted,
     CalibrationProgress,
     CalibrationResult,
     batch_intensity_calibration,
     build_channel_calibration_grid,
     find_min_max_intensity_levels,
-    intensity_calibration,
     intensity_calibration_daq,
     load_calibration_result,
     load_wavelength_map_csv,
@@ -51,9 +50,9 @@ from ..calibration.calibration_new import (
     wavelength_calibration,
     write_intensity_calibration_csv,
 )
-from ..controller import ScanParams, ScanResult, SLMController
-from ..detector import Detector, SimulatedDetector
-from ..generator import (
+from slm_module.controller import ScanParams, ScanResult, SLMController
+from slm_module.detector import Detector, SimulatedDetector
+from slm_module.generator import (
     MAX_LEVEL,
     equal_segment_edges,
     make_equal_segments,
@@ -61,7 +60,7 @@ from ..generator import (
     make_segments,
     write_santec_csv,
 )
-from ..analysis import (
+from slm_module.analysis import (
     AnalysisAborted,
     AnalysisProgress,
     ChannelSpectrum,
@@ -73,17 +72,16 @@ from ..analysis import (
     write_analysis_csv,
     write_gain_csv,
 )
-from ..encoding import (
+from slm_module.encoding import (
     ChannelLayout,
     build_channel_layout,
     build_single_anchor_layout,
     channel_layout_from_calibration,
-    compute_channel_geometry,
     encode_to_pattern,
     interpolate_coordinate_for_wavelength,
     optimize_from_osa,
 )
-from ..optimization import (
+from slm_module.optimization import (
     OPTIMIZED_ENCODING_SHAPE,
     OSABatchVariant,
     OSAOptimizationConfig,
@@ -97,25 +95,25 @@ from ..optimization import (
     run_osa_optimization_batch,
     validate_independent_profile,
 )
-from calibration_module.pair import (
+from calibration_module.fit.pair import (
     TPAPairResult,
     build_sweep,
     load_tpa_pair_csv,
     save_tpa_pair_json,
     write_tpa_pair_csv,
 )
-from calibration_module.measure_pair import (
+from calibration_module.measure.pair import (
     TPAPairAborted,
     TPAPairProgress,
     measure_pair_grids,
 )
-from calibration_module.center import TPACenterResult, average_trace_points
-from calibration_module.measure_center import (
+from calibration_module.fit.center import TPACenterResult, average_trace_points
+from calibration_module.measure.center import (
     TPACenterAborted,
     TPACenterProgress,
     measure_center_scan,
 )
-from calibration_module.phase import (
+from calibration_module.fit.phase import (
     PairModel,
     PhaseResult,
     build_phase_sweep,
@@ -123,9 +121,9 @@ from calibration_module.phase import (
     save_phase_json,
     write_phase_csv,
 )
-from calibration_module.measure_phase import TPAPhaseAborted, measure_phase_sweep
-from calibration_module.report import plot_fringe
-from ..keepalive import SLMKeepAlive
+from calibration_module.measure.phase import TPAPhaseAborted, measure_phase_sweep
+from calibration_module.fit.report import plot_fringe
+from slm_module.keepalive import SLMKeepAlive
 from .common import (
     CalibrationProgressDialog,
     FunctionWorker,
@@ -135,7 +133,6 @@ from .common import (
 from .live_plots import BatchResultsTable, LiveLossCanvas
 from .live_readout import LiveReadoutDock
 from .osa_monitor import LiveSpectrumView, OSATraceBridge
-from .pipeline_page import PipelinePage
 from .style import DARK_STYLESHEET
 
 
@@ -556,6 +553,15 @@ class MainWindow(QtWidgets.QMainWindow):
         nav_items = (
             ("\N{ELECTRIC PLUG}  Connections", "Connect SLM, OSA, scope and DAQ"),
             ("\N{LINK SYMBOL}  SLM Control", "Grayscale and CSV display"),
+            # instrument pages sit next to SLM Control: they are the read-side
+            # counterpart to driving the panel, and are reached far more often
+            # than the calibration workflow below them.
+            ("\N{SATELLITE ANTENNA}  OSA Viewer",
+             "Live OSA spectrum viewer: single / continuous sweeps with settings"),
+            ("\N{BAR CHART}  DAQ Monitor",
+             "One-shot DAQ waveform diagnostic: trace, spectrum, filtered stats"),
+            ("\N{THERMOMETER}  Heater",
+             "Thorlabs TC300B: staircase ramp/hold + live temperature monitor"),
             ("\N{CHART WITH UPWARDS TREND}  Calibration", "Min/max, wavelength, intensity, TPA"),
             ("\N{LEFT RIGHT ARROW}  Center Scan", "Sweep a window across x"),
             ("\N{TRIGRAM FOR HEAVEN}  Phase Segments", "Piecewise phase along x"),
@@ -565,12 +571,6 @@ class MainWindow(QtWidgets.QMainWindow):
              "+ calibration) + OSA optimisation hook"),
             ("\N{WHITE HEAVY CHECK MARK}  Quick Test",
              "A/B crosstalk test: flat vs optimised encoding shape from OSA data"),
-            ("\N{SATELLITE ANTENNA}  OSA Viewer",
-             "Live OSA spectrum viewer: single / continuous sweeps with settings"),
-            ("\N{BAR CHART}  DAQ Monitor",
-             "One-shot DAQ waveform diagnostic: trace, spectrum, filtered stats"),
-            ("\N{THERMOMETER}  Heater",
-             "Thorlabs TC300B: staircase ramp/hold + live temperature monitor"),
         )
         for label, tooltip in nav_items:
             item = QtWidgets.QListWidgetItem(label)
@@ -579,18 +579,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.nav.addItem(item)
         sidebar_layout.addWidget(self.nav, 1)
 
+        # must stay in the same order as nav_items: currentRowChanged feeds
+        # setCurrentIndex directly, so a row here is a row there.
         self.stack = QtWidgets.QStackedWidget()
         self.stack.addWidget(self._build_connection_page())
         self.stack.addWidget(self._build_control_page())
+        self.stack.addWidget(self._build_osa_viewer_page())
+        self.stack.addWidget(self._build_daq_monitor_page())
+        self.stack.addWidget(self._build_heater_page())
         self.stack.addWidget(self._build_calibration_page())
         self.stack.addWidget(self._build_scan_page())
         self.stack.addWidget(self._build_segments_page())
         self.stack.addWidget(self._build_tpa_page())
         self.stack.addWidget(self._build_edge_ratio_page())
         self.stack.addWidget(self._build_quick_test_page())
-        self.stack.addWidget(self._build_osa_viewer_page())
-        self.stack.addWidget(self._build_daq_monitor_page())
-        self.stack.addWidget(self._build_heater_page())
 
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
@@ -815,26 +817,55 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # per-step widget registry: self.step_widgets[step][key]
         self.step_widgets: dict[int | str, dict[str, Any]] = {
-            1: {}, 2: {}, 3: {}, "3c": {},
+            1: {}, 2: {}, "3c": {},
         }
 
-        # tabs in step order: 1, 2, 3a, 3b, 3c, 4b, 6, 6b, 7 (Pipeline first)
+        # tabs in step order: 1, 2, 3b, 3c, 6, 7.  4b and 6b are built but
+        # not tabbed -- see below.
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._build_step1_tab(), "Step 1 · Min/Max")
         tabs.addTab(self._build_step2_tab(), "Step 2 · Wavelength")
-        tabs.addTab(self._build_step3_page(), "Step 3a · Intensity")
+        # Step 3a (the per-coordinate sweep) is gone: 3b/3c cover it with the
+        # channel-grid DAQ scan, which is what the encoder and steps 6-8 read.
+        # Its "Run All (1->2->3)" button and channel-map preview went with it.
+        # The fit/plot widgets it used to host did not: _on_step_finished feeds
+        # every CSV-producing step -- 3b and 3c included -- into that flow, so
+        # the container is still built, just with no page to sit on.
+        self._fit_backing = self._build_step3_fit_backing()
+        self._fit_backing.setVisible(False)
         tabs.addTab(self._build_fast_channel_calibration_page(), "Step 3b · Fast Channels")
         tabs.addTab(self._build_step3c_page(), "Step 3c · Channels (DAQ)")
         # Mod Error page is built but not shown as a tab: the Encoding Gain
         # (TPA Encoding page) and Quick Test sweeps read its ana_* OSA
         # sweep-settings widgets.
         self._mod_error_page = self._build_analysis_page()
-        tabs.addTab(self._build_stage3_reopt_page(), "Step 4b · Stage3 Reopt")
+        # Step 4b (Stage-3 re-optimisation) is hidden for now.  Its result is
+        # not wired to anything: the shape actually in use is the frozen
+        # OPTIMIZED_ENCODING_SHAPE constant in optimization.py, transcribed by
+        # hand from encoding/2026-07-03_run162902/best_so_far.json.  A 4b run
+        # writes a new best_so_far.json under its own output root and nothing
+        # reads it, so the page can only mislead until that link is built.
+        # Kept built, not deleted: _set_calibration_running gates
+        # stage3_reopt_stop_button and calibration_run_buttons holds
+        # stage3_reopt_run_button, and re-tabbing is a one-line change.
+        self._stage3_reopt_page = self._build_stage3_reopt_page()
+        self._stage3_reopt_page.setVisible(False)
         tabs.addTab(self._build_tpa_tab(), "Step 6 · TPA Efficiency")
-        tabs.addTab(self._build_tpa_center_tab(), "Step 6b · TPA Center")
+        # Step 6b (TPA centre scan) is hidden for the same reason, and its own
+        # Apply button says so out loud: the encoding layout is read verbatim
+        # from the Step 3c calibration, so a fitted centre only prints "re-run
+        # Step 3c with this target centre".  A page that looks like it
+        # re-centres the channels and does not.  Self-contained -- nothing
+        # outside its own handlers touches these widgets.
+        self._tpa_center_page = self._build_tpa_center_tab()
+        self._tpa_center_page.setVisible(False)
         tabs.addTab(self._build_tpa_phase_tab(), "Step 7 · Comb Phase")
-        self.pipeline_page = PipelinePage(self)
-        tabs.insertTab(0, self.pipeline_page, "Pipeline")
+        # There is deliberately no unified "run every stage" page.  Steps 1-3
+        # read the OSA and steps 6-7 read the DAQ through the TPA cell, so the
+        # bench has to be re-plumbed by hand partway down the chain: an
+        # unattended 1->7 run is not physically possible.  Real runs drive
+        # steps 6-8 from drafts/calib_step6-8_v2.py with step 3 loaded from an
+        # earlier run's JSON -- see calib_data/run_0907_1724/sequence.json.
         self.calibration_tabs = tabs
         lay.addWidget(tabs)
 
@@ -844,8 +875,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_run_buttons = [
             self.step_widgets[1]["run"],
             self.step_widgets[2]["run"],
-            self.step_widgets[3]["run"],
-            self.run_all_button,
             self.fast_channel_run_button,
             self.stage3_reopt_run_button,
         ]
@@ -1190,44 +1219,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._toggle_fast_channel_source()
         return page
 
-    def _build_step3_page(self) -> QtWidgets.QWidget:
-        """Step 3 (intensity) config + Run-All + the calibration fit/plots (full page)."""
-        page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page)
-        lay.setContentsMargins(18, 14, 18, 14)
-        lay.addWidget(self._build_step3_tab())
-
-        # run all three steps in sequence
-        self.run_all_button = QtWidgets.QPushButton("Run All (1→2→3)")
-        self.run_all_button.setEnabled(False)
-        self.run_all_button.clicked.connect(self._run_all)
-        self.stop_cal_button = QtWidgets.QPushButton("Stop")
-        self.stop_cal_button.setProperty("variant", "danger")
-        self.stop_cal_button.setEnabled(False)
-        self.stop_cal_button.clicked.connect(self._stop_full_calibration)
-        run_row = QtWidgets.QHBoxLayout()
-        run_row.addStretch(1)
-        run_row.addWidget(self.run_all_button)
-        run_row.addWidget(self.stop_cal_button)
-        lay.addLayout(run_row)
-
-        # The "Fit from CSV" controls and the fit-parameter / fit-curve /
-        # intensity-map result windows are no longer shown on this page (replaced
-        # by the channel-map preview below), but they are still built and kept
-        # alive off-screen: the calibration run pipeline (_handle_calibration_*,
-        # Run All) drives this fit + plot flow, so their widgets must exist.
-        fit_backing = self._build_step3_fit_backing()
-        fit_backing.setVisible(False)
-        lay.addWidget(fit_backing)
-
-        # --- channel map preview (replaces the old bottom result windows) ---
-        # Added with no stretch so it stays short; the trailing stretch soaks up
-        # extra vertical space, keeping the config widgets above at natural size.
-        lay.addWidget(self._build_channel_map_panel())
-        lay.addStretch(1)
-        self._update_channel_map_button()
-        return page
-
     def _build_step3_fit_backing(self) -> QtWidgets.QWidget:
         """Off-screen container for the legacy Fit-from-CSV controls + plots.
 
@@ -1294,35 +1285,6 @@ class MainWindow(QtWidgets.QMainWindow):
         split.setSizes([360, 720])
         outer.addWidget(split, 1)
         return backing
-
-    def _build_channel_map_panel(self) -> QtWidgets.QGroupBox:
-        """Panel with a 'Generate channel map' button and its preview canvas."""
-        panel = self._panel("Channel Map")
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        row = QtWidgets.QHBoxLayout()
-        self.channel_map_button = QtWidgets.QPushButton("Generate channel map")
-        self.channel_map_button.setToolTip(
-            "Preview the encoding channel layout (from the Step-2 wavelength map, "
-            "the Window px, and the Pad px). Enabled once a Step-2 source is set."
-        )
-        self.channel_map_button.clicked.connect(self._generate_channel_map)
-        self.channel_map_status = QtWidgets.QLabel("\N{EN DASH}")
-        self.channel_map_status.setObjectName("PageSubtitle")
-        self.channel_map_status.setWordWrap(True)
-        row.addWidget(self.channel_map_button)
-        row.addWidget(self.channel_map_status, 1)
-        layout.addLayout(row)
-
-        # Short, fixed-height strip: the layout is a single horizontal band, so
-        # it does not need much height, and keeping it small leaves room for the
-        # config widgets above.
-        self.channel_map_figure = Figure(figsize=(8, 2.0), tight_layout=True)
-        self.channel_map_canvas = FigureCanvas(self.channel_map_figure)
-        self.channel_map_canvas.setMinimumHeight(140)
-        self.channel_map_canvas.setMaximumHeight(220)
-        layout.addWidget(self.channel_map_canvas)
-        return panel
 
     def _build_measurement_group(self, step: int, defaults: dict[str, str]) -> QtWidgets.QGroupBox:
         """OSA measurement settings (center λ / span / sensitivity / ref) for a step."""
@@ -1574,107 +1536,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self._run_row(2, "Run Step 2", self._run_step2))
         layout.addStretch(1)
         self._toggle_step2_source()
-        return page
-
-    def _build_step3_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.addWidget(
-            self._caption(
-                "Sweep levels at each calibrated coordinate and read the DAQ. One "
-                "window is lit at a time; intensity is dark-frame subtracted."
-            )
-        )
-        widgets = self.step_widgets[3]
-
-        widgets["daq_group"] = self._build_step3_daq_group()
-        layout.addWidget(widgets["daq_group"])
-
-        # shared config: window px + encoding pad + coordinate stride
-        cfg = QtWidgets.QHBoxLayout()
-        widgets["window"] = self._spin(1, 8191, 15)
-        widgets["pad"] = self._spin(0, 8191, 5)
-        widgets["pad"].setToolTip(
-            "Dark gap between encoding channels. Used to preview the channel map; "
-            "does not affect the Step-3 sweep itself."
-        )
-        widgets["stride"] = self._spin(1, 8191, 1)
-        widgets["stride"].setToolTip(
-            "Measure only every Nth calibrated coordinate (1 = every coordinate)."
-        )
-        widgets["channels_only"] = QtWidgets.QCheckBox("Channels only")
-        widgets["channels_only"].setToolTip(
-            "Scan only where an encoding channel exists: light each channel window "
-            "(Window px wide, Pad px apart \N{EM DASH} the same geometry as the "
-            "channel map) at its centre pixel, sweep the levels, then jump to the "
-            "next channel centre. Skips the dark pads and Rb guard bands, so the "
-            "sweep is far shorter than walking every calibrated coordinate. Stride "
-            "is ignored in this mode."
-        )
-        cfg.addWidget(QtWidgets.QLabel("Window px"))
-        cfg.addWidget(widgets["window"])
-        cfg.addWidget(QtWidgets.QLabel("Pad px"))
-        cfg.addWidget(widgets["pad"])
-        cfg.addWidget(QtWidgets.QLabel("Stride"))
-        cfg.addWidget(widgets["stride"])
-        cfg.addWidget(widgets["channels_only"])
-        cfg.addStretch(1)
-        layout.addLayout(cfg)
-        # re-check the channel-map button when the window/pad geometry changes
-        widgets["window"].valueChanged.connect(self._update_channel_map_button)
-        widgets["pad"].valueChanged.connect(self._update_channel_map_button)
-        # stride is meaningless when scanning channel centres, so grey it out there
-        widgets["channels_only"].toggled.connect(self._toggle_step3_channels_only)
-        self._toggle_step3_channels_only()
-
-        # OSA measurement settings + extras. Step 3's own run is DAQ-only, but the
-        # Pipeline tab and Run All still drive an OSA intensity sweep and reuse
-        # these values (rather than duplicating the state), so they are kept
-        # alive here in a hidden backing container.
-        osa_backing = QtWidgets.QWidget()
-        osa_layout = QtWidgets.QVBoxLayout(osa_backing)
-        osa_layout.setContentsMargins(0, 0, 0, 0)
-        widgets["osa_group"] = self._build_measurement_group(
-            3, {"sensitivity": "HIGH3", "span": "4nm"}
-        )
-        osa_layout.addWidget(widgets["osa_group"])
-        widgets["avg_nm"] = self._double_spin(0.0, 50.0, 0.1, " nm", 3)
-        widgets["sweep_nm"] = self._double_spin(0.0, 50.0, 0.5, " nm", 3)
-        widgets["refine"] = QtWidgets.QCheckBox("Refine λ")
-        widgets["refine"].setChecked(True)
-        osa_layout.addWidget(widgets["avg_nm"])
-        osa_layout.addWidget(widgets["sweep_nm"])
-        osa_layout.addWidget(widgets["refine"])
-        osa_backing.setVisible(False)
-        layout.addWidget(osa_backing)
-
-        layout.addWidget(self._level_sweep_row(3, stop=1023, stepv=32))
-        layout.addWidget(self._region_row(3))
-
-        # wavelength source
-        src_row = QtWidgets.QHBoxLayout()
-        widgets["source"] = QtWidgets.QComboBox()
-        widgets["source"].addItems(["Step 2 result (memory)", "From file…"])
-        widgets["source"].currentIndexChanged.connect(self._toggle_step3_source)
-        src_row.addWidget(QtWidgets.QLabel("Wavelength source"))
-        src_row.addWidget(widgets["source"])
-        src_row.addStretch(1)
-        layout.addLayout(src_row)
-
-        widgets["in_row"] = self._input_file_row(
-            3, "Open Step 2 result or λ-map CSV", "Calibration (*.json *.csv)"
-        )
-        # typing/browsing a Step-2 file re-checks the channel-map button
-        widgets["in_path"].textChanged.connect(self._update_channel_map_button)
-        layout.addWidget(widgets["in_row"])
-        widgets["manual_row"] = self._min_max_row(3, "min/max for CSV source")
-        layout.addWidget(widgets["manual_row"])
-
-        layout.addWidget(self._output_row(3, "out", "Output JSON", False))
-        layout.addWidget(self._output_row(3, "out_csv", "Output CSV", True))
-        layout.addWidget(self._run_row(3, "Run Step 3", self._run_step3))
-        layout.addStretch(1)
-        self._toggle_step3_source()
         return page
 
     def _build_step3_daq_group(self, step: int | str = 3) -> QtWidgets.QGroupBox:
@@ -7410,159 +7271,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.step_widgets[2]["in_row"].setVisible(index == 1)
         self.step_widgets[2]["manual_row"].setVisible(index == 2)
 
-    def _toggle_step3_source(self) -> None:
-        index = self.step_widgets[3]["source"].currentIndex()
-        self.step_widgets[3]["in_row"].setVisible(index == 1)
-        # manual min/max only matter for a bare wavelength-map CSV source
-        self.step_widgets[3]["manual_row"].setVisible(index == 1)
-        self._update_channel_map_button()
-
     def _toggle_step3c_source(self) -> None:
         index = self.step_widgets["3c"]["source"].currentIndex()
         self.step_widgets["3c"]["in_row"].setVisible(index == 1)
         # manual min/max only matter for a bare wavelength-map CSV source
         self.step_widgets["3c"]["manual_row"].setVisible(index == 1)
-
-    def _step3_wavelength_source_available(self) -> bool:
-        """True when a Step-2 wavelength source is set (memory result or a file)."""
-        widgets = self.step_widgets.get(3)
-        if not widgets or "source" not in widgets:
-            return False
-        if widgets["source"].currentIndex() == 1:  # from file
-            return bool(widgets["in_path"].text().strip())
-        return self.calibration_result is not None  # in-memory Step-2 result
-
-    def _toggle_step3_channels_only(self) -> None:
-        """Channels-only scans use the channel geometry, not per-coordinate
-        subsampling, so grey out Stride while the mode is active."""
-        widgets = self.step_widgets.get(3, {})
-        if "channels_only" not in widgets or "stride" not in widgets:
-            return
-        widgets["stride"].setEnabled(not widgets["channels_only"].isChecked())
-
-    def _step3_channel_mapping(
-        self, mapping: CalibrationResult, window: int, pad: int
-    ) -> CalibrationResult:
-        """Reduce a Step-2 mapping to just the encoding-channel centres.
-
-        Builds the channel-map geometry (Window px = channel width, Pad px = the
-        inter-channel gap) and returns a copy of ``mapping`` whose coordinates /
-        wavelength are the centre pixel and fitted wavelength of every channel, in
-        ascending pixel order. Feeding this to intensity_calibration_daq makes the
-        sweep light one channel window at a time and hop between channel centres,
-        skipping the dark pads and Rb guard bands in between.
-        """
-        from dataclasses import replace
-
-        geom = compute_channel_geometry(
-            np.asarray(mapping.coordinates, dtype=float),
-            np.asarray(mapping.wavelength, dtype=float),
-            n_channels=100_000,  # fill the calibrated range; tiling self-limits
-            channel_width_px=int(window),
-            gap_px=int(pad),
-        )
-        channels = sorted(geom.x + geom.w, key=lambda g: g.x_center)
-        if not channels:
-            raise ValueError(
-                "channels-only scan: no channels fit the calibrated range "
-                "(check Window/Pad against the Step-2 coordinate span)"
-            )
-        centers = np.array([g.x_center for g in channels], dtype=float)
-        wavelengths = np.array([g.wavelength_nm for g in channels], dtype=float)
-        return replace(mapping, coordinates=centers, wavelength=wavelengths)
-
-    def _update_channel_map_button(self) -> None:
-        """Enable the channel-map button once window, pad, and a Step-2 source exist."""
-        if not hasattr(self, "channel_map_button"):
-            return
-        widgets = self.step_widgets.get(3, {})
-        has_geom = (
-            "window" in widgets
-            and widgets["window"].value() >= 1
-            and "pad" in widgets
-        )
-        self.channel_map_button.setEnabled(
-            has_geom and self._step3_wavelength_source_available()
-        )
-
-    def _generate_channel_map(self) -> None:
-        """Preview the encoding channel layout from the Step-2 wavelength map."""
-        try:
-            mapping = self._resolve_step_input(3)
-        except ValueError as exc:
-            self.channel_map_status.setText(str(exc))
-            return
-        coords = np.asarray(mapping.coordinates, dtype=float)
-        wavelengths = np.asarray(mapping.wavelength, dtype=float)
-        window = self.step_widgets[3]["window"].value()
-        pad = self.step_widgets[3]["pad"].value()
-        try:
-            geom = compute_channel_geometry(
-                coords,
-                wavelengths,
-                n_channels=100_000,  # fill the calibrated range; tiling self-limits
-                channel_width_px=window,
-                gap_px=pad,
-            )
-        except ValueError as exc:
-            self.channel_map_status.setText(f"Cannot build layout: {exc}")
-            return
-
-        wl_at_c0 = float(np.polyval(np.polyfit(coords, wavelengths, 1), geom.c0))
-        self.channel_map_status.setText(
-            f"{geom.n_channels} pairs \N{MIDDLE DOT} width {window} px, "
-            f"pad {pad} px \N{MIDDLE DOT} {geom.center_wl:g} nm at px {geom.c0} "
-            f"(fit {wl_at_c0:.4f} nm) \N{MIDDLE DOT} "
-            f"{len(geom.dark_px_ranges)} dark guard band(s)"
-        )
-        self._draw_channel_map(geom, coords)
-
-    def _draw_channel_map(self, geom: Any, coords: np.ndarray) -> None:
-        """Render the pixel -> channel map: x/w bands, guard bands, 778 centre."""
-        self.channel_map_figure.clear()
-        self.channel_map_figure.patch.set_facecolor("#101820")
-        axes = self.channel_map_figure.add_subplot(111)
-        self._style_dark_axes(axes)
-
-        # dark guard bands span the full height
-        for i, (lo, hi) in enumerate(geom.dark_px_ranges):
-            axes.axvspan(
-                lo, hi + 1, color="#5a5a5a", alpha=0.55,
-                label="Dark guard band" if i == 0 else None,
-            )
-        # x (wl > centre) and w (wl < centre) share one band; colour tells them
-        # apart (they never overlap in x, so no vertical separation is needed).
-        band = (0.05, 0.9)
-        if geom.x:
-            axes.broken_barh(
-                [(c.x_start, c.x_end - c.x_start) for c in geom.x],
-                band, facecolors="#4c9be8",
-                edgecolor="#0d1b2a", label="x (λ > centre)",
-            )
-        if geom.w:
-            axes.broken_barh(
-                [(c.x_start, c.x_end - c.x_start) for c in geom.w],
-                band, facecolors="#e8794c",
-                edgecolor="#2a130d", label="w (λ < centre)",
-            )
-        # 778 nm centre pixel
-        axes.axvline(
-            geom.c0, color="#f2c14e", linewidth=1.6, linestyle="--",
-            label=f"{geom.center_wl:g} nm centre (px {geom.c0})",
-        )
-
-        lo = min(coords.min(), geom.x[-1].x_start if geom.x else coords.min())
-        hi = max(coords.max(), geom.w[-1].x_end if geom.w else coords.max())
-        axes.set_xlim(lo - 5, hi + 5)
-        axes.set_ylim(0.0, 1.0)
-        axes.set_yticks([])
-        axes.set_xlabel("SLM pixel column")
-        # legend above the axes so it never overlaps the full-height bars
-        axes.legend(
-            loc="lower center", bbox_to_anchor=(0.5, 1.0),
-            ncol=4, fontsize=8, frameon=False,
-        )
-        self.channel_map_canvas.draw_idle()
 
     def _toggle_fast_channel_source(self) -> None:
         if not hasattr(self, "fast_channel_source_combo"):
@@ -7615,7 +7328,6 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = self.osa_controller is not None
         for button in getattr(self, "calibration_run_buttons", []):
             button.setEnabled(connected and not running)
-        self.stop_cal_button.setEnabled(running)
         if hasattr(self, "stage3_reopt_stop_button"):
             self.stage3_reopt_stop_button.setEnabled(running)
         if hasattr(self, "fast_channel_stop_button"):
@@ -7625,26 +7337,21 @@ class MainWindow(QtWidgets.QMainWindow):
             step3c["stop"].setEnabled(running)
         self.osa_connect_button.setEnabled(not running and not connected)
         self.osa_disconnect_button.setEnabled(not running and connected)
-        # The unified pipeline may run without the OSA (TPA stages only), so
-        # its Run button is not tied to the OSA connection like the others.
-        if hasattr(self, "pipeline_page"):
-            self.pipeline_page.run_button.setEnabled(not running)
         # Step 3 may run on the DAQ instead of the OSA, so its Run button is
         # gated on whichever detector it currently targets.
         self._refresh_step3_run_button()
 
     def _refresh_step3_run_button(self) -> None:
-        """Steps 3/3c read the DAQ, so their Run buttons are gated on the DAQ, not the OSA."""
-        for step in (3, "3c"):
-            widgets = getattr(self, "step_widgets", {}).get(step)
-            if not widgets or "run" not in widgets:
-                continue
-            if getattr(self, "_calibration_is_running", False):
-                widgets["run"].setEnabled(False)
-                continue
-            widgets["run"].setEnabled(
-                self.daq_controller is not None and self.daq_controller.is_connected
-            )
+        """Step 3c reads the DAQ, so its Run button is gated on the DAQ, not the OSA."""
+        widgets = getattr(self, "step_widgets", {}).get("3c")
+        if not widgets or "run" not in widgets:
+            return
+        if getattr(self, "_calibration_is_running", False):
+            widgets["run"].setEnabled(False)
+            return
+        widgets["run"].setEnabled(
+            self.daq_controller is not None and self.daq_controller.is_connected
+        )
 
     # ----- per-step config readers (GUI thread) -----
     def _step_settings(self, step: int) -> MeasurementSettings:
@@ -7951,64 +7658,6 @@ class MainWindow(QtWidgets.QMainWindow):
             }
 
         self._launch_calibration("Run step 2", work)
-
-    def _run_step3(self) -> None:
-        """Step 3 intensity calibration read from the DAQ bucket detector."""
-        daq = self._daq_ready()
-        if daq is None:
-            return
-        try:
-            mapping = self._resolve_step_input(3)
-            levels = self._step_levels(3)
-            window = self.step_widgets[3]["window"].value()
-            pad = self.step_widgets[3]["pad"].value()
-            stride = self.step_widgets[3]["stride"].value()
-            region = self._step_region(3)
-            daq_settings = self._step3_daq_settings()
-            channels_only = self.step_widgets[3]["channels_only"].isChecked()
-            if channels_only:
-                # Scan only the channel centres; stride subsamples coordinates,
-                # which no longer applies once the set is the channels themselves.
-                mapping = self._step3_channel_mapping(mapping, window, pad)
-                stride = 1
-        except ValueError as exc:
-            return self._reject_calibration(exc)
-        out_json = self._resolve_output_path(self.step_widgets[3]["out"].text(), 3)
-        out_csv = self._resolve_output_path(
-            self.step_widgets[3]["out_csv"].text(), 3, ".csv"
-        )
-        controller = self._controller()
-        daq.configure_monitor(daq_settings)
-        read_timeout = max(30.0, daq_settings.duration * 3.0 + 10.0)
-        scan_desc = (
-            f"{mapping.coordinates.size} channels"
-            if channels_only
-            else f"stride {stride}"
-        )
-        self._log(
-            f"Step 3 (DAQ) started: {len(levels)} levels, window {window} px, "
-            f"{scan_desc}, "
-            f"{daq_settings.channel} @ {daq_settings.sample_rate:g} S/s, "
-            f"avg {daq_settings.duration:g}s"
-        )
-        noun = "channels" if channels_only else "coordinates"
-
-        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
-            result = intensity_calibration_daq(
-                daq, controller, levels, mapping,
-                window_size=window, coordinate_stride=stride, region=region,
-                read_timeout=read_timeout,
-                stop_event=stop_event, progress_callback=report,
-            )
-            save_calibration_result(result, out_json)
-            csv_path = write_intensity_calibration_csv(result, out_csv)
-            return {
-                "status": "ok", "step": 3, "result": result, "saved": out_json,
-                "csv": csv_path,
-                "summary": f"{result.coordinates.size} {noun}",
-            }
-
-        self._launch_calibration("Run step 3 (DAQ)", work)
 
     def _run_step3c(self) -> None:
         """Step 3c: the DAQ intensity sweep over Step-3b-style channel centres."""
@@ -8464,80 +8113,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._launch_calibration("Stage 3 re-optimization", work)
         self.edge_gain_stop_event = self.calibration_stop_event
 
-    def _run_all(self) -> None:
-        osa = self._osa_ready()
-        if osa is None:
-            return
-        try:
-            s1 = self._step_settings(1)
-            levels1 = self._step_levels(1)
-            s2 = self._step_settings(2)
-            window2 = self.step_widgets[2]["window"].value()
-            peak_nm = self.step_widgets[2]["peak_nm"].value() or None
-            stride2 = self.step_widgets[2]["stride"].value()
-            sweep_nm2 = self.step_widgets[2]["sweep_nm"].value() or None
-            min_wl2 = self.step_widgets[2]["min_wl"].value() or None
-            max_wl2 = self.step_widgets[2]["max_wl"].value() or None
-            region2 = self._step_region(2)
-            s3 = self._step_settings(3)
-            levels3 = self._step_levels(3)
-            window3 = self.step_widgets[3]["window"].value()
-            avg_nm = self.step_widgets[3]["avg_nm"].value() or None
-            sweep_nm = self.step_widgets[3]["sweep_nm"].value() or None
-            stride = self.step_widgets[3]["stride"].value()
-            refine = self.step_widgets[3]["refine"].isChecked()
-            region3 = self._step_region(3)
-        except ValueError as exc:
-            return self._reject_calibration(exc)
-        out1 = self._resolve_output_path(self.step_widgets[1]["out"].text(), 1)
-        out2 = self._resolve_output_path(self.step_widgets[2]["out"].text(), 2)
-        out3 = self._resolve_output_path(self.step_widgets[3]["out"].text(), 3)
-        out_csv = self._resolve_output_path(
-            self.step_widgets[3]["out_csv"].text(), 3, ".csv"
-        )
-        controller = self._controller()
-        self._log("Run all started (steps 1 -> 2 -> 3)")
-
-        def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
-            _mn, _mx, min_level, max_level, _rec = find_min_max_intensity_levels(
-                osa, controller, levels1, s1,
-                stop_event=stop_event, progress_callback=report,
-            )
-            seed = CalibrationResult(
-                wavelength=np.asarray([]), coordinates=np.asarray([]),
-                max_level=max_level, min_level=min_level,
-                level_range=np.asarray(levels1, dtype=int),
-            )
-            save_calibration_result(seed, out1)
-            wl_result = wavelength_calibration(
-                osa, controller, [], s2, seed,
-                window_size=window2, peak_half_window_nm=peak_nm, region=region2,
-                coordinate_stride=stride2,
-                sweep_span_nm=sweep_nm2, min_peak_wavelength_nm=min_wl2,
-                max_peak_wavelength_nm=max_wl2,
-                stop_event=stop_event, progress_callback=report,
-            )
-            save_calibration_result(wl_result, out2)
-            final = intensity_calibration(
-                osa, controller, levels3, s3, wl_result,
-                window_size=window3, wavelength_window_nm=avg_nm,
-                sweep_span_nm=sweep_nm, coordinate_stride=stride,
-                refine_wavelength=refine, region=region3,
-                stop_event=stop_event, progress_callback=report,
-            )
-            save_calibration_result(final, out3)
-            csv_path = write_intensity_calibration_csv(final, out_csv)
-            return {
-                "status": "ok", "step": "all", "result": final, "saved": out3,
-                "csv": csv_path,
-                "summary": (
-                    f"min {min_level}, max {max_level}, "
-                    f"{final.coordinates.size} coordinates"
-                ),
-            }
-
-        self._launch_calibration("Run all", work)
-
     def _launch_calibration(
         self,
         label: str,
@@ -8611,10 +8186,8 @@ class MainWindow(QtWidgets.QMainWindow):
         summary = payload.get("summary", "")
         saved = payload.get("saved")
         self.calibration_result = result
-        # a fresh Step-2 result enables the "memory" channel-map source
-        self._update_channel_map_button()
 
-        if step in (1, 2, 3, "3c"):
+        if step in (1, 2, "3c"):
             self.step_widgets[step]["status"].setText(f"Done \N{MIDDLE DOT} {summary}")
             out_edit = self.step_widgets[step]["out"]
             if saved is not None and not out_edit.text().strip():
@@ -8687,9 +8260,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if saved is not None:
             self._log(f"Saved {saved}")
 
-        if step == "all":
-            label = "Run all"
-        elif step == "stage3_reopt":
+        if step == "stage3_reopt":
             label = "Stage 3 re-optimization"
         elif step == "fast_channels":
             label = "Fast channel calibration"

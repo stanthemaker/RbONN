@@ -117,7 +117,7 @@ jitter.  A level's sigma is therefore built from that scatter::
 
 ``trace_std`` (the low-passed trace spread that v1 weights by) is kept only as a
 floor, so two repeats that happen to agree cannot manufacture an infinite
-weight.  :data:`~calibration_module.sigma.STD_FLOOR_V` is the systematic floor
+weight.  :data:`~calibration_module.fit.sigma.STD_FLOOR_V` is the systematic floor
 on top of that: repeats average down statistical noise but not a systematic, and
 without it the all-off level -- the quietest read in the grid, since the trace
 spread scales as sqrt(signal) -- takes ~46% of the background block on its own.
@@ -161,11 +161,10 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
-from calibration_module.sigma import STD_FLOOR_V, floor_std  # noqa: E402
+from calibration_module.fit.sigma import STD_FLOOR_V, floor_std  # noqa: E402
 from daq_module import DAQMonitorSettings  # noqa: E402
-from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
+from calibration_module.measure.bench import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import load_calibration_result  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 
@@ -1254,7 +1253,7 @@ def save_combined_json(fits: list[PairV2Fit], out_path: str | Path,
     """Step-3 calibration + every v2 pair fit, in the schema step 7 reads.
 
     ``channels[].fit.{eta, eta_err, params.{a_x,q_x,a_w,q_w,d}.value}`` is the
-    contract :meth:`calibration_module.phase.PairModel.from_json_channel`
+    contract :meth:`calibration_module.fit.phase.PairModel.from_json_channel`
     parses, so step 7 consumes a v2 result with no change.  The v2-specific
     numbers (the slope, the fit window, both checks) ride alongside it.
     """

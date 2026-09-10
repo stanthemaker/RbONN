@@ -10,7 +10,7 @@ fitters and prints fitted-vs-truth::
     python src/calibration_module/steps/calib_synth_v1.py --seed 7    # different noise draw
 
 Outputs land in ``OUT_DIR`` as ``synth_truth_*.json`` (the ground truth),
-``synth_step6_*.csv`` (loads with ``calibration_module.pair.load_tpa_pair_csv``
+``synth_step6_*.csv`` (loads with ``calibration_module.fit.pair.load_tpa_pair_csv``
 and with ``calib_step6_v2.py <csv>``) and ``synth_step7_*.csv`` (loads with
 ``calib_step7_v2.py <csv>``).
 
@@ -95,8 +95,8 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from calibration_module.pair import load_tpa_pair_csv  # noqa: E402
-from calibration_module.phase import (  # noqa: E402
+from calibration_module.fit.pair import load_tpa_pair_csv  # noqa: E402
+from calibration_module.fit.phase import (  # noqa: E402
     PairModel,
     fit_beta2,
     load_phase_csv,

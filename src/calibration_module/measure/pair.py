@@ -8,7 +8,7 @@ not use it -- they compose the SLM and DAQ calls themselves, which is the
 pattern the rebuilt calibration pipeline should follow.  Nothing new should
 import from here; delete this module once GUI Step 6 / ``pipeline._run_pair_eta`` is rebuilt.
 
-The physics lives in :mod:`calibration_module.pair`.
+The physics lives in :mod:`calibration_module.fit.pair`.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .pair import (
+from ..fit.pair import (
     ChannelPairGrid,
     TPAPairResult,
     build_pair_points,

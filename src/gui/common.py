@@ -1,6 +1,6 @@
 """Shared GUI plumbing: thread-pool workers + the live progress dialog.
 
-Extracted from app.py so page modules (e.g. pipeline_page) can use them
+Extracted from app.py so page modules can use them
 without importing the (huge) main-window module and creating an import cycle.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from ..calibration.calibration_new import CalibrationProgress
+from slm_module.calibration.calibration_new import CalibrationProgress
 
 
 def _format_duration(seconds: float) -> str:

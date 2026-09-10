@@ -26,7 +26,7 @@ class EncodingChannel:
     #               Full scale is the fitted Delta = pi rather than the curve's
     #               argmax, every level is informed by all the swept points rather
     #               than the two bracketing it, and `v` means sin^2(Delta/2)
-    #               exactly -- the same relation calibration_module.phase.phi_half
+    #               exactly -- the same relation calibration_module.fit.phase.phi_half
     #               assumes downstream.
     #   "interp" -- linear interpolation on the measured curve (the original
     #               behaviour, kept for comparison).
@@ -93,7 +93,7 @@ class EncodingChannel:
         """Invert the fitted sin^2 transfer model -- see :mod:`.calibration.transfer`.
 
         ``sin^2(Delta/2) = val`` gives ``Delta = 2 asin(sqrt(val))``, exactly
-        the retardance ``calibration_module.phase.phi_half`` assumes for a
+        the retardance ``calibration_module.fit.phase.phi_half`` assumes for a
         channel commanded at ``val``; the linear ``Delta(L)`` then gives the
         level.  So the amplitude this writes and the phase the step-6/7/8 model
         assumes come from one fit, which interpolation cannot promise.

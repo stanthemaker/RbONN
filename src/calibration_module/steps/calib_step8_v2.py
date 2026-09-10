@@ -19,7 +19,7 @@ the two simplest cases, measures, and prints the difference:
 
 Nothing is fitted to the new data; ``diff = meas - pred`` and
 ``pull = diff / std`` are the whole result -- ``std`` being the spread of the
-low-passed trace with ``calibration_module.sigma.STD_FLOOR_V`` in quadrature,
+low-passed trace with ``calibration_module.fit.sigma.STD_FLOOR_V`` in quadrature,
 the one uncertainty these drafts carry.  The floor matters most here: a
 two-pair block driven to a null reads near zero, where the trace spread alone
 collapses and an ordinary 0.2 mV miss would print as a 3-sigma failure.
@@ -41,7 +41,7 @@ correctly.
 
 Sign.  There is no ``--flip`` here, and there must not be.  The transimpedance
 amplifier puts out a NEGATIVE voltage for light, and that is undone exactly once
-for the whole calibration, in ``draft_hw.read_point`` (``INVERT = True``), which
+for the whole calibration, in ``bench.read_point`` (``INVERT = True``), which
 every step reads through -- so ``read_point`` already hands this script a
 positive light signal.  The old ``--flip`` negated it a SECOND time, writing a
 CSV of negative means against a positive dark; that is what happened on the 0903
@@ -50,7 +50,7 @@ now checks the sign of its first driven read and aborts if it comes out
 negative, and :func:`load_csv` refuses a CSV whose dark-subtracted signal is
 negative, rather than silently comparing an inverted measurement against the
 forward model.  If the rig's amplifier polarity ever really does change, flip
-``draft_hw.INVERT`` -- the one place that owns it.
+``bench.INVERT`` -- the one place that owns it.
 """
 from __future__ import annotations
 
@@ -65,13 +65,12 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
-from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
+from calibration_module.measure.bench import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
-from calibration_module.sigma import STD_FLOOR_V, floor_std  # noqa: E402
-from calibration_module.phase import (  # noqa: E402
+from calibration_module.fit.sigma import STD_FLOOR_V, floor_std  # noqa: E402
+from calibration_module.fit.phase import (  # noqa: E402
     load_comb_phase_json,
     load_pair_models,
     phi_half,
@@ -342,7 +341,7 @@ def load_csv(path):
 def _check_sign(path, blocks) -> None:
     """Refuse a CSV whose dark-subtracted signal is negative (double-negated).
 
-    ``draft_hw.read_point`` already inverts the TIA's negative-for-light output,
+    ``bench.read_point`` already inverts the TIA's negative-for-light output,
     so a well-collected CSV has ``mean - dark > 0`` everywhere.  Taken as a
     median over all points, so one noisy near-dark row cannot trip it.  The
     forward model predicts a positive intensity; compared against a negated
@@ -356,7 +355,7 @@ def _check_sign(path, blocks) -> None:
     raise ValueError(
         f"{path}: dark-subtracted signal is NEGATIVE (median {med * 1e3:.4f} "
         f"mV), so this CSV was collected with the sign inverted twice -- once "
-        f"in draft_hw.read_point (INVERT = True, which is correct) and once "
+        f"in bench.read_point (INVERT = True, which is correct) and once "
         f"more by the retired --flip. Re-collect it, or negate voltage_mean_v "
         f"and dark_v to undo the second inversion."
     )
@@ -551,7 +550,7 @@ def measure(*, methods: tuple[str, ...]) -> None:
     prediction; the CSV keeps only raw data (+ that prediction as ``pred_v``),
     so it can be re-compared offline against any stored step-7 spectrum.
 
-    No sign handling of its own: ``draft_hw.read_point`` already inverts the
+    No sign handling of its own: ``bench.read_point`` already inverts the
     TIA's negative-for-light output, so what arrives here is the positive light
     signal.  The first driven read is checked against that and the run aborts if
     it comes in below the dark -- an hour of driving is not worth spending on
@@ -603,7 +602,7 @@ def measure(*, methods: tuple[str, ...]) -> None:
                     raise RuntimeError(
                         f"first driven read is BELOW the dark "
                         f"({(mean_v - dark) * 1e3:+.4f} mV): the light signal "
-                        f"is arriving negative. draft_hw.read_point already "
+                        f"is arriving negative. bench.read_point already "
                         f"inverts the TIA (INVERT = True), so check the "
                         f"amplifier polarity and that the beam is on -- do not "
                         f"negate it a second time here."
@@ -632,10 +631,10 @@ def main(argv: list[str] | None = None) -> int:
         # Retired, and refused rather than ignored: it double-negated a signal
         # read_point had already un-inverted, and a run collected with it looks
         # fine until the residuals come back huge.
-        print("ERROR: --flip is gone. draft_hw.read_point already inverts the "
+        print("ERROR: --flip is gone. bench.read_point already inverts the "
               "TIA's negative-for-light output (INVERT = True), so --flip "
               "negated it a second time and wrote a CSV of negative means. If "
-              "the amplifier polarity really did change, flip draft_hw.INVERT.")
+              "the amplifier polarity really did change, flip bench.INVERT.")
         return 2
     methods = tuple(m for m in ("bounded", "fix") if f"--{m}" in argv) or (PHASE_METHOD,)
     positional = [a for a in argv if not a.startswith("-")]

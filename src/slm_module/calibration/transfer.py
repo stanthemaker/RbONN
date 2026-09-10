@@ -31,7 +31,7 @@ Why fit at all
    pools 36 points, so a level comes from the whole curve rather than from the
    two samples that happen to bracket the target.
 3. **The delivered phase disagreed with the phase the fits assume.**
-   :func:`calibration_module.phase.phi_half` takes ``phi/2 = asin(sqrt(v))``,
+   :func:`calibration_module.fit.phase.phi_half` takes ``phi/2 = asin(sqrt(v))``,
    i.e. that the commanded ``v`` *is* ``sin^2(Delta/2)``.  Interpolating raw
    samples between an argmin and an argmax does not make that true: on the 0903
    channels the retardance actually delivered ran up to 15 deg from the assumed

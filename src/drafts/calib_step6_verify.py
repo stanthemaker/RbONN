@@ -390,7 +390,7 @@ def _ref_etas() -> dict[int, float]:
         print(f"(REF_STEP6 not found, expected value left blank: {path})")
         return {}
     try:
-        from calibration_module.phase import load_pair_models
+        from calibration_module.fit.phase import load_pair_models
         return {k: float(m.eta) for k, m in load_pair_models(path).items()}
     except Exception as exc:                 # noqa: BLE001 -- a cosmetic input only
         print(f"(REF_STEP6 unreadable, expected value left blank: {exc})")
