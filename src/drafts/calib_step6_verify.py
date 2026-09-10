@@ -61,6 +61,7 @@ the slope fit correctly refuses it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib.util
 import json
 import sys
@@ -84,6 +85,12 @@ Grid = tuple[tuple[float, float, int], ...]
 # quietly lose members on an offline re-check while the live run kept them.
 # 6 dp is also what ``average_levels`` and :func:`_key` index on.
 LEVEL_DP = 6
+
+
+from calibration_module.measure.pair_v2 import (  # noqa: E402
+    build_schedule,
+    measure_pair,
+)
 
 
 def _load_step6():
@@ -272,28 +279,56 @@ def validate_checks() -> None:
             )
 
 
-def _push_config() -> None:
-    """Rebind step 6's module constants to this draft's.
+def _config():
+    """The estimator config this check runs under: step 6's, with our overrides.
 
-    Everything borrowed from step 6 reads these at CALL time, so rebinding after
-    import is enough -- the mechanism ``calib_step6-8_v2.py`` already relies on.
+    ``replace`` rather than a fresh :class:`PairV2Config` so everything this
+    draft does not own -- ``fit_q`` and the ``params_bg`` derived from it above
+    all -- is *inherited* from step 6 and cannot silently disagree with it.
+    That was the point of the old rebinding dance; a frozen config does it
+    without mutating another module.
+
+    ``verify_enabled`` / ``verify_grid`` matter only to the level table's tag --
+    nothing here calls ``on_cross_line`` -- but a check level should still print
+    as "verify+" and not as "cross".
+    """
+    return replace(
+        s6.CONFIG,
+        encoding_method=ENCODING_METHOD,
+        pair_index_base=PAIR_INDEX_BASE,
+        product_checks=PRODUCT_CHECKS,
+        verify_enabled=True,
+        verify_grid=check_grid(),
+    )
+
+
+def _acq():
+    """Acquisition timing: step 6's, with this draft's windows and range."""
+    return replace(
+        s6.ACQ,
+        t_single_s=T_SINGLE_S, t_both_s=T_BOTH_S, settle_s=SETTLE_S,
+        range_v=DAQ_RANGE_V, range_wide_v=DAQ_RANGE_WIDE_V,
+        near_rail_frac=DAQ_NEAR_RAIL_FRAC,
+    )
+
+
+def _push_config() -> None:
+    """Rebind the step-6 script's remaining module constants to this draft's.
+
+    Only the *script-level* ones are left: paths, pair list and device numbers,
+    which ``s6._load_layout`` reads at call time.  The estimator's parameters no
+    longer live on the module at all -- they are in :func:`_config` -- so this
+    can no longer reach into the fit by accident.
+
     ``IN_STEP3`` is set explicitly alongside ``CALIB_PATH``: it is a fully
     resolved Path by import time, so setting the directory alone would leave it
     pointing at step 6's own step-3 file.
-
-    ``FIT_Q`` and ``PARAMS_BG`` are deliberately NOT rebound -- see the module
-    docstring.
     """
-    for name in ("CALIB_PATH", "IN_STEP3", "ENCODING_METHOD", "PAIR_INDEX_BASE",
-                 "PAIR_INDICES", "SLM_DISPLAY_NO", "USB_SLM_NO",
-                 "DAQ_DEVICE", "DAQ_CHANNEL", "T_SINGLE_S", "T_BOTH_S", "SETTLE_S",
-                 "DAQ_RANGE_V", "DAQ_RANGE_WIDE_V", "DAQ_NEAR_RAIL_FRAC",
-                 "PRODUCT_CHECKS"):
+    for name in ("CALIB_PATH", "IN_STEP3", "PAIR_INDICES",
+                 "SLM_DISPLAY_NO", "USB_SLM_NO", "DAQ_DEVICE", "DAQ_CHANNEL"):
         setattr(s6, name, globals()[name])
-    # Only the level table's tag reads these -- nothing here calls on_cross_line
-    # -- but a check level should still print as "verify+" and not as "cross".
-    s6.VERIFY_ENABLED = True
-    s6.VERIFY_GRID = check_grid()
+    s6.CONFIG = _config()
+    s6.ACQ = _acq()
 
 
 # ======================================================================
@@ -311,7 +346,7 @@ def _shell_fit(index: int, levels, bg, bg_cov, b: float):
     nan = float("nan")
     eta = float(np.sqrt(b)) if np.isfinite(b) and b > 0 else nan
     return s6.PairV2Fit(
-        index=index, levels=levels, bg=bg, bg_cov=bg_cov,
+        index=index, cfg=_config(), levels=levels, bg=bg, bg_cov=bg_cov,
         fit_w=np.zeros(0), fit_d=np.zeros(0),
         fit_sigma=np.zeros(0), fit_pred=np.zeros(0),
         b=b, b_err=nan, beta0=nan, beta0_err=nan,
@@ -322,7 +357,7 @@ def _shell_fit(index: int, levels, bg, bg_cov, b: float):
 
 def check_pair(index: int, levels, *, b: float = float("nan")):
     """Fit the background block, then run :func:`verify_product` against it."""
-    bg, bg_cov = s6.fit_background(levels)
+    bg, bg_cov = s6.fit_background(levels, _config())
     fit = _shell_fit(index, levels, bg, bg_cov, b)
     fit.checks = {"product": s6.verify_product(fit)}
     return fit
@@ -417,11 +452,12 @@ def _report_levels(fit) -> None:
 def _report_background(fit) -> None:
     """The single-beam fit that gets subtracted, and whether it fits."""
     n_bg = sum(1 for L in fit.levels if L.block != "cross")
-    dof = n_bg - len(s6.PARAMS_BG)
+    params_bg = fit.cfg.params_bg
+    dof = n_bg - len(params_bg)
     shape = "saturated" if dof == 0 else f"{dof} dof"
-    print(f"\n  Background block ({n_bg} levels, {len(s6.PARAMS_BG)} parameters "
+    print(f"\n  Background block ({n_bg} levels, {len(params_bg)} parameters "
           f"-> {shape}) -- this is what gets subtracted:")
-    for name in s6.PARAMS_BG:
+    for name in params_bg:
         v, e = fit.bg[name]
         scale, unit = (1e3, "mV") if name == "d" else (1.0, "")
         print(f"    {name:<3} = {v*scale:.4e} +/- {e*scale:.3e} {unit}".rstrip())
@@ -690,8 +726,8 @@ def save_json(fits: list, out_path: str | Path,
         "version": 2,
         "kind": "step6-verify",
         "borrows": "calib_step6_v2.fit_background + calib_step6_v2.verify_product",
-        "fit_q": s6.FIT_Q,
-        "params_bg": list(s6.PARAMS_BG),
+        "fit_q": _config().fit_q,
+        "params_bg": list(_config().params_bg),
         "bg_grid": [{"x": x, "w": w, "n": n} for x, w, n in BG_GRID],
         "check_grid": [{"x": x, "w": w, "n": n} for x, w, n in check_grid()],
         "product_checks": [[list(pt) for pt in group] for group in PRODUCT_CHECKS],
@@ -827,7 +863,7 @@ def _run_sweep(check_after: bool) -> None:
     _print_inputs()
     grid = measure_grid()
     layout = s6._load_layout()                             # noqa: SLF001
-    schedule = s6.build_schedule(grid)
+    schedule = build_schedule(_config(), grid)
     _print_plan(grid, schedule)
 
     slm = s6.connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
@@ -837,8 +873,10 @@ def _run_sweep(check_after: bool) -> None:
     try:
         for index in PAIR_INDICES:
             print(f"\n=== Sweep: pair {index} ===")
-            rows_by_pair[index] = s6._measure_pair(        # noqa: SLF001
-                slm, daq, layout, index, schedule)
+            rows_by_pair[index] = measure_pair(
+                daq, slm, layout, index, schedule,
+                cfg=_config(), acq=_acq(),
+                progress_callback=lambda p: print(p.line()), log=print)
     finally:
         slm.close_slm()
         daq.disconnect()

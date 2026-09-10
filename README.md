@@ -11,7 +11,9 @@ running. Nothing marked **legacy** or **dead** should be imported from new code.
 |------|------|
 | `src/calibration_module/fit/` | calibration physics — models, fits, file formats. Imports no driver, so it can be run against saved CSVs with the bench powered down. |
 | `src/calibration_module/measure/` | acquisition — drives the SLM, DAQ and OSA and returns rows. Does no fitting. |
-| `src/calibration_module/steps/calib_step6_v2.py` | **current** step 6 — the difference estimator (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`), 31 acquisitions over 10 repeated levels. Self-contained: it fits in-module and does not import `fit/pair.py`. |
+| `src/calibration_module/fit/pair_v2.py` | **current** step 6 estimator — the difference fit (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`) over 31 acquisitions on 10 repeated levels, plus 6 verification levels. Driver-free: `tests/test_pair_v2.py` runs the whole estimator off a committed CSV with no fake instrument. `PairV2Config` carries what a fit was specified with, so two configurations can coexist in one process. |
+| `src/calibration_module/measure/pair_v2.py` | step 6 acquisition — one pair's interleaved schedule, the near-rail ±0.1 → ±0.2 V escalation and the TIA sign convention. Takes the monitor as an argument and accepts `progress_callback`/`stop_event`, so the script and the GUI share it. |
+| `src/calibration_module/steps/calib_step6_v2.py` | the step 6 runner (287 lines) — constants, then load layout → `measure.pair_v2` → `fit.pair_v2` → CSV/JSON/PNG. Holds no physics. |
 | `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Steps 7 and 8 still run on v1; step 6 v1 is kept for the joint-fit comparison and to re-fit historical CSVs. |
 | `src/calibration_module/measure/bench.py` | SLM/DAQ connection helpers shared by the step scripts |
 | `src/{daq,osa,scope,heater}_module/`, `src/slm_module/{controller,driver,encoding,generator}` | instrument drivers and pattern encoding |

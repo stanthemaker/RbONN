@@ -14,8 +14,10 @@ quietly stops testing the physics.
     fit/      arrays of commanded levels and measured volts in, fitted
               parameters out.  Imports no driver, and should not start.
 
-        pair      step 6 -- per-pair TPA efficiency eta, from the reduced x/w
-                  curves
+        pair_v2   step 6 -- per-pair TPA efficiency eta from the difference
+                  estimator; carries the PairV2Config it was fitted under
+        pair      step 6 v1 -- the joint grid fit pair_v2 replaced, still
+                  behind GUI Step 6 until the v2 rebuild reaches it
         phase     steps 7 + 8 -- comb phase dPhi_comb, and the forward model
                   built from the step-6 pair fits
         center    centre-wavelength scan -- weighted quadratic vertex fit
