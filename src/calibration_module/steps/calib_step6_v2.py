@@ -1,11 +1,21 @@
 """Step 6 v2 -- per-pair TPA efficiency eta from the DIFFERENCE estimator.
 
-Needs real hardware for the sweep; the refit path is offline::
+Needs real hardware for the sweep; the refit path is offline.  Either way
+``--step3`` is required and has no default::
 
-    python src/calibration_module/steps/calib_step6_v2.py            # sweep, fit, plot
-    python src/calibration_module/steps/calib_step6_v2.py --meas     # raw CSV only, no fit
-    python src/calibration_module/steps/calib_step6_v2.py some.csv   # re-fit a CSV offline
-    python src/calibration_module/steps/calib_step6_v2.py some.csv --anchor   # + D(0) in the fit
+    S=src/calib_data/run_0908_1444/calib_step3c_0907_1358_pad10.json
+    python src/calibration_module/steps/calib_step6_v2.py --step3 $S
+    python src/calibration_module/steps/calib_step6_v2.py --step3 $S --meas
+    python src/calibration_module/steps/calib_step6_v2.py --step3 $S some.csv
+    python src/calibration_module/steps/calib_step6_v2.py --step3 $S some.csv --anchor
+
+There is deliberately no default step-3 path.  It used to be a constant edited
+by hand, which meant the file it named drifted out from under the script every
+time a run was filed away -- and every level here is *encoded through* that
+calibration, so a run against the wrong one does not fail, it silently
+calibrates a different aperture.  Naming it per run is the only version of this
+that cannot go quietly wrong.  The GUI has no such problem: it passes the
+calibration it already built its layout from.
 
 The underlying physics is unchanged from v1::
 
@@ -46,6 +56,7 @@ in the schema step 7 already reads (``PairModel.from_json_channel``).
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -81,7 +92,9 @@ from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 CALIB_PATH = REPO_ROOT / "src/calib_data"   # data directory: inputs + outputs live here
 
 PAIR_INDICES = [2, 3, 4, 5, 6]              # pair labels to calibrate
-IN_STEP3 = CALIB_PATH / "calib_step3c_0907_1358_pad10.json"   # Step 3 calib
+
+# The Step-3 calibration is NOT here -- it is the required --step3 argument.
+# See the module docstring for why it has no default.
 
 # The estimator's setup.  Every field has the validated default (see
 # PairV2Config); name one here only to change it.  Keep pair_index_base in step
@@ -116,7 +129,7 @@ DAQ_CHANNEL = "ai0"
 # inputs
 # ======================================================================
 
-def _load_layout():
+def _load_layout(step3: Path):
     """Load the Step-3 calibration -> channel layout, validating PAIR_INDICES.
 
     The Step-3b/3c rows ARE the channels, so the layout is loaded verbatim (the
@@ -128,13 +141,11 @@ def _load_layout():
     too: pair ``i`` is the ``CONFIG.slot(i)``-th channel of the Step-3
     calibration.
     """
-    if not IN_STEP3.is_file():
-        raise FileNotFoundError(
-            f"Step-3 calibration not found: {IN_STEP3}\n"
-            f"(CALIB_PATH is the calib_data directory; IN_STEP3 is the JSON in it.)"
-        )
+    step3 = Path(step3)
+    if not step3.is_file():
+        raise FileNotFoundError(f"Step-3 calibration not found: {step3}")
     layout = channel_layout_from_calibration(
-        load_calibration_result(IN_STEP3), method=CONFIG.encoding_method
+        load_calibration_result(step3), method=CONFIG.encoding_method
     )
     for pi in PAIR_INDICES:
         if not (0 <= CONFIG.slot(pi) < layout.n_channels):
@@ -168,9 +179,10 @@ def _pair_wavelengths(layout, index: int) -> tuple[float, float, float]:
 # the run
 # ======================================================================
 
-def _run_sweep(fit_after: bool, *, include_anchor: bool = False) -> None:
+def _run_sweep(step3: Path, fit_after: bool, *, include_anchor: bool = False) -> None:
     """Drive every pair's interleaved schedule; optionally fit, plot and save."""
-    layout = _load_layout()
+    layout = _load_layout(step3)
+    print(f"Step 3 in: {step3}")
     schedule = build_schedule(CONFIG)
     secs = run_seconds(schedule, ACQ)
     n_verify = len(CONFIG.verify_grid) if CONFIG.verify_enabled else 0
@@ -214,11 +226,12 @@ def _run_sweep(fit_after: bool, *, include_anchor: bool = False) -> None:
     print(f"\nSaved {n_rows} rows to {csv_path}")  # raw rows on disk BEFORE fitting
     if not fit_after:
         return
-    _fit_and_save(rows_by_pair, stamp, layout=layout, include_anchor=include_anchor)
+    _fit_and_save(rows_by_pair, stamp, step3, layout=layout,
+                  include_anchor=include_anchor)
 
 
-def _fit_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None,
-                  include_anchor: bool = False) -> None:
+def _fit_and_save(rows_by_pair: dict[int, list], stamp: str, step3: Path, *,
+                  layout=None, include_anchor: bool = False) -> None:
     """Fit every pair, print the report, write the combined JSON and the plots."""
     fits: list[PairV2Fit] = []
     for index in sorted(rows_by_pair):
@@ -240,7 +253,7 @@ def _fit_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None,
 
     center_wl = float(getattr(layout, "center_wl", 0.0)) if layout is not None else 0.0
     json_path = CALIB_PATH / f"calib_step6v2_result_{stamp}.json"
-    save_combined_json(fits, json_path, step3=IN_STEP3, center_wl=center_wl)
+    save_combined_json(fits, json_path, step3=step3, center_wl=center_wl)
     print(f"\nSaved Step-3 calib + Step-6 v2 fits -> {json_path}")
     for fit in fits:
         plot_path = json_path.with_name(f"calib_step6v2_pair{fit.index}_{stamp}.png")
@@ -248,38 +261,61 @@ def _fit_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None,
         print(f"Plot saved to {plot_path}")
 
 
-def fit_csv(path: str | Path, *, include_anchor: bool = False) -> None:
+def fit_csv(path: str | Path, step3: Path, *, include_anchor: bool = False) -> None:
     """Re-fit an already-recorded v2 CSV offline (no hardware).
 
     Writes the same combined JSON and per-pair PNGs as the hardware run, under
-    a fresh timestamp so a refit never clobbers an earlier result.  The Step-3
-    layout is loaded when available (for the wavelength columns) but is not
-    required -- the fit itself needs only the CSV.
+    a fresh timestamp so a refit never clobbers an earlier result.  ``step3`` is
+    required even here: the fit itself needs only the CSV, but the combined
+    result *embeds* the calibration so step 7 can read both from one file, and
+    a result written without it would not be loadable downstream.  A step-3 file
+    that fails to parse still leaves the fit runnable, with NaN wavelengths.
     """
     rows_by_pair = load_meas_csv(path)
     n = sum(len(v) for v in rows_by_pair.values())
     print(f"Loaded {path}: {len(rows_by_pair)} pair(s), {n} acquisitions")
+    print(f"Step 3 in: {step3}")
     if include_anchor:
         print("Anchor: D(0) included as a fitted point (intercept pinned on data).")
     try:
-        layout = _load_layout()
+        layout = _load_layout(step3)
     except (FileNotFoundError, ValueError) as exc:
         print(f"(layout unavailable, wavelengths left as NaN: {exc})")
         layout = None
-    _fit_and_save(rows_by_pair, time.strftime("%m%d_%H%M"),
+    _fit_and_save(rows_by_pair, time.strftime("%m%d_%H%M"), step3,
                   layout=layout, include_anchor=include_anchor)
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    flags = {"--meas", "-m", "--anchor"}
-    include_anchor = "--anchor" in argv
-    positional = [a for a in argv if a not in flags]
-    if positional:                      # a CSV path -> offline re-fit, no hardware
-        fit_csv(positional[0], include_anchor=include_anchor)
+    parser = argparse.ArgumentParser(
+        prog="calib_step6_v2.py",
+        description="Step 6 v2 -- per-pair TPA efficiency eta (difference estimator).",
+        epilog="--step3 has no default: every level is encoded through that "
+               "calibration, so running against the wrong one calibrates a "
+               "different aperture without failing.",
+    )
+    parser.add_argument(
+        "--step3", required=True, type=Path, metavar="JSON",
+        help="Step-3b/3c calibration the channel layout is built from (required)",
+    )
+    parser.add_argument(
+        "csv", nargs="?", type=Path,
+        help="re-fit this recorded measurement CSV offline instead of sweeping",
+    )
+    parser.add_argument(
+        "--meas", "-m", action="store_true",
+        help="sweep and write the raw CSV only; do not fit",
+    )
+    parser.add_argument(
+        "--anchor", action="store_true",
+        help="put the measured D(0) into the fit, pinning the intercept on data",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.csv is not None:            # offline re-fit, no hardware
+        fit_csv(args.csv, args.step3, include_anchor=args.anchor)
         return 0
-    _run_sweep(fit_after=not any(a in ("--meas", "-m") for a in argv),
-               include_anchor=include_anchor)
+    _run_sweep(args.step3, fit_after=not args.meas, include_anchor=args.anchor)
     return 0
 
 
