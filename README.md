@@ -14,6 +14,7 @@ running. Nothing marked **legacy** or **dead** should be imported from new code.
 | `src/calibration_module/fit/pair_v2.py` | **current** step 6 estimator — the difference fit (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`) over 31 acquisitions on 10 repeated levels, plus 6 verification levels. Driver-free: `tests/test_pair_v2.py` runs the whole estimator off a committed CSV with no fake instrument. `PairV2Config` carries what a fit was specified with, so two configurations can coexist in one process. |
 | `src/calibration_module/measure/pair_v2.py` | step 6 acquisition — one pair's interleaved schedule, the near-rail ±0.1 → ±0.2 V escalation and the TIA sign convention. Takes the monitor as an argument and accepts `progress_callback`/`stop_event`, so the script and the GUI share it. |
 | `src/calibration_module/steps/calib_step6_v2.py` | the step 6 runner (287 lines) — constants, then load layout → `measure.pair_v2` → `fit.pair_v2` → CSV/JSON/PNG. Holds no physics. |
+| `src/calibration_module/fit/pair.py` | step 6 **v1** — the joint 6-parameter grid fit `pair_v2` replaced. GUI Step 6 moved off it; only `calib_step6_v1.py` and `calib_synth_v1.py` still reach it, kept so a historical CSV can be re-fit both ways. |
 | `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Steps 7 and 8 still run on v1; step 6 v1 is kept for the joint-fit comparison and to re-fit historical CSVs. |
 | `src/calibration_module/measure/bench.py` | SLM/DAQ connection helpers shared by the step scripts |
 | `src/{daq,osa,scope,heater}_module/`, `src/slm_module/{controller,driver,encoding,generator}` | instrument drivers and pattern encoding |
@@ -29,7 +30,6 @@ once its GUI page is rebuilt.
 
 | Path | Kept alive by |
 |------|---------------|
-| `src/calibration_module/measure/pair.py` | Step 6 — [app.py:4855](src/gui/app.py#L4855) only |
 | `src/calibration_module/measure/phase.py` | Step 7 — [app.py:5302](src/gui/app.py#L5302) only |
 | `src/calibration_module/measure/center.py` | TPA centre scan — [app.py:5581](src/gui/app.py#L5581) only |
 | `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:7170](src/gui/app.py#L7170) still reach it. `phase_for_level` and `predict_intensity` are exported and called nowhere at all — not in `src/`, not in the tests. |

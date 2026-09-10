@@ -649,10 +649,22 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             channel_layout_from_calibration(bare)
 
 
-class MeasurePairGridsColRatioTests(unittest.TestCase):
+class MeasurePairColRatioTests(unittest.TestCase):
+    """The step-6 sweep must measure through the taper it will deploy.
+
+    A calibration driven through a flat band and then used behind a tapered one
+    is measuring a different aperture than it reports, so ``col_ratio`` reaching
+    the encoder on *every* acquisition is the property worth pinning.
+    """
+
     def test_col_ratio_forwarded_to_encode(self) -> None:
         from slm_module import encoding as encoding_module
-        from calibration_module.measure import pair as tpa_pair_module
+        from calibration_module.fit.pair_v2 import PairV2Config
+        from calibration_module.measure.pair_v2 import (
+            PairV2Acq,
+            build_schedule,
+            measure_pair,
+        )
 
         layout = _make_layout(width=15)
         ratio = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)
@@ -663,16 +675,18 @@ class MeasurePairGridsColRatioTests(unittest.TestCase):
             seen.append(kwargs.get("col_ratio"))
             return real(*args, **kwargs)
 
-        # measure_pair_grids does `from .encoding import encode_to_pattern` at
-        # call time, so patch the module attribute it will re-import. fit_grid is
-        # stubbed because the constant fake readings are a degenerate fit.
-        with mock.patch.object(encoding_module, "encode_to_pattern", recorder), \
-                mock.patch.object(tpa_pair_module, "fit_grid", lambda grid: None):
-            tpa_pair_module.measure_pair_grids(
-                _FakeMonitor(), _FakeSLM(), layout,
-                pair_indices=[0], sweep=[0.0, 1.0], settle=0.0, col_ratio=ratio,
+        cfg = PairV2Config(pair_index_base=1)
+        acq = PairV2Acq(settle_s=0.0, autorange=False)
+        schedule = build_schedule(cfg)
+        # measure_pair does `from slm_module.encoding import encode_to_pattern`
+        # at call time, so patch the module attribute it will re-import.
+        with mock.patch.object(encoding_module, "encode_to_pattern", recorder):
+            rows = measure_pair(
+                _FakeMonitor(), _FakeSLM(), layout, 1, schedule,
+                cfg=cfg, acq=acq, col_ratio=ratio,
             )
-        self.assertTrue(seen)                       # every grid point encoded
+        self.assertEqual(len(rows), len(schedule))  # one row per acquisition
+        self.assertEqual(len(seen), len(schedule))  # the SLM is rewritten for each
         self.assertTrue(all(c is ratio for c in seen))
 
 

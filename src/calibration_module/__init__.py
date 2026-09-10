@@ -16,8 +16,8 @@ quietly stops testing the physics.
 
         pair_v2   step 6 -- per-pair TPA efficiency eta from the difference
                   estimator; carries the PairV2Config it was fitted under
-        pair      step 6 v1 -- the joint grid fit pair_v2 replaced, still
-                  behind GUI Step 6 until the v2 rebuild reaches it
+        pair      step 6 v1 -- the joint grid fit pair_v2 replaced; only the
+                  v1 scripts still reach it
         phase     steps 7 + 8 -- comb phase dPhi_comb, and the forward model
                   built from the step-6 pair fits
         center    centre-wavelength scan -- weighted quadratic vertex fit

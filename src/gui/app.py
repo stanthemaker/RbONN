@@ -95,17 +95,23 @@ from slm_module.optimization import (
     run_osa_optimization_batch,
     validate_independent_profile,
 )
-from calibration_module.fit.pair import (
-    TPAPairResult,
-    build_sweep,
-    load_tpa_pair_csv,
-    save_tpa_pair_json,
-    write_tpa_pair_csv,
+from calibration_module.fit.pair_v2 import (
+    PairV2Config,
+    PairV2Fit,
+    average_levels,
+    fit_pair,
+    load_meas_csv,
+    save_combined_json,
+    save_plot,
+    write_meas_csv,
 )
-from calibration_module.measure.pair import (
-    TPAPairAborted,
-    TPAPairProgress,
-    measure_pair_grids,
+from calibration_module.measure.pair_v2 import (
+    PairV2Aborted,
+    PairV2Acq,
+    PairV2Progress,
+    build_schedule,
+    measure_pair,
+    run_seconds,
 )
 from calibration_module.fit.center import TPACenterResult, average_trace_points
 from calibration_module.measure.center import (
@@ -459,7 +465,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_result: ModulationErrorResult | None = None
         self.analysis_stop_event: threading.Event | None = None
         self._ana_capture_dir: str | None = None
-        self.tpa_result: TPAPairResult | None = None
+        # Step 6 keeps the raw rows beside the fits: a re-fit under a different
+        # config has to start from the measurement, not from a fitted result.
+        self.tpa_fits: list[PairV2Fit] = []
+        self.tpa_rows: dict[int, list] = {}
         self.tpa_stop_event: threading.Event | None = None
         self.tpa_phase_results: dict[int, PhaseResult] = {}
         self.tpa_phase_stop_event: threading.Event | None = None
@@ -4679,376 +4688,746 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ana_status.setText(msg)
 
     # ===================== TPA efficiency (eta) tab ==================
+    # ===================== TPA efficiency (step 6) tab ==================
+    #: Result-table columns.  Every one is a scalar per pair, which is what
+    #: makes ten pairs readable at once: the six diagnostic panels are all
+    #: per-pair and only ever show the selected row.
+    _TPA_COLUMNS = ("pair", "η", "±η", "a_x (mV)", "a_w (mV)",
+                    "d (mV)", "R²", "max|pull|", "checks")
+
     def _build_tpa_tab(self) -> QtWidgets.QWidget:
+        """Step 6 v2: controls on the left, results on the right.
+
+        A single horizontal split rather than the old vertical stack.  The page
+        has to carry a nine-control DAQ group, a sweep group and a per-pair
+        results table, and stacking those above the plots left the plots with
+        nothing.  Everything you touch is now in a narrow left column in the
+        order you touch it, ending at Run; everything you read has the rest of
+        the width and the full height.
+        """
         page = self._page_shell("Channel TPA Efficiency (η) Calibration")
         subtitle = QtWidgets.QLabel(
-            "For each channel pair the two sides x and w are swept "
-            "independently over a grid (with the x=0 / w=0 axes), all other "
-            "channels held off. The response is fit by weighted least squares to "
-            "Y = η²·(x·w) + a_x·x + q_x·x² + a_w·w + q_w·w² + d, so the "
-            "two-photon cross term η, the single-beam terms and the dark offset "
-            "are all recovered in one model — no separate background run. Reads "
-            "use whichever monitor (scope or DAQ) is connected."
+            "Step 6 v2 · the difference estimator. Along the cross line x = 1 "
+            "the w-only background is subtracted, D(w) = Y(1,w) − B̂(w) = "
+            "η²w + a_x, so η is the slope of a two-parameter line and the "
+            "single-beam terms cancel rather than being fitted alongside it. "
+            "The grid is fixed (37 acquisitions over 12 levels, repeats "
+            "interleaved) because the fit window and the verification levels are "
+            "specified against it. DAQ only."
         )
         subtitle.setObjectName("PageSubtitle")
         subtitle.setWordWrap(True)
         page.layout().addWidget(subtitle)
 
-        # --- sweep settings ---
-        cfg = self._panel("Sweep Settings")
-        grid = QtWidgets.QGridLayout(cfg)
-        self.tpa_pair_index = self._spin(0, 63, 0)
-        self.tpa_pair_index.setToolTip("Which channel pair (x[i], w[i]) to calibrate")
-        self.tpa_all_pairs = QtWidgets.QCheckBox("All pairs")
-        self.tpa_all_pairs.setToolTip("Sweep every pair (0..n-1) instead of just the index above")
-        self.tpa_sweep_min = QtWidgets.QDoubleSpinBox()
-        self.tpa_sweep_min.setRange(0.0, 1.0); self.tpa_sweep_min.setSingleStep(0.05)
-        self.tpa_sweep_min.setDecimals(2); self.tpa_sweep_min.setValue(0.30)
-        self.tpa_sweep_min.setToolTip("Minimum commanded per-side level (>0) in the ramp")
-        self.tpa_sweep_max = QtWidgets.QDoubleSpinBox()
-        self.tpa_sweep_max.setRange(0.0, 1.0); self.tpa_sweep_max.setSingleStep(0.05)
-        self.tpa_sweep_max.setDecimals(2); self.tpa_sweep_max.setValue(1.00)
-        self.tpa_sweep_max.setToolTip("Maximum commanded per-side level in the ramp")
-        self.tpa_points = self._spin(2, 15, 6)
-        self.tpa_points.setToolTip(
-            "Ramp points per side; the x=0 / w=0 axis is added automatically "
-            "→ (points+1)² grid cells"
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.addWidget(self._build_tpa_controls())
+        split.addWidget(self._build_tpa_results())
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([360, 1040])
+        page.layout().addWidget(split, 1)
+
+        self._tpa_update_plan()
+        self._tpa_redraw()
+        return page
+
+    def _build_tpa_controls(self) -> QtWidgets.QWidget:
+        """The left column: DAQ, sweep, plan, progress, buttons."""
+        col = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(col)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(12)
+
+        # --- DAQ acquisition --------------------------------------------
+        daq = self._panel("DAQ · acquisition")
+        grid = QtWidgets.QGridLayout(daq)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+
+        self.tpa_daq_channel = QtWidgets.QLineEdit("ai0")
+        self.tpa_daq_rate = QtWidgets.QDoubleSpinBox()
+        self.tpa_daq_rate.setRange(1.0, 2_000_000.0)
+        self.tpa_daq_rate.setDecimals(0)
+        self.tpa_daq_rate.setValue(1000.0)
+        self.tpa_daq_rate.setSuffix(" S/s")
+        self.tpa_daq_range = QtWidgets.QComboBox()
+        for lo, hi in self._DAQ_RANGES:
+            self.tpa_daq_range.addItem(f"\N{PLUS-MINUS SIGN}{hi:g} V", (lo, hi))
+        self.tpa_daq_range.setCurrentIndex(0)   # most sensitive; autorange escalates
+        self.tpa_daq_range.setToolTip(
+            "Default input range. \N{PLUS-MINUS SIGN}0.1 V is the board's most "
+            "sensitive and right for almost every level."
         )
-        # DAQ acquisition windows -- mirrored two-way with the DAQ Monitor
-        # panel on the TPA Encoder page (same setting, shown in both places)
-        self.tpa_tboth = self._double_spin(0.001, 10.0, 3.0, " s", 3)
+        self.tpa_daq_fcut = QtWidgets.QDoubleSpinBox()
+        self.tpa_daq_fcut.setRange(0.1, 100_000.0)
+        self.tpa_daq_fcut.setDecimals(1)
+        self.tpa_daq_fcut.setValue(20.0)
+        self.tpa_daq_fcut.setSuffix(" Hz")
+        self.tpa_daq_fcut.setToolTip(
+            "Detector 3 dB bandwidth: the low-pass behind the reported mean and "
+            "std. That std is the sigma the fit weights by."
+        )
+        self.tpa_settle = self._double_spin(0.0, 10.0, 0.25, " s", 3)
+        self.tpa_settle.setToolTip(
+            "Wait after each SLM pattern change, before reading."
+        )
+        # T_both / T_single keep their names: the DAQ Monitor page two-way binds
+        # to these two spinboxes, so both views stay one setting (_bind_spins).
+        self.tpa_tboth = self._double_spin(0.001, 30.0, 8.0, " s", 3)
         self.tpa_tboth.setToolTip(
-            "T_both: DAQ averaging window when both beams of the pair are on "
-            "(x>0 and w>0). Mirrors the DAQ Monitor panel."
+            "T_both: averaging window when both beams of the pair are on. "
+            "Mirrors the DAQ Monitor panel."
         )
-        self.tpa_tsingle = self._double_spin(0.001, 30.0, 5.0, " s", 3)
+        self.tpa_tsingle = self._double_spin(0.001, 60.0, 10.0, " s", 3)
         self.tpa_tsingle.setToolTip(
-            "T_single: DAQ averaging window when at most one beam is on "
-            "(x=0 or w=0, incl. the all-off dark). Mirrors the DAQ Monitor panel."
+            "T_single: averaging window when at most one beam is on (x=0 or "
+            "w=0, incl. the all-off dark) — a weak signal needs the longer "
+            "window. Mirrors the DAQ Monitor panel."
         )
-        widgets = [
-            ("Pair index", self.tpa_pair_index), ("", self.tpa_all_pairs),
-            ("Sweep min", self.tpa_sweep_min), ("Sweep max", self.tpa_sweep_max),
-            ("Ramp points", self.tpa_points), ("T_both", self.tpa_tboth),
+        self.tpa_invert = QtWidgets.QCheckBox("Invert sign (TIA)")
+        self.tpa_invert.setChecked(True)
+        self.tpa_invert.setToolTip(
+            "The transimpedance amplifier outputs NEGATIVE volts for positive "
+            "light, so recording a positive light signal means inverting.\n"
+            "Leave this on. The estimator fits b = η² and takes its square "
+            "root, so a sign-flipped run gives b < 0 and η = NaN rather than a "
+            "plausible wrong answer."
+        )
+        self.tpa_autorange = QtWidgets.QCheckBox("Widen to \N{PLUS-MINUS SIGN}0.2 V near rail")
+        self.tpa_autorange.setChecked(True)
+        self.tpa_autorange.setToolTip(
+            "Remeasure a near-rail read one range up. The clip test runs on the "
+            "raw trace peak, not the reported mean: the low-pass pulls a clipped "
+            "flat-top back under the rail, so a clipped read is a silently wrong "
+            "mean rather than an error."
+        )
+
+        rows = [
+            ("Channel", self.tpa_daq_channel), ("Sample rate", self.tpa_daq_rate),
+            ("Range", self.tpa_daq_range), ("Low-pass", self.tpa_daq_fcut),
+            ("Settle", self.tpa_settle), ("T_both", self.tpa_tboth),
             ("T_single", self.tpa_tsingle),
         ]
-        for i, (label, widget) in enumerate(widgets):
-            r, c = i // 2, (i % 2) * 2
-            if label:
-                grid.addWidget(QtWidgets.QLabel(label), r, c)
-            grid.addWidget(widget, r, c + 1)
-        page.layout().addWidget(cfg)
+        for r, (label, widget) in enumerate(rows):
+            grid.addWidget(QtWidgets.QLabel(label), r, 0)
+            grid.addWidget(widget, r, 1)
+        grid.addWidget(self.tpa_invert, len(rows), 0, 1, 2)
+        grid.addWidget(self.tpa_autorange, len(rows) + 1, 0, 1, 2)
+        box.addWidget(daq)
 
-        # --- results: joint-fit plot (left) + pulls plot (right) ---
-        self.tpa_fit_fig = Figure(figsize=(5, 3.4), tight_layout=True)
-        self.tpa_fit_canvas = FigureCanvas(self.tpa_fit_fig)
-        self.tpa_pulls_fig = Figure(figsize=(5, 3.4), tight_layout=True)
-        self.tpa_pulls_canvas = FigureCanvas(self.tpa_pulls_fig)
-        plot_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        plot_split.addWidget(
-            self._panel_with_widget("Joint fit (measured vs predicted)", self.tpa_fit_canvas)
+        # --- sweep -------------------------------------------------------
+        sweep = self._panel("Sweep")
+        sgrid = QtWidgets.QGridLayout(sweep)
+        sgrid.setHorizontalSpacing(8)
+        sgrid.setVerticalSpacing(6)
+        self.tpa_pairs_edit = QtWidgets.QLineEdit("2-6")
+        self.tpa_pairs_edit.setToolTip(
+            "Pair labels to calibrate, 1-based: \"2-6\", \"1,3,5\" or a mix.\n"
+            "Pair i is the i-th channel of the Step-3 calibration."
         )
-        plot_split.addWidget(
-            self._panel_with_widget("Pulls (residual / std)", self.tpa_pulls_canvas)
-        )
-        plot_split.setSizes([560, 520])
-        page.layout().addWidget(plot_split, 1)
+        sgrid.addWidget(QtWidgets.QLabel("Pairs"), 0, 0)
+        sgrid.addWidget(self.tpa_pairs_edit, 0, 1)
+        self.tpa_plan_label = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_plan_label.setObjectName("PageSubtitle")
+        self.tpa_plan_label.setWordWrap(True)
+        sgrid.addWidget(self.tpa_plan_label, 1, 0, 1, 2)
+        box.addWidget(sweep)
 
-        # --- displayed-pair selector + eta report ---
-        self.tpa_pair_combo = QtWidgets.QComboBox()
-        self.tpa_pair_combo.setToolTip("Which measured pair's fit to display")
-        self.tpa_pair_combo.currentIndexChanged.connect(lambda _=0: self._tpa_redraw())
-        self.tpa_report = QtWidgets.QLabel("η: (run or load a sweep)")
-        self.tpa_report.setObjectName("PageSubtitle")
-        self.tpa_report.setWordWrap(True)
-        show_row = QtWidgets.QHBoxLayout()
-        show_row.addWidget(QtWidgets.QLabel("Show pair"))
-        show_row.addWidget(self.tpa_pair_combo)
-        show_row.addWidget(self.tpa_report, 1)
-        page.layout().addLayout(show_row)
+        # The plan line is the only warning a user gets before committing an
+        # hour of bench time, so it tracks every input that changes its length.
+        for spin in (self.tpa_tboth, self.tpa_tsingle, self.tpa_settle):
+            spin.valueChanged.connect(lambda _=0.0: self._tpa_update_plan())
+        self.tpa_pairs_edit.textChanged.connect(lambda _="": self._tpa_update_plan())
 
-        # --- controls ---
+        # --- progress + buttons -----------------------------------------
         self.tpa_progress_bar = QtWidgets.QProgressBar()
         self.tpa_progress_bar.setValue(0)
+        box.addWidget(self.tpa_progress_bar)
+
         self.tpa_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_status.setObjectName("PageSubtitle")
+        self.tpa_status.setWordWrap(True)
+        box.addWidget(self.tpa_status)
+
         self.tpa_run_button = QtWidgets.QPushButton("Run Sweep")
         self.tpa_run_button.clicked.connect(self._tpa_run)
         self.tpa_stop_button = QtWidgets.QPushButton("Stop")
         self.tpa_stop_button.setProperty("variant", "danger")
         self.tpa_stop_button.setEnabled(False)
         self.tpa_stop_button.clicked.connect(self._tpa_stop)
-        self.tpa_save_button = QtWidgets.QPushButton("Save…")
+        self.tpa_load_button = QtWidgets.QPushButton("Load\N{HORIZONTAL ELLIPSIS}")
+        self.tpa_load_button.setProperty("variant", "ghost")
+        self.tpa_load_button.setToolTip(
+            "Load a recorded step-6 v2 measurement CSV; every pair is re-fit."
+        )
+        self.tpa_load_button.clicked.connect(self._tpa_load)
+        self.tpa_save_button = QtWidgets.QPushButton("Save\N{HORIZONTAL ELLIPSIS}")
         self.tpa_save_button.setProperty("variant", "ghost")
         self.tpa_save_button.setEnabled(False)
         self.tpa_save_button.clicked.connect(self._tpa_save)
-        self.tpa_load_button = QtWidgets.QPushButton("Load…")
-        self.tpa_load_button.setProperty("variant", "ghost")
-        self.tpa_load_button.setToolTip("Load a saved pair-grid CSV; every pair is re-fit.")
-        self.tpa_load_button.clicked.connect(self._tpa_load)
-        ctrl = QtWidgets.QHBoxLayout()
-        ctrl.addWidget(self.tpa_status, 1)
-        ctrl.addWidget(self.tpa_load_button)
-        ctrl.addWidget(self.tpa_save_button)
-        ctrl.addWidget(self.tpa_run_button)
-        ctrl.addWidget(self.tpa_stop_button)
-        page.layout().addWidget(self.tpa_progress_bar)
-        page.layout().addLayout(ctrl)
-        self._tpa_redraw()
-        return page
+        btns = QtWidgets.QGridLayout()
+        btns.addWidget(self.tpa_load_button, 0, 0)
+        btns.addWidget(self.tpa_save_button, 0, 1)
+        btns.addWidget(self.tpa_run_button, 1, 0)
+        btns.addWidget(self.tpa_stop_button, 1, 1)
+        box.addLayout(btns)
 
-    def _tpa_pair_indices(self, layout) -> list[int] | None:
-        """Pairs to sweep from the controls, or None if the index is out of range."""
-        n = layout.n_channels
-        if self.tpa_all_pairs.isChecked():
-            return list(range(n))
-        idx = self.tpa_pair_index.value()
-        if idx >= n:
-            return None
-        return [idx]
+        box.addStretch(1)
+        return col
+
+    def _build_tpa_results(self) -> QtWidgets.QWidget:
+        """The right column: the all-pairs table over the selected pair's panels."""
+        self.tpa_table = QtWidgets.QTableWidget(0, len(self._TPA_COLUMNS))
+        self.tpa_table.setHorizontalHeaderLabels(list(self._TPA_COLUMNS))
+        self.tpa_table.verticalHeader().setVisible(False)
+        self.tpa_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tpa_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tpa_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tpa_table.setAlternatingRowColors(True)
+        self.tpa_table.horizontalHeader().setStretchLastSection(True)
+        # The table IS the pair selector -- no separate combo box.
+        self.tpa_table.itemSelectionChanged.connect(self._tpa_redraw)
+
+        # Estimator over its own pulls, sharing the w axis: both are "vs w", and
+        # side by side they would each get half the width for no reason.
+        self.tpa_est_fig = Figure(figsize=(5.4, 4.4), tight_layout=True)
+        self.tpa_est_canvas = FigureCanvas(self.tpa_est_fig)
+        self.tpa_check_fig = Figure(figsize=(4.2, 3.0), tight_layout=True)
+        self.tpa_check_canvas = FigureCanvas(self.tpa_check_fig)
+        self.tpa_verify_label = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_verify_label.setWordWrap(True)
+        self.tpa_verify_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.tpa_verify_label.setStyleSheet("font-family: Consolas, monospace;")
+
+        right = QtWidgets.QWidget()
+        rbox = QtWidgets.QVBoxLayout(right)
+        rbox.setContentsMargins(0, 0, 0, 0)
+        rbox.addWidget(
+            self._panel_with_widget("Product check · same x·w, different split",
+                                    self.tpa_check_canvas), 1)
+        rbox.addWidget(self._panel_with_widget("Verification", self.tpa_verify_label))
+
+        panels = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        panels.addWidget(
+            self._panel_with_widget("Difference estimator · η is this slope",
+                                    self.tpa_est_canvas))
+        panels.addWidget(right)
+        panels.setSizes([560, 440])
+
+        stack = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        stack.addWidget(self._panel_with_widget("Pairs", self.tpa_table))
+        stack.addWidget(panels)
+        stack.setStretchFactor(0, 0)
+        stack.setStretchFactor(1, 1)
+        stack.setSizes([220, 520])
+        return stack
+
+    # ---- inputs ------------------------------------------------------------
+    @staticmethod
+    def _tpa_parse_pairs(text: str) -> list[int]:
+        """\"2-6\", \"1,3,5\" or a mix -> sorted unique 1-based pair labels."""
+        out: set[int] = set()
+        for part in text.replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part[1:]:                      # not a leading minus sign
+                lo, hi = part.split("-", 1)
+                lo_i, hi_i = int(lo), int(hi)
+                if hi_i < lo_i:
+                    raise ValueError(f"empty range {part!r}")
+                out.update(range(lo_i, hi_i + 1))
+            else:
+                out.add(int(part))
+        if not out:
+            raise ValueError("no pairs given")
+        return sorted(out)
+
+    def _tpa_config(self) -> PairV2Config:
+        """The estimator's setup.
+
+        Every field is the validated default: the grid, the fit window and the
+        verification levels are specified against each other, so the page shows
+        them and does not offer them for editing.  What the page does own is
+        which pairs and how long to read for, and those are not in here.
+        """
+        return PairV2Config()
+
+    def _tpa_acq(self) -> PairV2Acq:
+        """Acquisition timing and input range, straight off the DAQ group."""
+        _lo, hi = self.tpa_daq_range.currentData()
+        return PairV2Acq(
+            t_single_s=float(self.tpa_tsingle.value()),
+            t_both_s=float(self.tpa_tboth.value()),
+            settle_s=float(self.tpa_settle.value()),
+            range_v=float(hi),
+            range_wide_v=float(min(2.0 * hi, 10.0)),
+            autorange=self.tpa_autorange.isChecked(),
+            invert=self.tpa_invert.isChecked(),
+        )
+
+    def _tpa_update_plan(self) -> None:
+        """Grid size and the wall-clock estimate, before Run is pressed.
+
+        Ten pairs of the default grid is most of an hour.  A user is entitled to
+        that number in advance rather than discovering it from the progress bar.
+        """
+        cfg = self._tpa_config()
+        schedule = build_schedule(cfg)
+        n_verify = len(cfg.verify_grid) if cfg.verify_enabled else 0
+        try:
+            pairs = self._tpa_parse_pairs(self.tpa_pairs_edit.text())
+        except ValueError:
+            self.tpa_plan_label.setText(
+                f"{len(schedule)} acquisitions/pair · "
+                f"bad pair list — try \"2-6\" or \"1,3,5\""
+            )
+            return
+        secs = run_seconds(schedule, self._tpa_acq())
+        total = secs * len(pairs)
+        self.tpa_plan_label.setText(
+            f"{len(schedule)} acquisitions/pair over {len(cfg.full_grid())} levels "
+            f"({len(cfg.grid)} estimator + {n_verify} verification)\n"
+            f"{len(pairs)} pair(s): {pairs[0]}–{pairs[-1]} · "
+            f"~{secs/60:.1f} min/pair · ~{total/60:.0f} min total"
+        )
 
     def _tpa_set_running(self, running: bool) -> None:
         self.tpa_run_button.setEnabled(not running)
         self.tpa_stop_button.setEnabled(running)
         self.tpa_load_button.setEnabled(not running)
-        self.tpa_save_button.setEnabled(not running and self.tpa_result is not None)
+        self.tpa_save_button.setEnabled(not running and bool(self.tpa_fits))
+        self.tpa_pairs_edit.setEnabled(not running)
 
+    @staticmethod
+    def _tpa_wavelengths(layout, cfg: PairV2Config, index: int):
+        """A pair's two channel wavelengths, or NaN when the layout lacks the slot."""
+        nan = float("nan")
+        slot = cfg.slot(index)
+        if not (0 <= slot < min(len(layout.x_channels), len(layout.w_channels))):
+            return nan, nan, nan
+        x_ch = layout.x_channels[slot]
+        w_ch = layout.w_channels[slot]
+        return (float(x_ch.wavelength_nm), float(w_ch.wavelength_nm),
+                0.5 * (float(x_ch.wavelength_nm) + float(w_ch.wavelength_nm)))
+
+    # ---- run ---------------------------------------------------------------
     def _tpa_run(self) -> None:
-        from dataclasses import replace
         layout = self.encoding_layout
         if layout is None:
             self.tpa_status.setText(
                 "No channel grid — build a layout on the TPA Encoding page first."
             )
             return
-        active = self._enc_active_monitor()
-        if active is None:
-            self.tpa_status.setText("Connect the scope or DAQ first (Scope / DAQ page).")
+        daq = self.daq_controller
+        if daq is None or not daq.is_connected:
+            self.tpa_status.setText("Connect the DAQ first (DAQ page).")
             return
         controller = self._controller()
         if not getattr(controller, "is_open", False):
             self.tpa_status.setText("Open the SLM on the SLM Control page first.")
             return
-        indices = self._tpa_pair_indices(layout)
-        if not indices:
+        cfg = self._tpa_config()
+        try:
+            pairs = self._tpa_parse_pairs(self.tpa_pairs_edit.text())
+        except ValueError as exc:
+            self.tpa_status.setText(f"Bad pair list: {exc}")
+            return
+        bad = [p for p in pairs if not (0 <= cfg.slot(p) < layout.n_channels)]
+        if bad:
             self.tpa_status.setText(
-                f"Pair index out of range (layout has {layout.n_channels} pairs)."
+                f"Pair(s) {bad} out of range — the layout has "
+                f"{layout.n_channels} pairs, numbered from {cfg.pair_index_base}."
             )
             return
 
-        kind, monitor = active
-        if kind == "scope":
-            settings = self._monitor_settings(trigger_mode="AUTO")
-        else:
-            settings = self._daq_monitor_settings()
-        settle = float(settings.hold)               # the tab's settle = monitor-page hold
-        # single-beam/dark points read the longer T_single window on the DAQ
-        window = max(
-            settings.duration, getattr(settings, "single_duration", 0.0)
+        acq = self._tpa_acq()
+        schedule = build_schedule(cfg)
+        total = len(schedule) * len(pairs)
+        lo, hi = self.tpa_daq_range.currentData()
+        settings = DAQMonitorSettings(
+            channel=self.tpa_daq_channel.text().strip() or "ai0",
+            sample_rate=self.tpa_daq_rate.value(),
+            duration=acq.t_both_s,
+            single_duration=acq.t_single_s,
+            hold=0.0,                 # measure_pair owns the settle
+            min_val=lo, max_val=hi,
+            f_cut=self.tpa_daq_fcut.value(),
         )
-        read_timeout = max(30.0, window * 3.0 + 10.0)
-        settings0 = replace(settings, hold=0.0)     # the module owns the settle
-
-        sweep = build_sweep(
-            self.tpa_sweep_min.value(), self.tpa_sweep_max.value(), self.tpa_points.value()
-        )
-        total = max(len(indices) * sweep.size * sweep.size, 1)
+        read_timeout = max(30.0, acq.t_single_s * 3.0 + 10.0)
 
         self.tpa_progress_bar.setMaximum(total)
         self.tpa_progress_bar.setValue(0)
         self.tpa_status.setText(
-            f"Starting… {len(indices)} pair(s) × {sweep.size}×{sweep.size} grid "
-            f"via {kind}"
+            f"Starting\N{HORIZONTAL ELLIPSIS} {len(pairs)} pair(s), "
+            f"{len(schedule)} acquisitions each"
         )
         self._tpa_set_running(True)
 
         stop_event = threading.Event()
         self.tpa_stop_event = stop_event
+        col_ratio = self._active_col_ratio()
 
-        def report(progress: TPAPairProgress) -> None:
+        def report(progress: PairV2Progress) -> None:
             self.tpa_progress.emit(progress)
 
         def work() -> dict[str, Any]:
-            monitor.configure_monitor(settings0)
+            daq.configure_monitor(settings)
+            rows_by_pair: dict[int, list] = {}
             try:
-                result = measure_pair_grids(
-                    monitor, controller, layout,
-                    pair_indices=indices, sweep=sweep, settle=settle,
-                    read_timeout=read_timeout, col_ratio=self._active_col_ratio(),
-                    stop_event=stop_event, progress_callback=report,
-                )
-            except TPAPairAborted:
-                return {"status": "aborted"}
-            return {"status": "ok", "result": result}
+                for n, index in enumerate(pairs):
+                    rows_by_pair[index] = measure_pair(
+                        daq, controller, layout, index, schedule,
+                        cfg=cfg, acq=acq, col_ratio=col_ratio,
+                        read_timeout=read_timeout,
+                        step0=n * len(schedule), total=total,
+                        progress_callback=report, stop_event=stop_event,
+                    )
+            except PairV2Aborted:
+                return {"status": "aborted", "rows": rows_by_pair, "cfg": cfg,
+                        "layout": layout}
+            return {"status": "ok", "rows": rows_by_pair, "cfg": cfg,
+                    "layout": layout}
 
         self._run_slm_task(
-            "TPA η pair-grid sweep", work, self._tpa_finished, self._tpa_error
+            "TPA η pair sweep (v2)", work, self._tpa_finished, self._tpa_error
         )
 
     def _tpa_stop(self) -> None:
         if self.tpa_stop_event is not None:
             self.tpa_stop_event.set()
-            self.tpa_status.setText("Stopping…")
+            self.tpa_status.setText("Stopping\N{HORIZONTAL ELLIPSIS}")
 
-    def _on_tpa_progress(self, progress: TPAPairProgress) -> None:
+    def _on_tpa_progress(self, progress: PairV2Progress) -> None:
         self.tpa_progress_bar.setMaximum(max(progress.total, 1))
         self.tpa_progress_bar.setValue(min(progress.step, progress.total))
-        self.tpa_status.setText(progress.message)
+        wide = "  [wide range]" if progress.range_v != self._tpa_acq().range_v else ""
+        self.tpa_status.setText(
+            f"pair {progress.pair_index} rep {progress.repeat} "
+            f"x={progress.x:.2f} w={progress.w:.2f} → "
+            f"{progress.mean_v*1e3:.4f} mV  "
+            f"std {progress.std_ratio*100:.2f}%{wide}"
+        )
+
+    def _tpa_fit_rows(self, rows_by_pair: dict[int, list], cfg: PairV2Config,
+                      layout=None) -> list[str]:
+        """Fit every pair into ``self.tpa_fits``; return the pairs that failed."""
+        self.tpa_rows = rows_by_pair
+        self.tpa_fits = []
+        failed: list[str] = []
+        for index in sorted(rows_by_pair):
+            try:
+                fit = fit_pair(index, average_levels(rows_by_pair[index]), cfg)
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                failed.append(f"pair {index}: {exc}")
+                continue
+            if layout is not None:
+                fit.wl_x_nm, fit.wl_w_nm, fit.nominal_wl_nm = self._tpa_wavelengths(
+                    layout, cfg, index
+                )
+            self.tpa_fits.append(fit)
+        return failed
 
     def _tpa_finished(self, payload: dict[str, Any]) -> None:
         self.tpa_stop_event = None
-        self._tpa_set_running(False)
-        if payload.get("status") == "aborted":
-            self.tpa_status.setText("Sweep stopped.")
+        aborted = payload.get("status") == "aborted"
+        rows = payload.get("rows") or {}
+        if not rows:
+            self._tpa_set_running(False)
+            self.tpa_status.setText("Sweep stopped before any pair finished.")
             return
-        result = payload["result"]
-        self.tpa_result = result
-        self.tpa_save_button.setEnabled(True)
-        self._tpa_populate_pairs(result)
+        failed = self._tpa_fit_rows(rows, payload["cfg"], payload.get("layout"))
+        self._tpa_set_running(False)
+        self._tpa_fill_table()
         self._tpa_redraw()
-        etas = [c.fit.eta for c in result.channels if c.fit is not None]
-        if len(etas) == 1:
+
+        etas = [f.eta for f in self.tpa_fits if np.isfinite(f.eta)]
+        if not etas:
+            summ = "no pair fitted"
+        elif len(etas) == 1:
             summ = f"η = {etas[0]:.4g}"
-        elif etas:
-            summ = f"{len(etas)} pairs · η {np.nanmin(etas):.3g}–{np.nanmax(etas):.3g}"
         else:
-            summ = "no fits"
-        self.tpa_status.setText(f"Done · {summ}")
+            summ = (f"{len(etas)} pairs · η "
+                    f"{min(etas):.3g}–{max(etas):.3g}")
+        head = "Stopped" if aborted else "Done"
+        note = f"  · {len(failed)} fit(s) failed" if failed else ""
+        self.tpa_status.setText(f"{head} · {summ}{note}")
+        for line in failed:
+            self._log(f"[step 6] fit failed — {line}")
+        if any(not np.isfinite(f.eta) for f in self.tpa_fits):
+            # b < 0 is almost always the sign convention, not the physics.
+            self.tpa_status.setText(
+                self.tpa_status.text()
+                + "  — η undefined (b < 0); check the Invert checkbox"
+            )
 
     def _tpa_error(self, _error: str) -> None:
         self.tpa_stop_event = None
         self._tpa_set_running(False)
         self.tpa_status.setText("TPA sweep failed (see Status log)")
 
-    def _tpa_populate_pairs(self, result: "TPAPairResult") -> None:
-        self.tpa_pair_combo.blockSignals(True)
-        self.tpa_pair_combo.clear()
-        for c in result.channels:
-            eta = c.fit.eta if c.fit is not None else float("nan")
-            wl_txt = f"{c.nominal_wl_nm:.2f} nm" if np.isfinite(c.nominal_wl_nm) else "?"
-            self.tpa_pair_combo.addItem(f"pair {c.index} · {wl_txt} · η={eta:.3g}")
-        self.tpa_pair_combo.blockSignals(False)
-        if result.channels:
-            self.tpa_pair_combo.setCurrentIndex(0)
+    # ---- results table -----------------------------------------------------
+    def _tpa_fill_table(self) -> None:
+        """One row per pair: every column a scalar, so ten pairs stay readable."""
+        self.tpa_table.blockSignals(True)
+        self.tpa_table.setRowCount(len(self.tpa_fits))
+        for row, fit in enumerate(self.tpa_fits):
+            pulls = fit.pulls
+            checks = fit.checks or {}
+            marks = []
+            intercept = checks.get("intercept") or {}
+            if "pull" in intercept:
+                marks.append("b0" if abs(intercept["pull"]) > 3.0 else "")
+            for rec in checks.get("product") or []:
+                for pr in rec.get("pairs") or []:
+                    if abs(pr.get("pull", 0.0)) > 3.0:
+                        marks.append("x·w")
+            flags = ",".join(m for m in marks if m) or "OK"
+            cells = [
+                str(fit.index),
+                f"{fit.eta:.5f}",
+                f"{fit.eta_err:.5f}",
+                f"{fit.bg['a_x'][0]*1e3:.4f}",
+                f"{fit.bg['a_w'][0]*1e3:.4f}",
+                f"{fit.bg['d'][0]*1e3:.4f}",
+                f"{fit.r2:.5f}",
+                f"{np.max(np.abs(pulls)):.2f}" if pulls.size else "–",
+                flags,
+            ]
+            for col, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if col:
+                    item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                self.tpa_table.setItem(row, col, item)
+        self.tpa_table.resizeColumnsToContents()
+        self.tpa_table.blockSignals(False)
+        if self.tpa_fits:
+            self.tpa_table.selectRow(0)
 
-    def _tpa_selected_pair(self):
-        if self.tpa_result is None or not self.tpa_result.channels:
+    def _tpa_selected_fit(self) -> "PairV2Fit | None":
+        if not self.tpa_fits:
             return None
-        i = self.tpa_pair_combo.currentIndex()
-        if i < 0 or i >= len(self.tpa_result.channels):
-            i = 0
-        return self.tpa_result.channels[i]
+        row = self.tpa_table.currentRow()
+        if row < 0 or row >= len(self.tpa_fits):
+            row = 0
+        return self.tpa_fits[row]
 
     def _tpa_redraw(self) -> None:
-        grid = self._tpa_selected_pair()
-        self._tpa_draw_fit(grid)
-        self._tpa_draw_pulls(grid)
-        self._tpa_update_report(grid)
+        fit = self._tpa_selected_fit()
+        self._tpa_draw_estimator(fit)
+        self._tpa_draw_check(fit)
+        self._tpa_update_verification(fit)
 
-    def _tpa_update_report(self, grid) -> None:
-        if grid is None or grid.fit is None:
-            self.tpa_report.setText("η: (run or load a sweep)")
-            return
-        f = grid.fit
-        p = f.params
-        self.tpa_report.setText(
-            f"η = {f.eta:.4g} ± {f.eta_err:.2g}   "
-            f"a_x={p['a_x'][0]:.3g}  a_w={p['a_w'][0]:.3g}  "
-            f"d={p['d'][0]*1e3:.3f} mV   "
-            f"R²={f.r2:.4f}"
+    # ---- panels ------------------------------------------------------------
+    def _tpa_draw_estimator(self, fit) -> None:
+        """D(w) with the GLS line, over its own pulls on a shared w axis.
+
+        Drawn natively rather than through ``fit.pair_v2.make_plot`` because
+        that renders six panels on a light ground for the PNG; the Save button
+        still writes exactly that file, so the artifact on disk and this view
+        come from the same fit even though they are laid out differently.
+        """
+        self.tpa_est_fig.clear()
+        self.tpa_est_fig.patch.set_facecolor("#101820")
+        ax, axp = self.tpa_est_fig.subplots(
+            2, 1, sharex=True, gridspec_kw={"height_ratios": [3, 1]}
         )
-
-    def _tpa_draw_fit(self, grid) -> None:
-        """Left: measured vs predicted for the selected pair (interior colored by x·w)."""
-        self.tpa_fit_fig.clear()
-        self.tpa_fit_fig.patch.set_facecolor("#101820")
-        ax = self.tpa_fit_fig.add_subplot(111)
         self._style_dark_axes(ax)
-        ax.set_xlabel("Measured voltage (mV)")
-        ax.set_ylabel("Predicted voltage (mV)")
-        if grid is None or grid.fit is None:
+        self._style_dark_axes(axp)
+        axp.set_xlabel("w   (x = 1 on this line)")
+        ax.set_ylabel("D(w) = Y(1,w) − B̂(w)   (mV)")
+        axp.set_ylabel("pull")
+        if fit is None:
             ax.text(0.5, 0.5, "Run or load a sweep", ha="center", va="center",
                     transform=ax.transAxes, color="#d8dee9")
-            self.tpa_fit_canvas.draw_idle()
+            self.tpa_est_canvas.draw_idle()
             return
-        f = grid.fit
-        y = f.y * 1e3
-        yp = f.y_pred * 1e3
-        std = f.std * 1e3
-        axis = (f.x == 0) | (f.w == 0)
-        lims = [min(y.min(), yp.min()), max(y.max(), yp.max())]
-        ax.plot(lims, lims, "--", color="#e0a447", lw=1.0, label="ideal")
-        ax.errorbar(y, yp, xerr=std, fmt="none", ecolor="#41515c", elinewidth=0.8, zorder=1)
-        if axis.any():
-            ax.scatter(y[axis], yp[axis], marker="s", s=42, facecolor="none",
-                       edgecolor="#e0a447", lw=1.3, zorder=3, label="axis")
-        if (~axis).any():
-            sc = ax.scatter(y[~axis], yp[~axis], c=(f.x * f.w)[~axis], cmap="viridis",
-                            s=38, edgecolor="#101820", lw=0.4, zorder=2, label="interior")
-            cbar = self.tpa_fit_fig.colorbar(sc, ax=ax)
-            cbar.set_label("x·w", color="#d8dee9")
-            cbar.ax.tick_params(colors="#d8dee9")
-        ax.legend(loc="upper left", fontsize=7)
-        self.tpa_fit_canvas.draw_idle()
 
-    def _tpa_draw_pulls(self, grid) -> None:
-        """Right: normalised residuals (pull = residual/std) vs predicted."""
-        self.tpa_pulls_fig.clear()
-        self.tpa_pulls_fig.patch.set_facecolor("#101820")
-        ax = self.tpa_pulls_fig.add_subplot(111)
+        lo, hi = fit.cfg.fit_w_range
+        ax.axvspan(lo, hi, color="#8fd14f", alpha=0.10, label=f"fit window [{lo:g}, {hi:g}]")
+        w = fit.fit_w
+        ax.errorbar(w, fit.fit_d * 1e3, yerr=fit.fit_sigma * 1e3, fmt="o",
+                    color="#8fd14f", ecolor="#41515c", ms=5, lw=0, elinewidth=0.9,
+                    label="D(w) fitted")
+        grid_w = np.linspace(0.0, 1.05, 50)
+        ax.plot(grid_w, (fit.b * grid_w + fit.beta0) * 1e3, "-", color="#8fd14f",
+                lw=1.2, label="GLS  D = η²w + β0")
+        for wx, dm, dme, *_ in fit.excluded:
+            ax.errorbar([wx], [dm * 1e3], yerr=[dme * 1e3], fmt="o", ms=8,
+                        mfc="none", mec="#e05a5a", ecolor="#e05a5a", lw=0,
+                        elinewidth=0.9, label="excluded (top drive)")
+        if np.isfinite(fit.anchor[0]):
+            ax.errorbar([0.0], [fit.anchor[0] * 1e3], yerr=[fit.anchor[1] * 1e3],
+                        fmt="s", ms=6, color="#a678de", ecolor="#a678de", lw=0,
+                        elinewidth=0.9, label="D(0) measured")
+        ax.set_title(f"pair {fit.index}   η = {fit.eta:.4g} ± {fit.eta_err:.2g}",
+                     color="#d8dee9", fontsize=9)
+        handles, labels = ax.get_legend_handles_labels()
+        seen: dict[str, Any] = {}
+        for h, lab in zip(handles, labels):
+            seen.setdefault(lab, h)         # the excluded loop repeats its label
+        ax.legend(seen.values(), seen.keys(), loc="upper left", fontsize=7)
+
+        axp.axhspan(-1, 1, color="#8fd14f", alpha=0.12)
+        axp.axhline(0.0, color="#e0a447", ls="--", lw=1.0)
+        if fit.pulls.size:
+            axp.scatter(w, fit.pulls, c="#8fd14f", s=30,
+                        edgecolor="#101820", lw=0.4)
+            axp.set_ylim(-max(1.5, float(np.max(np.abs(fit.pulls))) * 1.3),
+                         max(1.5, float(np.max(np.abs(fit.pulls))) * 1.3))
+        self.tpa_est_canvas.draw_idle()
+
+    def _tpa_draw_check(self, fit) -> None:
+        """Product check: levels sharing one x·w must give one TPA residue.
+
+        The model says Y depends on the two drives only through their product,
+        so these points sit at different drive splits and must agree.  A split
+        here does not make eta wrong -- it means the pair has no single eta at
+        all, which is what steps 7 and 8 assume it has.
+        """
+        self.tpa_check_fig.clear()
+        self.tpa_check_fig.patch.set_facecolor("#101820")
+        ax = self.tpa_check_fig.add_subplot(111)
         self._style_dark_axes(ax)
-        ax.set_xlabel("Predicted voltage (mV)")
-        ax.set_ylabel("Pull = residual / std")
-        if grid is None or grid.fit is None:
-            self.tpa_pulls_canvas.draw_idle()
+        ax.set_ylabel("TPA residue  Y − B̂(x,w)   (mV)")
+        records = (fit.checks or {}).get("product") if fit is not None else None
+        if not records:
+            ax.text(0.5, 0.5, "no product check in this run", ha="center",
+                    va="center", transform=ax.transAxes, color="#d8dee9",
+                    fontsize=8)
+            self.tpa_check_canvas.draw_idle()
             return
-        f = grid.fit
-        yp = f.y_pred * 1e3
-        pulls = f.residuals / f.std
-        axis = (f.x == 0) | (f.w == 0)
-        ax.axhspan(-1, 1, color="#8fd14f", alpha=0.12)
-        ax.axhline(0.0, color="#e0a447", ls="--", lw=1.0)
-        if (~axis).any():
-            ax.scatter(yp[~axis], pulls[~axis], c="#e05a5a", s=34,
-                       edgecolor="#101820", lw=0.4, label="interior")
-        if axis.any():
-            ax.scatter(yp[axis], pulls[axis], marker="s", s=42, facecolor="none",
-                       edgecolor="#e0a447", lw=1.3, label="axis")
-        ax.legend(loc="upper right", fontsize=7)
-        self.tpa_pulls_canvas.draw_idle()
 
+        labels: list[str] = []
+        pos = 0
+        for rec in records:
+            pts = rec.get("points") or []
+            xs = list(range(pos, pos + len(pts)))
+            ax.errorbar(xs, [p["tpa"] * 1e3 for p in pts],
+                        yerr=[p["tpa_err"] * 1e3 for p in pts], fmt="o",
+                        color="#a678de", ecolor="#a678de", ms=6, lw=0,
+                        elinewidth=0.9)
+            expected = rec.get("expected")
+            if expected is not None and np.isfinite(expected):
+                ax.hlines(expected * 1e3, xs[0] - 0.4, xs[-1] + 0.4,
+                          color="#8fd14f", ls="--", lw=1.1,
+                          label="η²(x·w) from the slope fit")
+            labels += [f"({p['x']:g}, {p['w']:g})\nx·w={rec['product']:g}"
+                       for p in pts]
+            pos += len(pts)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, fontsize=7, color="#d8dee9")
+        ax.set_xlim(-0.6, len(labels) - 0.4)
+        handles, lbls = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend([handles[0]], [lbls[0]], loc="best", fontsize=7)
+        self.tpa_check_canvas.draw_idle()
+
+    def _tpa_update_verification(self, fit) -> None:
+        """Both checks in words.  Neither feeds the fit -- they grade the model."""
+        if fit is None:
+            self.tpa_verify_label.setText("(run or load a sweep)")
+            return
+        cfg = fit.cfg
+        checks = fit.checks or {}
+        lines: list[str] = []
+        ic = checks.get("intercept") or {}
+        if ic:
+            ok = "OK" if abs(ic.get("pull", 0.0)) <= 3.0 else "FAIL"
+            lines.append(f"1. intercept identity   β0 = {cfg.x_side_label}")
+            lines.append(f"   β0   = {ic['beta0']*1e3:8.4f} "
+                         f"± {ic['beta0_err']*1e3:.4f} mV")
+            lines.append(f"   {cfg.x_side_label:<4} = {ic['a_x_plus_q_x']*1e3:8.4f} "
+                         f"± {ic['a_x_plus_q_x_err']*1e3:.4f} mV")
+            lines.append(f"   pull = {ic['pull']:+.2f}   {ok}")
+        for rec in checks.get("product") or []:
+            lines.append("")
+            lines.append(f"2. product-only dependence   x·w = {rec['product']:g}")
+            for pr in rec.get("pairs") or []:
+                ok = "OK" if abs(pr.get("pull", 0.0)) <= 3.0 else "FAIL"
+                lines.append(
+                    f"   {tuple(pr['a'])} vs {tuple(pr['b'])}: "
+                    f"{pr['frac']*100:+.2f}%   pull = {pr['pull']:+.2f}   {ok}"
+                )
+        if not lines:
+            lines.append("verification levels were not measured in this run")
+        else:
+            lines.append("")
+            lines.append("Neither check feeds the fit -- they say whether")
+            lines.append("the model η is defined within still holds.")
+        self.tpa_verify_label.setText("\n".join(lines))
+
+    # ---- files -------------------------------------------------------------
     def _tpa_load(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load TPA Pair-Grid CSV", "", "CSV (*.csv)"
+            self, "Load Step-6 v2 measurement CSV", "", "CSV (*.csv)"
         )
         if not path:
             return
+        cfg = self._tpa_config()
         try:
-            result = load_tpa_pair_csv(path, layout=self.encoding_layout)
+            rows = load_meas_csv(path)
         except Exception as exc:
             self.tpa_status.setText(f"Load failed: {exc}")
             return
-        self.tpa_result = result
-        self.tpa_save_button.setEnabled(True)
-        self._tpa_populate_pairs(result)
+        failed = self._tpa_fit_rows(rows, cfg, self.encoding_layout)
+        self._tpa_fill_table()
         self._tpa_redraw()
+        self.tpa_save_button.setEnabled(bool(self.tpa_fits))
+        note = f"  · {len(failed)} fit(s) failed" if failed else ""
         self.tpa_status.setText(
-            f"Loaded {Path(path).name} · {len(result.channels)} pair(s) re-fit"
+            f"Loaded {Path(path).name} · {len(self.tpa_fits)} pair(s) re-fit{note}"
         )
+        for line in failed:
+            self._log(f"[step 6] fit failed — {line}")
 
     def _tpa_save(self) -> None:
-        if self.tpa_result is None:
+        """Raw CSV, the combined JSON step 7 reads, and one PNG per pair.
+
+        The JSON embeds the Step-3 calibration this run was encoded through, so
+        a step-7 run needs that one file and cannot be pointed at a layout the
+        etas were not measured under.  The calibration is serialised from the
+        object the layout was built from rather than from any path on disk --
+        the two can differ, and what matters is what was actually driven.
+        """
+        if not self.tpa_fits:
             return
-        default = f"tpa_pair_calibration_{time.strftime('%m%d_%H%M')}.csv"
+        default = f"calib_step6v2_{time.strftime('%m%d_%H%M')}.csv"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save TPA Pair Calibration", default,
-            "CSV (*.csv);;JSON (*.json)"
+            self, "Save Step-6 v2 Result", default, "CSV (*.csv)"
         )
         if not path:
             return
         base = Path(path).with_suffix("")
-        csv_path = write_tpa_pair_csv(self.tpa_result, base.with_suffix(".csv"))
-        js = save_tpa_pair_json(self.tpa_result, base.with_suffix(".json"))
-        self.tpa_status.setText(f"Saved {Path(csv_path).name}  +  {Path(js).name}")
+        written = [Path(write_meas_csv(self.tpa_rows, base.with_suffix(".csv"))).name]
+
+        calib = self._enc_get_calib()
+        if calib is None:
+            self.tpa_status.setText(
+                f"Saved {written[0]} — no Step-3 calibration available, so the "
+                "combined JSON was not written (step 7 could not read it)."
+            )
+            return
+        layout = self.encoding_layout
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # save_calibration_result keeps an existing transfer_fits rather
+                # than refitting, so this is the calibration the layout used.
+                step3_path = save_calibration_result(calib, Path(tmp) / "step3.json")
+                step3 = json.loads(Path(step3_path).read_text(encoding="utf-8"))
+            js = save_combined_json(
+                self.tpa_fits, base.with_suffix(".json"), step3=step3,
+                center_wl=float(getattr(layout, "center_wl", 0.0)) if layout else 0.0,
+            )
+            written.append(Path(js).name)
+            for fit in self.tpa_fits:
+                png = base.with_name(f"{base.name}_pair{fit.index}.png")
+                save_plot(fit, png)
+            written.append(f"{len(self.tpa_fits)} PNG(s)")
+        except Exception as exc:
+            self.tpa_status.setText(f"Saved {written[0]}; JSON/plots failed: {exc}")
+            return
+        self.tpa_status.setText("Saved " + "  +  ".join(written))
 
     # ===================== TPA comb phase (step 7) tab ==================
     def _build_tpa_phase_tab(self) -> QtWidgets.QWidget:
@@ -5193,10 +5572,10 @@ class MainWindow(QtWidgets.QMainWindow):
         text = self.tpa_phase_models_edit.text().strip()
         if text:
             return load_pair_models(text, layout=layout)
-        if self.tpa_result is not None:
+        if self.tpa_fits:
             models = {
-                grid.index: PairModel.from_fit(grid.index, grid.fit)
-                for grid in self.tpa_result.channels if grid.fit is not None
+                fit.index: PairModel.from_pair_v2(fit)
+                for fit in self.tpa_fits if np.isfinite(fit.eta)
             }
             if models:
                 return models
@@ -6675,7 +7054,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.daq_mon_hold.setMaximumWidth(100)
         self.daq_mon_duration = QtWidgets.QDoubleSpinBox()
         self.daq_mon_duration.setRange(0.001, 10.0); self.daq_mon_duration.setDecimals(3)
-        self.daq_mon_duration.setValue(3.0); self.daq_mon_duration.setSuffix(" s")
+        self.daq_mon_duration.setValue(8.0); self.daq_mon_duration.setSuffix(" s")
         self.daq_mon_duration.setMaximumWidth(100)
         self.daq_mon_duration.setToolTip(
             "T_both: averaging window when both beams of a pair are on "
@@ -6683,14 +7062,16 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.daq_mon_single = QtWidgets.QDoubleSpinBox()
         self.daq_mon_single.setRange(0.001, 30.0); self.daq_mon_single.setDecimals(3)
-        self.daq_mon_single.setValue(5.0); self.daq_mon_single.setSuffix(" s")
+        self.daq_mon_single.setValue(10.0); self.daq_mon_single.setSuffix(" s")
         self.daq_mon_single.setMaximumWidth(100)
         self.daq_mon_single.setToolTip(
             "T_single: averaging window when at most one beam is on "
             "(x=0 or w=0, incl. the all-off dark) -- weak signal needs a "
             "longer window than the bright points"
         )
-        # the Step 6 tab shows the same two windows -- keep both views in sync
+        # The Step 6 tab shows the same two windows -- one setting, two views.
+        # Defaults are step 6 v2's validated 8 s / 10 s rather than v1's 3/5,
+        # since the binding would otherwise hand v1's timings to the v2 sweep.
         self._bind_spins(self.daq_mon_duration, self.tpa_tboth)
         self._bind_spins(self.daq_mon_single, self.tpa_tsingle)
         self.daq_mon_fcut = QtWidgets.QDoubleSpinBox()

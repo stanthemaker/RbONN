@@ -8,10 +8,10 @@ and keeping the two apart is what lets the fits be tested without hardware.
     pair_v2   step 6 -- one pair's interleaved schedule, with the near-rail
               range escalation and the TIA sign convention
 
-``center``, ``pair`` and ``phase`` are LEGACY sweep drivers with one GUI page
-each.  They predate the v2 step scripts and are scheduled to die with the GUI
-v2 rebuild; do not import them from new code.  Their replacements land here
-under a ``_v2`` suffix, and ``pair`` is the first to have one.
+``center`` and ``phase`` are LEGACY sweep drivers with one GUI page each.
+They predate the v2 step scripts and are scheduled to die with the GUI v2
+rebuild; do not import them from new code.  ``pair`` was the third and is
+gone -- GUI Step 6 runs ``pair_v2`` now, so nothing was left importing it.
 
 A v2 driver takes the monitor as an argument rather than opening one, and
 accepts ``progress_callback``/``stop_event``, so the same call serves the

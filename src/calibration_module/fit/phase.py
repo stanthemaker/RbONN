@@ -138,6 +138,23 @@ class PairModel:
         )
 
     @classmethod
+    def from_pair_v2(cls, fit) -> "PairModel":
+        """Build from a :class:`calibration_module.fit.pair_v2.PairV2Fit`.
+
+        The v2 estimator drops the quadratic columns by default, so ``q_x`` and
+        ``q_w`` are simply absent from ``fit.bg`` rather than fitted to zero.
+        They default to an exact 0.0 here, which is the same convention
+        ``save_combined_json`` writes to disk -- so a model built from a live fit
+        and one read back from that fit's JSON are the same object.
+        """
+        p = {k: v[0] for k, v in fit.bg.items()}
+        return cls(
+            index=fit.index, eta=fit.eta, eta_err=fit.eta_err,
+            a_x=p["a_x"], q_x=p.get("q_x", 0.0),
+            a_w=p["a_w"], q_w=p.get("q_w", 0.0), d=p["d"],
+        )
+
+    @classmethod
     def from_json_channel(cls, ch: dict) -> "PairModel":
         """Build from one ``channels[]`` entry of a step-6 ``save_tpa_pair_json``."""
         fit = ch["fit"]

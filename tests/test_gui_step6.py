@@ -1,0 +1,262 @@
+"""GUI Step 6 on the v2 estimator -- page wiring, no hardware.
+
+These build a real MainWindow offscreen and drive the page's own methods, so
+they cover the wiring the unit tests in ``test_pair_v2.py`` cannot: that the
+table shows what the fit produced, that a row selection reaches the panels, and
+that the file the Save button writes is the one Step 7 reads.
+
+Nothing here touches an instrument.  The sweep path needs an SLM and a DAQ and
+is not exercised; everything downstream of the rows is, by feeding the page the
+same committed measurement CSV the offline script refits.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+# Render Qt/matplotlib headless before either is imported by the app module.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import sys
+import tempfile
+import unittest
+import unittest.mock
+from pathlib import Path
+
+import numpy as np
+from PyQt5 import QtWidgets
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src"))
+
+from calibration_module.fit.pair_v2 import load_meas_csv  # noqa: E402
+from calibration_module.fit.phase import PairModel, load_pair_models  # noqa: E402
+
+MEAS_CSV = REPO / "src/calib_data/run_0907_1724/calib_step6v2_meas_0907_1757.csv"
+STEP3 = REPO / "src/calib_data/run_0908_1444/calib_step3c_0907_1358_pad10.json"
+
+#: What the 0907 run published, in the order the table lists them.
+RECORDED_ETA = [0.17760529803227112, 0.17954179839571333, 0.1920940148157429,
+                0.2142402286038278, 0.25500301123102215]
+
+_app: QtWidgets.QApplication | None = None
+
+
+def setUpModule() -> None:
+    global _app
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+class _WindowCase(unittest.TestCase):
+    """One MainWindow per class -- building it is by far the slow part."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from gui.app import MainWindow
+        cls.win = MainWindow()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.win.close()
+
+    def _load(self):
+        w = self.win
+        failed = w._tpa_fit_rows(load_meas_csv(MEAS_CSV), w._tpa_config(), None)
+        self.assertEqual(failed, [])
+        w._tpa_fill_table()
+        w._tpa_redraw()
+        return w
+
+
+class PairListTests(_WindowCase):
+    def test_ranges_lists_and_mixes(self) -> None:
+        parse = self.win._tpa_parse_pairs
+        self.assertEqual(parse("2-6"), [2, 3, 4, 5, 6])
+        self.assertEqual(parse("1,3,5"), [1, 3, 5])
+        self.assertEqual(parse("1, 3-5 ; 8"), [1, 3, 4, 5, 8])
+
+    def test_duplicates_collapse_and_order_is_normalised(self) -> None:
+        self.assertEqual(self.win._tpa_parse_pairs("5,2,5,3-4"), [2, 3, 4, 5])
+
+    def test_bad_input_raises(self) -> None:
+        for text in ("", "  ", "abc", "5-2"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.win._tpa_parse_pairs(text)
+
+
+class PlanTests(_WindowCase):
+    def test_plan_states_the_grid_and_the_wall_clock(self) -> None:
+        """Ten pairs is most of an hour; the user gets that before pressing Run."""
+        w = self.win
+        w.tpa_pairs_edit.setText("1-10")
+        w._tpa_update_plan()
+        text = w.tpa_plan_label.text()
+        self.assertIn("37 acquisitions/pair", text)
+        self.assertIn("10 pair(s)", text)
+        self.assertRegex(text, r"~\d+ min total")
+
+    def test_bad_pair_list_says_so_instead_of_lying_about_the_time(self) -> None:
+        w = self.win
+        w.tpa_pairs_edit.setText("nonsense")
+        w._tpa_update_plan()
+        self.assertIn("bad pair list", w.tpa_plan_label.text())
+        w.tpa_pairs_edit.setText("2-6")
+
+
+class AcquisitionSettingsTests(_WindowCase):
+    def test_invert_is_on_by_default(self) -> None:
+        """Off gives b < 0 and eta = NaN, so this is a precondition not a taste."""
+        self.assertTrue(self.win.tpa_invert.isChecked())
+        self.assertTrue(self.win._tpa_acq().invert)
+
+    def test_checkboxes_reach_the_acq_config(self) -> None:
+        w = self.win
+        w.tpa_invert.setChecked(False)
+        w.tpa_autorange.setChecked(False)
+        acq = w._tpa_acq()
+        self.assertFalse(acq.invert)
+        self.assertFalse(acq.autorange)
+        w.tpa_invert.setChecked(True)
+        w.tpa_autorange.setChecked(True)
+
+    def test_windows_are_shared_with_the_daq_monitor_page(self) -> None:
+        """One setting, two views -- _bind_spins ties them both ways."""
+        w = self.win
+        w.tpa_tboth.setValue(6.5)
+        self.assertAlmostEqual(w.daq_mon_duration.value(), 6.5)
+        w.daq_mon_single.setValue(12.0)
+        self.assertAlmostEqual(w.tpa_tsingle.value(), 12.0)
+        w.tpa_tboth.setValue(8.0)
+        w.tpa_tsingle.setValue(10.0)
+
+    def test_default_windows_are_the_v2_validated_ones(self) -> None:
+        self.assertAlmostEqual(self.win.tpa_tboth.value(), 8.0)
+        self.assertAlmostEqual(self.win.tpa_tsingle.value(), 10.0)
+
+
+class ResultsTableTests(_WindowCase):
+    def test_table_shows_the_published_etas(self) -> None:
+        w = self._load()
+        self.assertEqual(w.tpa_table.rowCount(), 5)
+        for row, expected in enumerate(RECORDED_ETA):
+            with self.subTest(row=row):
+                self.assertEqual(w.tpa_table.item(row, 0).text(), str(row + 2))
+                self.assertAlmostEqual(
+                    float(w.tpa_table.item(row, 1).text()), expected, places=5
+                )
+
+    def test_background_columns_are_in_millivolts(self) -> None:
+        """a_x/a_w/d are volts on the fit and mV in the table -- easy to get wrong."""
+        w = self._load()
+        fit = w.tpa_fits[3]                       # pair 5
+        for col, name in ((3, "a_x"), (4, "a_w"), (5, "d")):
+            with self.subTest(name=name):
+                self.assertAlmostEqual(
+                    float(w.tpa_table.item(3, col).text()),
+                    fit.bg[name][0] * 1e3, places=4,
+                )
+
+    def test_all_checks_pass_on_this_run(self) -> None:
+        w = self._load()
+        for row in range(w.tpa_table.rowCount()):
+            self.assertEqual(w.tpa_table.item(row, 8).text(), "OK")
+
+    def test_row_selection_drives_the_panels(self) -> None:
+        """The table IS the pair selector; there is no separate combo box."""
+        w = self._load()
+        w.tpa_table.selectRow(3)
+        self.assertEqual(w._tpa_selected_fit().index, 5)
+        w.tpa_table.selectRow(0)
+        self.assertEqual(w._tpa_selected_fit().index, 2)
+        self.assertFalse(hasattr(w, "tpa_pair_combo"))
+
+    def test_panels_render_for_every_pair(self) -> None:
+        w = self._load()
+        for row in range(w.tpa_table.rowCount()):
+            with self.subTest(row=row):
+                w.tpa_table.selectRow(row)
+                # estimator over its own pulls, sharing the w axis
+                self.assertEqual(len(w.tpa_est_fig.axes), 2)
+                self.assertEqual(len(w.tpa_check_fig.axes), 1)
+                self.assertIn("intercept identity", w.tpa_verify_label.text())
+
+    def test_panels_are_safe_with_no_result(self) -> None:
+        from gui.app import MainWindow
+        fresh = MainWindow()
+        try:
+            self.assertIsNone(fresh._tpa_selected_fit())
+            fresh._tpa_redraw()                    # must not raise
+            self.assertIn("run or load", fresh.tpa_verify_label.text().lower())
+        finally:
+            fresh.close()
+
+
+class SaveRoundTripTests(_WindowCase):
+    def test_saved_json_is_what_step_7_reads(self) -> None:
+        """The point of the combined file: step 7 needs this one file, not two."""
+        from slm_module.calibration.calibration_new import load_calibration_result
+
+        w = self._load()
+        w._enc_calib_override = load_calibration_result(STEP3)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "calib_step6v2_gui.csv"
+            with unittest.mock.patch.object(
+                QtWidgets.QFileDialog, "getSaveFileName",
+                staticmethod(lambda *a, **k: (str(target), "")),
+            ):
+                w._tpa_save()
+
+            self.assertTrue(target.is_file(), w.tpa_status.text())
+            js_path = target.with_suffix(".json")
+            self.assertTrue(js_path.is_file(), w.tpa_status.text())
+
+            payload = json.loads(js_path.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(payload), ["encoding", "step3", "step6"])
+            self.assertIn("transfer_fits", payload["step3"])
+
+            models = load_pair_models(str(js_path))
+            self.assertEqual(sorted(models), [2, 3, 4, 5, 6])
+            self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)
+
+            self.assertEqual(
+                len(list(target.parent.glob("*_pair*.png"))), 5,
+                "one diagnostic PNG per pair, same renderer as the offline script",
+            )
+
+    def test_save_without_a_calibration_still_writes_the_rows(self) -> None:
+        """The measurement must never be lost to a missing step-3 file."""
+        w = self._load()
+        w._enc_calib_override = None
+        w.calibration_result = None
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "rows_only.csv"
+            with unittest.mock.patch.object(
+                QtWidgets.QFileDialog, "getSaveFileName",
+                staticmethod(lambda *a, **k: (str(target), "")),
+            ):
+                w._tpa_save()
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.with_suffix(".json").is_file())
+            self.assertIn("no Step-3 calibration", w.tpa_status.text())
+
+
+class Step7HandoffTests(_WindowCase):
+    def test_step_7_consumes_the_v2_fits_in_memory(self) -> None:
+        w = self._load()
+        models = w._tpa_phase_models(None)
+        self.assertEqual(sorted(models), [2, 3, 4, 5, 6])
+        self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)
+
+    def test_dropped_q_columns_arrive_as_exact_zeros(self) -> None:
+        """v2 does not fit q_x/q_w; PairModel needs them, and 0.0 is the contract."""
+        w = self._load()
+        model = PairModel.from_pair_v2(w.tpa_fits[3])
+        self.assertEqual(model.q_x, 0.0)
+        self.assertEqual(model.q_w, 0.0)
+        self.assertNotIn("q_x", w.tpa_fits[3].bg)
+
+
+if __name__ == "__main__":
+    unittest.main()
