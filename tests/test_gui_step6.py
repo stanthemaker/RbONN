@@ -136,6 +136,62 @@ class AcquisitionSettingsTests(_WindowCase):
         self.assertAlmostEqual(self.win.tpa_tsingle.value(), 10.0)
 
 
+class StepThreeInputTests(_WindowCase):
+    """The Step-3 calibration is named on the page and required to run.
+
+    It is not inherited from the Encoding page: every level of the sweep is
+    encoded through it, so a run against the wrong one does not fail, it
+    calibrates a different aperture. Naming it per run is also what makes a GUI
+    run and a ``--step3`` terminal run the same run.
+    """
+
+    def tearDown(self) -> None:
+        self.win.tpa_step3_edit.setText("")
+
+    def test_run_refuses_without_one(self) -> None:
+        w = self.win
+        w.tpa_step3_edit.setText("")
+        w._tpa_run()
+        self.assertIn("Step 3", w.tpa_status.text())
+        self.assertIn("no Step-3 calibration", w.tpa_status.text())
+
+    def test_run_refuses_a_path_that_is_not_there(self) -> None:
+        w = self.win
+        w.tpa_step3_edit.setText(str(STEP3.parent / "no_such_file.json"))
+        w._tpa_run()
+        self.assertIn("not found", w.tpa_status.text())
+
+    def test_a_valid_file_is_described_before_the_run(self) -> None:
+        """An hour of bench time deserves a look at the file first."""
+        w = self.win
+        w.tpa_step3_edit.setText(str(STEP3))
+        text = w.tpa_step3_label.text()
+        self.assertIn(STEP3.name, text)
+        self.assertRegex(text, r"\d+ pairs")
+        self.assertRegex(text, r"\d+ px window")
+        self.assertEqual(w.tpa_step3_label.property("status"), "ok")
+
+    def test_a_bad_file_is_flagged_not_silently_ignored(self) -> None:
+        w = self.win
+        w.tpa_step3_edit.setText(str(MEAS_CSV))       # a CSV, not a calibration
+        self.assertEqual(w.tpa_step3_label.property("status"), "error")
+
+    def test_layout_matches_the_offline_loader(self) -> None:
+        """Same file, same loader, same method -> the same pixels get driven."""
+        from slm_module.calibration.calibration_new import load_calibration_result
+        from slm_module.encoding import channel_layout_from_calibration
+
+        w = self.win
+        w.tpa_step3_edit.setText(str(STEP3))
+        _calib, gui_layout = w._tpa_load_step3()
+        offline = channel_layout_from_calibration(
+            load_calibration_result(STEP3), method=w._tpa_config().encoding_method
+        )
+        self.assertEqual(gui_layout.n_channels, offline.n_channels)
+        self.assertEqual(gui_layout.channel_width_px, offline.channel_width_px)
+        self.assertEqual(gui_layout.pitch_px, offline.pitch_px)
+
+
 class ResultsTableTests(_WindowCase):
     def test_table_shows_the_published_etas(self) -> None:
         w = self._load()
@@ -173,14 +229,15 @@ class ResultsTableTests(_WindowCase):
         self.assertFalse(hasattr(w, "tpa_pair_combo"))
 
     def test_panels_render_for_every_pair(self) -> None:
+        """Two panels, not the PNG's six -- and no verification prose panel."""
         w = self._load()
+        self.assertFalse(hasattr(w, "tpa_verify_label"))
         for row in range(w.tpa_table.rowCount()):
             with self.subTest(row=row):
                 w.tpa_table.selectRow(row)
                 # estimator over its own pulls, sharing the w axis
                 self.assertEqual(len(w.tpa_est_fig.axes), 2)
                 self.assertEqual(len(w.tpa_check_fig.axes), 1)
-                self.assertIn("intercept identity", w.tpa_verify_label.text())
 
     def test_panels_are_safe_with_no_result(self) -> None:
         from gui.app import MainWindow
@@ -188,7 +245,7 @@ class ResultsTableTests(_WindowCase):
         try:
             self.assertIsNone(fresh._tpa_selected_fit())
             fresh._tpa_redraw()                    # must not raise
-            self.assertIn("run or load", fresh.tpa_verify_label.text().lower())
+            self.assertEqual(len(fresh.tpa_est_fig.axes), 2)
         finally:
             fresh.close()
 
@@ -196,10 +253,8 @@ class ResultsTableTests(_WindowCase):
 class SaveRoundTripTests(_WindowCase):
     def test_saved_json_is_what_step_7_reads(self) -> None:
         """The point of the combined file: step 7 needs this one file, not two."""
-        from slm_module.calibration.calibration_new import load_calibration_result
-
         w = self._load()
-        w._enc_calib_override = load_calibration_result(STEP3)
+        w.tpa_step3_edit.setText(str(STEP3))
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "calib_step6v2_gui.csv"
             with unittest.mock.patch.object(
@@ -228,8 +283,7 @@ class SaveRoundTripTests(_WindowCase):
     def test_save_without_a_calibration_still_writes_the_rows(self) -> None:
         """The measurement must never be lost to a missing step-3 file."""
         w = self._load()
-        w._enc_calib_override = None
-        w.calibration_result = None
+        w.tpa_step3_edit.setText("")
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "rows_only.csv"
             with unittest.mock.patch.object(

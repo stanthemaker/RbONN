@@ -4820,18 +4820,47 @@ class MainWindow(QtWidgets.QMainWindow):
         sgrid = QtWidgets.QGridLayout(sweep)
         sgrid.setHorizontalSpacing(8)
         sgrid.setVerticalSpacing(6)
+
+        # The Step-3 calibration is named here rather than inherited from the
+        # Encoding page, and it is required.  Every level of this sweep is
+        # *encoded through* it, so a run against the wrong one does not fail --
+        # it calibrates a different aperture and reports numbers that look fine.
+        # Naming it per run is also what makes a GUI run and a terminal run the
+        # same run: --step3 on calib_step6_v2.py is this field.
+        self.tpa_step3_edit = QtWidgets.QLineEdit()
+        self.tpa_step3_edit.setPlaceholderText("required — Step-3b/3c calibration JSON")
+        self.tpa_step3_edit.setToolTip(
+            "The Step-3b/3c result the channel layout is built from.\n"
+            "Its rows ARE the channels: pair i is the i-th channel of this file, "
+            "and the encoded aperture is the one these transfer curves were "
+            "measured through."
+        )
+        self.tpa_step3_browse = QtWidgets.QPushButton("Browse\N{HORIZONTAL ELLIPSIS}")
+        self.tpa_step3_browse.setProperty("variant", "ghost")
+        self.tpa_step3_browse.clicked.connect(self._tpa_browse_step3)
+        self.tpa_step3_label = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_step3_label.setObjectName("PageSubtitle")
+        self.tpa_step3_label.setWordWrap(True)
+        sgrid.addWidget(QtWidgets.QLabel("Step 3"), 0, 0)
+        sgrid.addWidget(self.tpa_step3_edit, 0, 1)
+        sgrid.addWidget(self.tpa_step3_browse, 0, 2)
+        sgrid.addWidget(self.tpa_step3_label, 1, 0, 1, 3)
+
         self.tpa_pairs_edit = QtWidgets.QLineEdit("2-6")
         self.tpa_pairs_edit.setToolTip(
             "Pair labels to calibrate, 1-based: \"2-6\", \"1,3,5\" or a mix.\n"
             "Pair i is the i-th channel of the Step-3 calibration."
         )
-        sgrid.addWidget(QtWidgets.QLabel("Pairs"), 0, 0)
-        sgrid.addWidget(self.tpa_pairs_edit, 0, 1)
+        sgrid.addWidget(QtWidgets.QLabel("Pairs"), 2, 0)
+        sgrid.addWidget(self.tpa_pairs_edit, 2, 1, 1, 2)
         self.tpa_plan_label = QtWidgets.QLabel("\N{EN DASH}")
         self.tpa_plan_label.setObjectName("PageSubtitle")
         self.tpa_plan_label.setWordWrap(True)
-        sgrid.addWidget(self.tpa_plan_label, 1, 0, 1, 2)
+        sgrid.addWidget(self.tpa_plan_label, 3, 0, 1, 3)
         box.addWidget(sweep)
+
+        self.tpa_step3_edit.textChanged.connect(lambda _="": self._tpa_describe_step3())
+        self._tpa_describe_step3()
 
         # The plan line is the only warning a user gets before committing an
         # hour of bench time, so it tracks every input that changes its length.
@@ -4894,25 +4923,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpa_est_canvas = FigureCanvas(self.tpa_est_fig)
         self.tpa_check_fig = Figure(figsize=(4.2, 3.0), tight_layout=True)
         self.tpa_check_canvas = FigureCanvas(self.tpa_check_fig)
-        self.tpa_verify_label = QtWidgets.QLabel("\N{EN DASH}")
-        self.tpa_verify_label.setWordWrap(True)
-        self.tpa_verify_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.tpa_verify_label.setStyleSheet("font-family: Consolas, monospace;")
 
-        right = QtWidgets.QWidget()
-        rbox = QtWidgets.QVBoxLayout(right)
-        rbox.setContentsMargins(0, 0, 0, 0)
-        rbox.addWidget(
-            self._panel_with_widget("Product check · same x·w, different split",
-                                    self.tpa_check_canvas), 1)
-        rbox.addWidget(self._panel_with_widget("Verification", self.tpa_verify_label))
-
+        # No verification text panel.  Both checks still run, and they are still
+        # reported three ways -- the table's `checks` column flags a pull past
+        # 3σ, the product check is the panel beside this one, and the saved JSON
+        # and PNG carry the full records.  Repeating them as prose here spent a
+        # quarter of the results pane restating what the table already says.
         panels = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         panels.addWidget(
             self._panel_with_widget("Difference estimator · η is this slope",
                                     self.tpa_est_canvas))
-        panels.addWidget(right)
-        panels.setSizes([560, 440])
+        panels.addWidget(
+            self._panel_with_widget("Product check · same x·w, different split",
+                                    self.tpa_check_canvas))
+        panels.setSizes([600, 400])
 
         stack = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         stack.addWidget(self._panel_with_widget("Pairs", self.tpa_table))
@@ -4942,6 +4966,56 @@ class MainWindow(QtWidgets.QMainWindow):
         if not out:
             raise ValueError("no pairs given")
         return sorted(out)
+
+    def _tpa_browse_step3(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Step-3 calibration for this sweep", "", "JSON (*.json)"
+        )
+        if path:
+            self.tpa_step3_edit.setText(path)
+
+    def _tpa_step3_path(self) -> Path | None:
+        text = self.tpa_step3_edit.text().strip().strip('"')
+        return Path(text) if text else None
+
+    def _tpa_load_step3(self):
+        """``(calibration, layout)`` from the named file, or raise.
+
+        The layout is rebuilt here rather than taken from the Encoding page so
+        that what this sweep drives is decided by one named file, exactly as the
+        offline script's ``--step3`` decides it.  Same loader, same method, so a
+        GUI run and a terminal run against the same file drive the same pixels.
+        """
+        path = self._tpa_step3_path()
+        if path is None:
+            raise ValueError("no Step-3 calibration chosen")
+        if not path.is_file():
+            raise FileNotFoundError(f"Step-3 calibration not found: {path}")
+        calib = load_calibration_result(path)
+        layout = channel_layout_from_calibration(
+            calib, method=self._tpa_config().encoding_method
+        )
+        return calib, layout
+
+    def _tpa_describe_step3(self) -> None:
+        """Say what the chosen file actually is, before an hour is spent on it."""
+        path = self._tpa_step3_path()
+        if path is None:
+            self._set_status(self.tpa_step3_label,
+                             "No Step-3 calibration chosen — required to run.", "off")
+            return
+        try:
+            _calib, layout = self._tpa_load_step3()
+        except Exception as exc:
+            self._set_status(self.tpa_step3_label, f"{path.name}: {exc}", "error")
+            return
+        self._set_status(
+            self.tpa_step3_label,
+            f"{path.name} · {layout.n_channels} pairs · "
+            f"{layout.channel_width_px} px window + "
+            f"{layout.pitch_px - layout.channel_width_px} px pad",
+            "ok",
+        )
 
     def _tpa_config(self) -> PairV2Config:
         """The estimator's setup.
@@ -4985,11 +5059,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         secs = run_seconds(schedule, self._tpa_acq())
         total = secs * len(pairs)
+        # The taper is an app-wide setting from the Shape page, and a sweep
+        # driven through a different band than it reports is measuring a
+        # different aperture -- so it is named here rather than left implicit.
+        shape = "flat band" if self._active_col_ratio() is None else "Shape page taper"
         self.tpa_plan_label.setText(
             f"{len(schedule)} acquisitions/pair over {len(cfg.full_grid())} levels "
             f"({len(cfg.grid)} estimator + {n_verify} verification)\n"
             f"{len(pairs)} pair(s): {pairs[0]}–{pairs[-1]} · "
-            f"~{secs/60:.1f} min/pair · ~{total/60:.0f} min total"
+            f"~{secs/60:.1f} min/pair · ~{total/60:.0f} min total · {shape}"
         )
 
     def _tpa_set_running(self, running: bool) -> None:
@@ -5013,11 +5091,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- run ---------------------------------------------------------------
     def _tpa_run(self) -> None:
-        layout = self.encoding_layout
-        if layout is None:
-            self.tpa_status.setText(
-                "No channel grid — build a layout on the TPA Encoding page first."
-            )
+        try:
+            _calib, layout = self._tpa_load_step3()
+        except Exception as exc:
+            self.tpa_status.setText(f"Step 3: {exc}")
             return
         daq = self.daq_controller
         if daq is None or not daq.is_connected:
@@ -5216,7 +5293,6 @@ class MainWindow(QtWidgets.QMainWindow):
         fit = self._tpa_selected_fit()
         self._tpa_draw_estimator(fit)
         self._tpa_draw_check(fit)
-        self._tpa_update_verification(fit)
 
     # ---- panels ------------------------------------------------------------
     def _tpa_draw_estimator(self, fit) -> None:
@@ -5323,40 +5399,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ax.legend([handles[0]], [lbls[0]], loc="best", fontsize=7)
         self.tpa_check_canvas.draw_idle()
 
-    def _tpa_update_verification(self, fit) -> None:
-        """Both checks in words.  Neither feeds the fit -- they grade the model."""
-        if fit is None:
-            self.tpa_verify_label.setText("(run or load a sweep)")
-            return
-        cfg = fit.cfg
-        checks = fit.checks or {}
-        lines: list[str] = []
-        ic = checks.get("intercept") or {}
-        if ic:
-            ok = "OK" if abs(ic.get("pull", 0.0)) <= 3.0 else "FAIL"
-            lines.append(f"1. intercept identity   β0 = {cfg.x_side_label}")
-            lines.append(f"   β0   = {ic['beta0']*1e3:8.4f} "
-                         f"± {ic['beta0_err']*1e3:.4f} mV")
-            lines.append(f"   {cfg.x_side_label:<4} = {ic['a_x_plus_q_x']*1e3:8.4f} "
-                         f"± {ic['a_x_plus_q_x_err']*1e3:.4f} mV")
-            lines.append(f"   pull = {ic['pull']:+.2f}   {ok}")
-        for rec in checks.get("product") or []:
-            lines.append("")
-            lines.append(f"2. product-only dependence   x·w = {rec['product']:g}")
-            for pr in rec.get("pairs") or []:
-                ok = "OK" if abs(pr.get("pull", 0.0)) <= 3.0 else "FAIL"
-                lines.append(
-                    f"   {tuple(pr['a'])} vs {tuple(pr['b'])}: "
-                    f"{pr['frac']*100:+.2f}%   pull = {pr['pull']:+.2f}   {ok}"
-                )
-        if not lines:
-            lines.append("verification levels were not measured in this run")
-        else:
-            lines.append("")
-            lines.append("Neither check feeds the fit -- they say whether")
-            lines.append("the model η is defined within still holds.")
-        self.tpa_verify_label.setText("\n".join(lines))
-
     # ---- files -------------------------------------------------------------
     def _tpa_load(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -5370,13 +5412,23 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self.tpa_status.setText(f"Load failed: {exc}")
             return
-        failed = self._tpa_fit_rows(rows, cfg, self.encoding_layout)
+        # A re-fit needs only the CSV.  The Step-3 file is used for the
+        # wavelength labels when it is set, and simply left out when it is not
+        # -- the same tolerance `fit_csv` has, so a CSV is always re-fittable.
+        try:
+            _calib, layout = self._tpa_load_step3()
+            note3 = ""
+        except Exception as exc:
+            layout = None
+            note3 = f"  · wavelengths NaN ({exc})"
+        failed = self._tpa_fit_rows(rows, cfg, layout)
         self._tpa_fill_table()
         self._tpa_redraw()
         self.tpa_save_button.setEnabled(bool(self.tpa_fits))
         note = f"  · {len(failed)} fit(s) failed" if failed else ""
         self.tpa_status.setText(
-            f"Loaded {Path(path).name} · {len(self.tpa_fits)} pair(s) re-fit{note}"
+            f"Loaded {Path(path).name} · {len(self.tpa_fits)} pair(s) re-fit"
+            f"{note}{note3}"
         )
         for line in failed:
             self._log(f"[step 6] fit failed — {line}")
@@ -5384,11 +5436,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _tpa_save(self) -> None:
         """Raw CSV, the combined JSON step 7 reads, and one PNG per pair.
 
-        The JSON embeds the Step-3 calibration this run was encoded through, so
-        a step-7 run needs that one file and cannot be pointed at a layout the
-        etas were not measured under.  The calibration is serialised from the
-        object the layout was built from rather than from any path on disk --
-        the two can differ, and what matters is what was actually driven.
+        The JSON embeds the Step-3 calibration this run was encoded through --
+        the file named on this page, verbatim -- so a step-7 run needs that one
+        file and cannot be pointed at a layout the etas were not measured under.
+
+        The rows are written first and unconditionally.  A measurement is an
+        hour of bench time and must never be lost to a missing or unreadable
+        step-3 file, which is only needed for the derived JSON.
         """
         if not self.tpa_fits:
             return
@@ -5401,23 +5455,18 @@ class MainWindow(QtWidgets.QMainWindow):
         base = Path(path).with_suffix("")
         written = [Path(write_meas_csv(self.tpa_rows, base.with_suffix(".csv"))).name]
 
-        calib = self._enc_get_calib()
-        if calib is None:
+        step3 = self._tpa_step3_path()
+        if step3 is None or not step3.is_file():
             self.tpa_status.setText(
-                f"Saved {written[0]} — no Step-3 calibration available, so the "
-                "combined JSON was not written (step 7 could not read it)."
+                f"Saved {written[0]} — no Step-3 calibration set, so the combined "
+                "JSON was not written (step 7 could not read it)."
             )
             return
-        layout = self.encoding_layout
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                # save_calibration_result keeps an existing transfer_fits rather
-                # than refitting, so this is the calibration the layout used.
-                step3_path = save_calibration_result(calib, Path(tmp) / "step3.json")
-                step3 = json.loads(Path(step3_path).read_text(encoding="utf-8"))
+            _calib, layout = self._tpa_load_step3()
             js = save_combined_json(
                 self.tpa_fits, base.with_suffix(".json"), step3=step3,
-                center_wl=float(getattr(layout, "center_wl", 0.0)) if layout else 0.0,
+                center_wl=float(getattr(layout, "center_wl", 0.0)),
             )
             written.append(Path(js).name)
             for fit in self.tpa_fits:
