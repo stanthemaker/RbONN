@@ -28,7 +28,7 @@ def _make_calibration():
 
 class FitCenterTraceTests(unittest.TestCase):
     def test_recovers_peak_inside_window(self) -> None:
-        from slm_module.tpa_center import fit_center_trace
+        from calibration_module.center import fit_center_trace
 
         wl = np.array([777.9, 778.0, 778.1, 778.2, 778.3], dtype=float)
         signal = 0.004 - 0.1 * (wl - 778.1) ** 2
@@ -40,7 +40,7 @@ class FitCenterTraceTests(unittest.TestCase):
         self.assertAlmostEqual(fit.peak_signal_v, 0.004, places=5)
 
     def test_marks_peak_outside_window_invalid(self) -> None:
-        from slm_module.tpa_center import fit_center_trace
+        from calibration_module.center import fit_center_trace
 
         wl = np.array([777.9, 778.0, 778.1, 778.2, 778.3], dtype=float)
         signal = 0.004 - 0.1 * (wl - 778.45) ** 2
@@ -84,7 +84,7 @@ class _FakeMonitor:
 class MeasureCenterScanTests(unittest.TestCase):
     def test_scan_forwards_col_ratio_and_fits_peak(self) -> None:
         from slm_module import encoding as encoding_module
-        from slm_module import tpa_center as tpa_center_module
+        from calibration_module import measure_center as tpa_center_module
 
         calib = _make_calibration()
         centers = np.array([777.95, 778.00, 778.05, 778.10, 778.15], dtype=float)
@@ -128,7 +128,7 @@ class MeasureCenterScanTests(unittest.TestCase):
 
 class SaveLoadJsonTests(unittest.TestCase):
     def _scan_result(self):
-        from slm_module import tpa_center as tpa_center_module
+        from calibration_module import measure_center as tpa_center_module
 
         calib = _make_calibration()
         centers = np.array([777.95, 778.00, 778.05, 778.10, 778.15], dtype=float)
@@ -148,7 +148,7 @@ class SaveLoadJsonTests(unittest.TestCase):
     def test_round_trip_preserves_rows_and_fit(self) -> None:
         import tempfile
 
-        from slm_module.tpa_center import load_tpa_center_json, save_tpa_center_json
+        from calibration_module.center import load_tpa_center_json, save_tpa_center_json
 
         result = self._scan_result()
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +171,7 @@ class SaveLoadJsonTests(unittest.TestCase):
         import json
         import tempfile
 
-        from slm_module.tpa_center import load_tpa_center_json
+        from calibration_module.center import load_tpa_center_json
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.json"

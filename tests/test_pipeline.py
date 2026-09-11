@@ -32,9 +32,9 @@ from slm_module.pipeline import (
     run_pipeline,
     validate_request,
 )
-from slm_module.tpa_center import TPACenterProgress
-from slm_module.tpa_pair import TPAPairAborted, TPAPairProgress
-from slm_module.tpa_phase_measure import TPAPhaseProgress
+from calibration_module.measure_center import TPACenterProgress
+from calibration_module.measure_pair import TPAPairAborted, TPAPairProgress
+from calibration_module.measure_phase import TPAPhaseProgress
 
 
 def _plan(stage_id, config, inputs, out_dir: Path, name: str) -> StagePlan:
@@ -360,8 +360,8 @@ class PhaseReportRenderTests(unittest.TestCase):
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        from slm_module.tpa_phase import PhaseFit
-        from slm_module.tpa_phase_report import plot_fringe
+        from calibration_module.phase import PhaseFit
+        from calibration_module.report import plot_fringe
 
         n = 15
         theta = np.linspace(0.0, np.pi, n)
@@ -369,17 +369,17 @@ class PhaseReportRenderTests(unittest.TestCase):
         dphi_slm = theta - np.pi
         a, b, dphi_comb = 0.03, 0.02, 0.4
         y = a**2 + b**2 * g**2 + 2 * a * b * g * np.cos(dphi_slm + dphi_comb)
-        sem = np.full(n, 1e-5)
+        std = np.full(n, 1e-5)
         fit = PhaseFit(
             dphi_comb=dphi_comb, dphi_comb_err=0.02,
             a=a, a_err=1e-3, b=b, b_err=1e-3,
             amp=2 * a * b, amp_err=1e-4,
             offset=0.0, offset_err=1e-5,
-            chi2_red=1.1, dof=n - 3, birge=1.05, r2=0.99,
+            r2=0.99,
             eta_ref=a, eta_tgt=b, bound_frac=1.0,
             a_at_bound=False, b_at_bound=False,
             bg0=0.0, bg1=0.0, bg2=0.0,
-            dphi_slm=dphi_slm, g=g, y=y, sem=sem,
+            dphi_slm=dphi_slm, g=g, y=y, std=std,
             known=a**2 + b**2 * g**2, y_pred=y, residuals=np.zeros(n),
         )
         fig = Figure(figsize=(8, 4))
@@ -397,7 +397,7 @@ class CombPhaseJsonTests(unittest.TestCase):
 
     @staticmethod
     def _fit(dphi: float, frac: float):
-        from slm_module.tpa_phase import PhaseFit
+        from calibration_module.phase import PhaseFit
 
         n = 5
         arr = np.zeros(n)
@@ -406,18 +406,18 @@ class CombPhaseJsonTests(unittest.TestCase):
             a=0.05, a_err=1e-3, b=0.048, b_err=1e-3,
             amp=2 * 0.05 * 0.048, amp_err=1e-4,
             offset=0.0, offset_err=1e-5,
-            chi2_red=1.0, dof=n - 3, birge=1.0, r2=0.99,
+            r2=0.99,
             eta_ref=0.05, eta_tgt=0.048, bound_frac=frac,
             a_at_bound=False, b_at_bound=False,
             bg0=0.0, bg1=0.0, bg2=0.0,
-            dphi_slm=arr, g=arr, y=arr, sem=np.ones(n),
+            dphi_slm=arr, g=arr, y=arr, std=np.ones(n),
             known=arr, y_pred=arr, residuals=arr,
         )
 
     def test_round_trip_and_method_selection(self) -> None:
         import json
 
-        from slm_module.tpa_phase import load_comb_phase_json, save_comb_phase_json
+        from calibration_module.phase import load_comb_phase_json, save_comb_phase_json
 
         step6 = self.out / "step6.json"
         step6.write_text(

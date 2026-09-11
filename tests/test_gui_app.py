@@ -185,8 +185,13 @@ class MainWindowStartupTests(unittest.TestCase):
         # mirror-symmetric channel grid: centre 510 px, pitch 20, one guard skip
         coords = np.array([420.0, 440.0, 480.0, 500.0, 520.0, 540.0, 580.0, 600.0])
         wavelengths = -0.005 * coords + 781.0
-        levels = np.array([0, 512, 1023], dtype=int)
-        intensity = np.tile([0.0, 0.5, 1.0], (coords.size, 1))
+        # the encoding page loads with method="fit", so the fixture curve has
+        # to be sin^2-shaped -- see tests/test_slm_encoding.sin2_curve
+        levels = np.arange(380, 901, 20, dtype=int)
+        intensity = np.tile(
+            np.sin(np.pi * (levels - 390.0) / (2.0 * (860.0 - 390.0))) ** 2,
+            (coords.size, 1),
+        )
         calib = CalibrationResult(
             wavelength=wavelengths,
             coordinates=coords,
@@ -230,14 +235,14 @@ class MainWindowStartupTests(unittest.TestCase):
             # same-thread emit is delivered synchronously by Qt
             dock.bridge.on_sample(
                 MonitorSample(
-                    value=0.0123, std=0.0004, sem=0.0001, index=0, timestamp=1.0
+                    value=0.0123, std=0.0004, std_ratio=0.0325, index=0, timestamp=1.0
                 )
             )
             dock.bridge.on_sample(
                 MonitorSample(value=0.0125, std=None, index=1, timestamp=2.0)
             )
             self.assertEqual(view.sample_count, 2)
-            view._draw_samples()   # render path handles a None std/sem
+            view._draw_samples()   # render path handles a None std/std_ratio
             self.assertIn("reading 2", view.status_label.text())
             view.clear()
             self.assertEqual(view.sample_count, 0)

@@ -1,0 +1,556 @@
+
+==== 2026-09-06 18:35:13 start-at 6 ====
+Run folder : src/calib_data/run_0906_1835
+Step 3 in  : src/calib_data/run_0906/calib_step3b_0906_1721.json
+Log        : src/calib_data/run_0906_1835/run.log
+
+======================================================================
+== STEP 6  (calib_step6_v2)
+==   in   : src/calib_data/run_0906/calib_step3b_0906_1721.json
+==   out  : src/calib_data/run_0906_1835
+==   pairs: [2, 3, 4, 5, 6]
+==   channel width: 35 px
+==   channel pading: 15 px
+======================================================================
+Step 6 v2: 37 acquisitions/pair over 12 levels (10 estimator + 2 verification), interleaved, brightest first (~6.3 min/pair)
+Pairs: [2, 3, 4, 5, 6]
+  display 1: 1920x1080 (EM2FPAB24B,ELE,0001,8011730240001)
+  display 2: 1920x1200 (LCOS-SLM,SOC,8001,2018021001)
+SLM: connected on display 2 (1920x1200)
+SLM: DVI mode set (USB device 1)
+DAQ: Dev1 (USB-6251 (BNC)) ai0 @ 1000 S/s, +/-0.1 V, low-pass 20 Hz -- T_both 10 s, T_single 10 s
+
+=== Sweep: pair 2 ===
+[1/37] pair 2 rep 0 x=1.000 w=1.000 (10s) -> 35.3129 mV  std ratio 2.25%
+[2/37] pair 2 rep 0 x=1.000 w=0.900 (10s) -> 31.9089 mV  std ratio 2.86%
+[3/37] pair 2 rep 0 x=1.000 w=0.700 (10s) -> 25.2458 mV  std ratio 3.22%
+[4/37] pair 2 rep 0 x=1.000 w=0.450 (10s) -> 16.1637 mV  std ratio 3.74%
+    near the +/-0.1 V rail (raw peak 0.1055 V, mean 18.48 mV) -> remeasuring at +/-0.2 V
+[5/37] pair 2 rep 0 x=1.000 w=0.250 (10s) -> 8.5708 mV  std ratio 4.79%  [+/-0.2 V]
+[6/37] pair 2 rep 0 x=0.500 w=0.500 (10s) -> 8.8228 mV  std ratio 4.70%
+    near the +/-0.1 V rail (raw peak 0.0976 V, mean 7.39 mV) -> remeasuring at +/-0.2 V
+[7/37] pair 2 rep 0 x=1.000 w=0.200 (10s) -> 6.5419 mV  std ratio 4.81%  [+/-0.2 V]
+[8/37] pair 2 rep 0 x=1.000 w=0.000 (10s) -> 0.1758 mV  std ratio 37.92%
+[9/37] pair 2 rep 0 x=0.000 w=1.000 (10s) -> 0.1650 mV  std ratio 40.19%
+[10/37] pair 2 rep 0 x=0.500 w=0.000 (10s) -> 0.0625 mV  std ratio 89.89%
+[11/37] pair 2 rep 0 x=0.000 w=0.500 (10s) -> 0.0653 mV  std ratio 87.67%
+[12/37] pair 2 rep 0 x=0.000 w=0.000 (10s) -> -0.0620 mV  std ratio 60.82%
+[13/37] pair 2 rep 1 x=1.000 w=1.000 (10s) -> 35.6853 mV  std ratio 2.66%
+[14/37] pair 2 rep 1 x=1.000 w=0.900 (10s) -> 31.9866 mV  std ratio 2.82%
+[15/37] pair 2 rep 1 x=1.000 w=0.700 (10s) -> 25.4612 mV  std ratio 15.61%
+[16/37] pair 2 rep 1 x=1.000 w=0.450 (10s) -> 16.0235 mV  std ratio 3.38%
+[17/37] pair 2 rep 1 x=1.000 w=0.250 (10s) -> 8.4055 mV  std ratio 4.69%
+[18/37] pair 2 rep 1 x=0.500 w=0.500 (10s) -> 8.6721 mV  std ratio 4.60%
+[19/37] pair 2 rep 1 x=1.000 w=0.200 (10s) -> 6.5410 mV  std ratio 5.15%
+[20/37] pair 2 rep 1 x=1.000 w=0.000 (10s) -> 0.1652 mV  std ratio 42.30%
+[21/37] pair 2 rep 1 x=0.000 w=1.000 (10s) -> 0.1549 mV  std ratio 46.38%
+    near the +/-0.1 V rail (raw peak 0.1055 V, mean 33.23 mV) -> remeasuring at +/-0.2 V
+[22/37] pair 2 rep 1 x=0.500 w=0.000 (10s) -> 0.0639 mV  std ratio 86.82%  [+/-0.2 V]
+[23/37] pair 2 rep 1 x=0.000 w=0.500 (10s) -> 0.0635 mV  std ratio 94.35%
+[24/37] pair 2 rep 1 x=0.000 w=0.000 (10s) -> -0.0700 mV  std ratio 50.46%
+[25/37] pair 2 rep 2 x=1.000 w=0.900 (10s) -> 31.6752 mV  std ratio 2.99%
+[26/37] pair 2 rep 2 x=1.000 w=0.700 (10s) -> 25.4072 mV  std ratio 2.97%
+[27/37] pair 2 rep 2 x=1.000 w=0.450 (10s) -> 16.2533 mV  std ratio 3.82%
+[28/37] pair 2 rep 2 x=1.000 w=0.250 (10s) -> 8.3701 mV  std ratio 4.59%
+[29/37] pair 2 rep 2 x=0.500 w=0.500 (10s) -> 8.5029 mV  std ratio 4.02%
+[30/37] pair 2 rep 2 x=1.000 w=0.200 (10s) -> 6.4031 mV  std ratio 5.29%
+[31/37] pair 2 rep 2 x=1.000 w=0.000 (10s) -> 0.1458 mV  std ratio 48.62%
+[32/37] pair 2 rep 3 x=1.000 w=0.900 (10s) -> 31.7555 mV  std ratio 2.76%
+[33/37] pair 2 rep 3 x=1.000 w=0.700 (10s) -> 25.1272 mV  std ratio 2.86%
+[34/37] pair 2 rep 3 x=1.000 w=0.450 (10s) -> 16.1870 mV  std ratio 3.53%
+[35/37] pair 2 rep 3 x=1.000 w=0.200 (10s) -> 6.4541 mV  std ratio 4.79%
+[36/37] pair 2 rep 4 x=1.000 w=0.900 (10s) -> 31.7005 mV  std ratio 2.77%
+[37/37] pair 2 rep 5 x=1.000 w=0.900 (10s) -> 31.3679 mV  std ratio 2.34%
+
+=== Sweep: pair 3 ===
+[1/37] pair 3 rep 0 x=1.000 w=1.000 (10s) -> 35.4682 mV  std ratio 2.77%
+[2/37] pair 3 rep 0 x=1.000 w=0.900 (10s) -> 32.3111 mV  std ratio 2.97%
+[3/37] pair 3 rep 0 x=1.000 w=0.700 (10s) -> 25.3393 mV  std ratio 3.45%
+[4/37] pair 3 rep 0 x=1.000 w=0.450 (10s) -> 15.8954 mV  std ratio 3.75%
+[5/37] pair 3 rep 0 x=1.000 w=0.250 (10s) -> 8.3867 mV  std ratio 4.46%
+[6/37] pair 3 rep 0 x=0.500 w=0.500 (10s) -> 8.8796 mV  std ratio 4.51%
+[7/37] pair 3 rep 0 x=1.000 w=0.200 (10s) -> 6.2925 mV  std ratio 5.21%
+[8/37] pair 3 rep 0 x=1.000 w=0.000 (10s) -> 0.2255 mV  std ratio 32.66%
+[9/37] pair 3 rep 0 x=0.000 w=1.000 (10s) -> 0.1824 mV  std ratio 41.22%
+[10/37] pair 3 rep 0 x=0.500 w=0.000 (10s) -> 0.0984 mV  std ratio 63.37%
+[11/37] pair 3 rep 0 x=0.000 w=0.500 (10s) -> 0.0677 mV  std ratio 78.25%
+[12/37] pair 3 rep 0 x=0.000 w=0.000 (10s) -> -0.0602 mV  std ratio 58.12%
+[13/37] pair 3 rep 1 x=1.000 w=1.000 (10s) -> 35.7065 mV  std ratio 2.92%
+[14/37] pair 3 rep 1 x=1.000 w=0.900 (10s) -> 31.8340 mV  std ratio 2.70%
+[15/37] pair 3 rep 1 x=1.000 w=0.700 (10s) -> 24.6156 mV  std ratio 3.23%
+[16/37] pair 3 rep 1 x=1.000 w=0.450 (10s) -> 16.2562 mV  std ratio 3.83%
+[17/37] pair 3 rep 1 x=1.000 w=0.250 (10s) -> 8.5025 mV  std ratio 4.94%
+[18/37] pair 3 rep 1 x=0.500 w=0.500 (10s) -> 8.8694 mV  std ratio 4.44%
+[19/37] pair 3 rep 1 x=1.000 w=0.200 (10s) -> 6.2863 mV  std ratio 5.83%
+[20/37] pair 3 rep 1 x=1.000 w=0.000 (10s) -> 0.2110 mV  std ratio 34.98%
+[21/37] pair 3 rep 1 x=0.000 w=1.000 (10s) -> 0.1671 mV  std ratio 38.59%
+[22/37] pair 3 rep 1 x=0.500 w=0.000 (10s) -> 0.0953 mV  std ratio 60.56%
+[23/37] pair 3 rep 1 x=0.000 w=0.500 (10s) -> 0.0562 mV  std ratio 102.06%
+[24/37] pair 3 rep 1 x=0.000 w=0.000 (10s) -> -0.0631 mV  std ratio 56.70%
+[25/37] pair 3 rep 2 x=1.000 w=0.900 (10s) -> 32.0878 mV  std ratio 2.94%
+[26/37] pair 3 rep 2 x=1.000 w=0.700 (10s) -> 25.3429 mV  std ratio 2.67%
+[27/37] pair 3 rep 2 x=1.000 w=0.450 (10s) -> 15.8845 mV  std ratio 3.44%
+[28/37] pair 3 rep 2 x=1.000 w=0.250 (10s) -> 8.4083 mV  std ratio 4.80%
+[29/37] pair 3 rep 2 x=0.500 w=0.500 (10s) -> 8.9262 mV  std ratio 4.24%
+[30/37] pair 3 rep 2 x=1.000 w=0.200 (10s) -> 6.3349 mV  std ratio 5.48%
+[31/37] pair 3 rep 2 x=1.000 w=0.000 (10s) -> 0.2158 mV  std ratio 33.23%
+[32/37] pair 3 rep 3 x=1.000 w=0.900 (10s) -> 31.8538 mV  std ratio 3.05%
+[33/37] pair 3 rep 3 x=1.000 w=0.700 (10s) -> 24.9827 mV  std ratio 2.63%
+[34/37] pair 3 rep 3 x=1.000 w=0.450 (10s) -> 15.8955 mV  std ratio 3.82%
+[35/37] pair 3 rep 3 x=1.000 w=0.200 (10s) -> 6.3396 mV  std ratio 5.21%
+[36/37] pair 3 rep 4 x=1.000 w=0.900 (10s) -> 32.0506 mV  std ratio 2.64%
+[37/37] pair 3 rep 5 x=1.000 w=0.900 (10s) -> 32.0085 mV  std ratio 3.02%
+
+=== Sweep: pair 4 ===
+[1/37] pair 4 rep 0 x=1.000 w=1.000 (10s) -> 40.0872 mV  std ratio 2.63%
+[2/37] pair 4 rep 0 x=1.000 w=0.900 (10s) -> 35.7120 mV  std ratio 2.38%
+[3/37] pair 4 rep 0 x=1.000 w=0.700 (10s) -> 27.7135 mV  std ratio 2.49%
+[4/37] pair 4 rep 0 x=1.000 w=0.450 (10s) -> 17.8033 mV  std ratio 3.11%
+[5/37] pair 4 rep 0 x=1.000 w=0.250 (10s) -> 9.5656 mV  std ratio 4.42%
+[6/37] pair 4 rep 0 x=0.500 w=0.500 (10s) -> 10.0687 mV  std ratio 4.45%
+[7/37] pair 4 rep 0 x=1.000 w=0.200 (10s) -> 7.1398 mV  std ratio 4.71%
+[8/37] pair 4 rep 0 x=1.000 w=0.000 (10s) -> 0.1952 mV  std ratio 38.05%
+[9/37] pair 4 rep 0 x=0.000 w=1.000 (10s) -> 0.0748 mV  std ratio 79.46%
+[10/37] pair 4 rep 0 x=0.500 w=0.000 (10s) -> 0.0628 mV  std ratio 92.29%
+[11/37] pair 4 rep 0 x=0.000 w=0.500 (10s) -> 0.0044 mV  std ratio 1234.90%
+[12/37] pair 4 rep 0 x=0.000 w=0.000 (10s) -> -0.0797 mV  std ratio 47.02%
+[13/37] pair 4 rep 1 x=1.000 w=1.000 (10s) -> 40.2499 mV  std ratio 2.56%
+[14/37] pair 4 rep 1 x=1.000 w=0.900 (10s) -> 35.2750 mV  std ratio 2.51%
+[15/37] pair 4 rep 1 x=1.000 w=0.700 (10s) -> 27.9474 mV  std ratio 3.06%
+[16/37] pair 4 rep 1 x=1.000 w=0.450 (10s) -> 17.7589 mV  std ratio 3.49%
+[17/37] pair 4 rep 1 x=1.000 w=0.250 (10s) -> 9.5586 mV  std ratio 4.38%
+[18/37] pair 4 rep 1 x=0.500 w=0.500 (10s) -> 10.0141 mV  std ratio 4.14%
+[19/37] pair 4 rep 1 x=1.000 w=0.200 (10s) -> 7.2907 mV  std ratio 4.86%
+[20/37] pair 4 rep 1 x=1.000 w=0.000 (10s) -> 0.1941 mV  std ratio 38.40%
+[21/37] pair 4 rep 1 x=0.000 w=1.000 (10s) -> 0.0749 mV  std ratio 77.71%
+[22/37] pair 4 rep 1 x=0.500 w=0.000 (10s) -> 0.0651 mV  std ratio 88.82%
+[23/37] pair 4 rep 1 x=0.000 w=0.500 (10s) -> 0.0103 mV  std ratio 442.36%
+[24/37] pair 4 rep 1 x=0.000 w=0.000 (10s) -> -0.0677 mV  std ratio 56.60%
+[25/37] pair 4 rep 2 x=1.000 w=0.900 (10s) -> 35.8204 mV  std ratio 3.17%
+[26/37] pair 4 rep 2 x=1.000 w=0.700 (10s) -> 27.7937 mV  std ratio 2.90%
+[27/37] pair 4 rep 2 x=1.000 w=0.450 (10s) -> 17.7772 mV  std ratio 3.49%
+[28/37] pair 4 rep 2 x=1.000 w=0.250 (10s) -> 9.4356 mV  std ratio 4.24%
+[29/37] pair 4 rep 2 x=0.500 w=0.500 (10s) -> 9.9734 mV  std ratio 4.25%
+[30/37] pair 4 rep 2 x=1.000 w=0.200 (10s) -> 7.2202 mV  std ratio 5.32%
+[31/37] pair 4 rep 2 x=1.000 w=0.000 (10s) -> 0.2098 mV  std ratio 35.69%
+[32/37] pair 4 rep 3 x=1.000 w=0.900 (10s) -> 35.2603 mV  std ratio 2.46%
+[33/37] pair 4 rep 3 x=1.000 w=0.700 (10s) -> 27.4163 mV  std ratio 2.55%
+[34/37] pair 4 rep 3 x=1.000 w=0.450 (10s) -> 17.4170 mV  std ratio 3.85%
+[35/37] pair 4 rep 3 x=1.000 w=0.200 (10s) -> 7.2315 mV  std ratio 4.81%
+[36/37] pair 4 rep 4 x=1.000 w=0.900 (10s) -> 35.4581 mV  std ratio 3.00%
+[37/37] pair 4 rep 5 x=1.000 w=0.900 (10s) -> 35.3362 mV  std ratio 2.46%
+
+=== Sweep: pair 5 ===
+[1/37] pair 5 rep 0 x=1.000 w=1.000 (10s) -> 49.7160 mV  std ratio 2.86%
+[2/37] pair 5 rep 0 x=1.000 w=0.900 (10s) -> 44.6507 mV  std ratio 2.94%
+[3/37] pair 5 rep 0 x=1.000 w=0.700 (10s) -> 35.1890 mV  std ratio 3.36%
+[4/37] pair 5 rep 0 x=1.000 w=0.450 (10s) -> 22.2828 mV  std ratio 2.98%
+[5/37] pair 5 rep 0 x=1.000 w=0.250 (10s) -> 12.0166 mV  std ratio 3.99%
+[6/37] pair 5 rep 0 x=0.500 w=0.500 (10s) -> 12.8017 mV  std ratio 3.43%
+[7/37] pair 5 rep 0 x=1.000 w=0.200 (10s) -> 9.1755 mV  std ratio 4.45%
+[8/37] pair 5 rep 0 x=1.000 w=0.000 (10s) -> 0.2806 mV  std ratio 28.79%
+[9/37] pair 5 rep 0 x=0.000 w=1.000 (10s) -> 0.2670 mV  std ratio 30.64%
+[10/37] pair 5 rep 0 x=0.500 w=0.000 (10s) -> 0.1293 mV  std ratio 51.86%
+[11/37] pair 5 rep 0 x=0.000 w=0.500 (10s) -> 0.1385 mV  std ratio 48.53%
+[12/37] pair 5 rep 0 x=0.000 w=0.000 (10s) -> -0.0689 mV  std ratio 50.12%
+[13/37] pair 5 rep 1 x=1.000 w=1.000 (10s) -> 50.4833 mV  std ratio 2.66%
+[14/37] pair 5 rep 1 x=1.000 w=0.900 (10s) -> 44.5913 mV  std ratio 2.72%
+[15/37] pair 5 rep 1 x=1.000 w=0.700 (10s) -> 35.2852 mV  std ratio 2.58%
+[16/37] pair 5 rep 1 x=1.000 w=0.450 (10s) -> 22.5328 mV  std ratio 2.91%
+[17/37] pair 5 rep 1 x=1.000 w=0.250 (10s) -> 12.0758 mV  std ratio 4.01%
+[18/37] pair 5 rep 1 x=0.500 w=0.500 (10s) -> 12.8566 mV  std ratio 3.76%
+[19/37] pair 5 rep 1 x=1.000 w=0.200 (10s) -> 9.0591 mV  std ratio 4.22%
+[20/37] pair 5 rep 1 x=1.000 w=0.000 (10s) -> 0.2871 mV  std ratio 27.32%
+[21/37] pair 5 rep 1 x=0.000 w=1.000 (10s) -> 0.2832 mV  std ratio 27.78%
+[22/37] pair 5 rep 1 x=0.500 w=0.000 (10s) -> 0.1208 mV  std ratio 51.36%
+[23/37] pair 5 rep 1 x=0.000 w=0.500 (10s) -> 0.1476 mV  std ratio 45.26%
+[24/37] pair 5 rep 1 x=0.000 w=0.000 (10s) -> -0.0651 mV  std ratio 54.50%
+[25/37] pair 5 rep 2 x=1.000 w=0.900 (10s) -> 45.1547 mV  std ratio 2.46%
+[26/37] pair 5 rep 2 x=1.000 w=0.700 (10s) -> 35.4274 mV  std ratio 2.89%
+[27/37] pair 5 rep 2 x=1.000 w=0.450 (10s) -> 22.6200 mV  std ratio 3.15%
+[28/37] pair 5 rep 2 x=1.000 w=0.250 (10s) -> 12.1536 mV  std ratio 3.91%
+[29/37] pair 5 rep 2 x=0.500 w=0.500 (10s) -> 12.7933 mV  std ratio 3.64%
+[30/37] pair 5 rep 2 x=1.000 w=0.200 (10s) -> 9.0524 mV  std ratio 4.21%
+[31/37] pair 5 rep 2 x=1.000 w=0.000 (10s) -> 0.2808 mV  std ratio 29.71%
+[32/37] pair 5 rep 3 x=1.000 w=0.900 (10s) -> 44.4965 mV  std ratio 2.48%
+[33/37] pair 5 rep 3 x=1.000 w=0.700 (10s) -> 35.3221 mV  std ratio 2.86%
+[34/37] pair 5 rep 3 x=1.000 w=0.450 (10s) -> 22.3107 mV  std ratio 2.84%
+[35/37] pair 5 rep 3 x=1.000 w=0.200 (10s) -> 9.2198 mV  std ratio 4.37%
+[36/37] pair 5 rep 4 x=1.000 w=0.900 (10s) -> 44.2628 mV  std ratio 2.41%
+[37/37] pair 5 rep 5 x=1.000 w=0.900 (10s) -> 44.8016 mV  std ratio 2.61%
+
+=== Sweep: pair 6 ===
+[1/37] pair 6 rep 0 x=1.000 w=1.000 (10s) -> 71.9975 mV  std ratio 2.43%
+[2/37] pair 6 rep 0 x=1.000 w=0.900 (10s) -> 64.9085 mV  std ratio 2.83%
+[3/37] pair 6 rep 0 x=1.000 w=0.700 (10s) -> 49.8425 mV  std ratio 3.39%
+[4/37] pair 6 rep 0 x=1.000 w=0.450 (10s) -> 32.1966 mV  std ratio 2.62%
+[5/37] pair 6 rep 0 x=1.000 w=0.250 (10s) -> 16.8190 mV  std ratio 3.36%
+[6/37] pair 6 rep 0 x=0.500 w=0.500 (10s) -> 18.2875 mV  std ratio 3.12%
+[7/37] pair 6 rep 0 x=1.000 w=0.200 (10s) -> 12.7551 mV  std ratio 3.94%
+[8/37] pair 6 rep 0 x=1.000 w=0.000 (10s) -> 0.5609 mV  std ratio 18.03%
+[9/37] pair 6 rep 0 x=0.000 w=1.000 (10s) -> 0.6936 mV  std ratio 15.02%
+[10/37] pair 6 rep 0 x=0.500 w=0.000 (10s) -> 0.3463 mV  std ratio 24.43%
+[11/37] pair 6 rep 0 x=0.000 w=0.500 (10s) -> 0.3983 mV  std ratio 24.02%
+[12/37] pair 6 rep 0 x=0.000 w=0.000 (10s) -> -0.0605 mV  std ratio 61.33%
+[13/37] pair 6 rep 1 x=1.000 w=1.000 (10s) -> 71.8507 mV  std ratio 2.35%
+[14/37] pair 6 rep 1 x=1.000 w=0.900 (10s) -> 63.5549 mV  std ratio 2.43%
+[15/37] pair 6 rep 1 x=1.000 w=0.700 (10s) -> 50.0898 mV  std ratio 2.13%
+[16/37] pair 6 rep 1 x=1.000 w=0.450 (10s) -> 32.5554 mV  std ratio 3.10%
+[17/37] pair 6 rep 1 x=1.000 w=0.250 (10s) -> 16.8246 mV  std ratio 3.53%
+[18/37] pair 6 rep 1 x=0.500 w=0.500 (10s) -> 18.1986 mV  std ratio 3.35%
+[19/37] pair 6 rep 1 x=1.000 w=0.200 (10s) -> 12.7630 mV  std ratio 3.77%
+[20/37] pair 6 rep 1 x=1.000 w=0.000 (10s) -> 0.5610 mV  std ratio 18.18%
+[21/37] pair 6 rep 1 x=0.000 w=1.000 (10s) -> 0.6884 mV  std ratio 15.51%
+[22/37] pair 6 rep 1 x=0.500 w=0.000 (10s) -> 0.3351 mV  std ratio 24.73%
+[23/37] pair 6 rep 1 x=0.000 w=0.500 (10s) -> 0.3971 mV  std ratio 23.34%
+[24/37] pair 6 rep 1 x=0.000 w=0.000 (10s) -> -0.0562 mV  std ratio 65.78%
+[25/37] pair 6 rep 2 x=1.000 w=0.900 (10s) -> 64.1246 mV  std ratio 2.20%
+[26/37] pair 6 rep 2 x=1.000 w=0.700 (10s) -> 50.1587 mV  std ratio 2.57%
+[27/37] pair 6 rep 2 x=1.000 w=0.450 (10s) -> 31.8629 mV  std ratio 2.80%
+[28/37] pair 6 rep 2 x=1.000 w=0.250 (10s) -> 16.5498 mV  std ratio 3.38%
+[29/37] pair 6 rep 2 x=0.500 w=0.500 (10s) -> 18.2532 mV  std ratio 3.50%
+[30/37] pair 6 rep 2 x=1.000 w=0.200 (10s) -> 13.1399 mV  std ratio 4.36%
+[31/37] pair 6 rep 2 x=1.000 w=0.000 (10s) -> 0.5738 mV  std ratio 18.70%
+[32/37] pair 6 rep 3 x=1.000 w=0.900 (10s) -> 65.3893 mV  std ratio 2.78%
+[33/37] pair 6 rep 3 x=1.000 w=0.700 (10s) -> 50.4110 mV  std ratio 2.24%
+[34/37] pair 6 rep 3 x=1.000 w=0.450 (10s) -> 31.9077 mV  std ratio 2.78%
+[35/37] pair 6 rep 3 x=1.000 w=0.200 (10s) -> 12.6982 mV  std ratio 3.97%
+[36/37] pair 6 rep 4 x=1.000 w=0.900 (10s) -> 64.9167 mV  std ratio 2.09%
+[37/37] pair 6 rep 5 x=1.000 w=0.900 (10s) -> 64.6826 mV  std ratio 2.59%
+
+Saved 185 rows to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_meas_0906_1912.csv
+
+=== pair 2 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), 0.200 mV systematic floor)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0660      0.0057         0.0365     0.2017
+    x-only   0.50  0.00   2     0.0632      0.0010         0.0559     0.2039
+    x-only   1.00  0.00   3     0.1623      0.0152         0.0691     0.2039
+    w-only   0.00  0.50   2     0.0644      0.0013         0.0586     0.2042
+    w-only   0.00  1.00   2     0.1599      0.0072         0.0691     0.2059
+    verify+  0.50  0.50   3     8.6660      0.1600         0.3851     0.2991
+    cross    1.00  0.20   4     6.4850      0.0684         0.3249     0.2577
+    verify+  1.00  0.25   3     8.4488      0.1071         0.3963     0.3039
+    cross    1.00  0.45   4    16.1569      0.0967         0.5846     0.3542
+    cross    1.00  0.70   4    25.3103      0.1525         1.5656     0.8079
+    cross    1.00  0.90   6    31.7324      0.2161         0.8760     0.4098
+    cross*   1.00  1.00   2    35.4991      0.2633         0.8703     0.6471
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 0/12 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 2.2333e-04 +/- 2.746e-04
+    a_w = 2.2201e-04 +/- 2.759e-04
+    d   = -5.6852e-02 +/- 1.710e-01 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0091  -0.05
+      x-only   0.50  0.00     0.0084   0.04
+      x-only   1.00  0.00    -0.0042  -0.02
+      w-only   0.00  0.50     0.0103   0.05
+      w-only   0.00  1.00    -0.0052  -0.03
+      residual RMS = 0.0078 mV   max |pull| = 0.05   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 3.6048e-02 +/- 7.247e-04
+    eta   = 1.8986e-01 +/- 1.908e-03   (99.5 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.5474 +/- 0.3793 mV   [= a_x]
+    R^2   = 0.9988
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      6.4975      6.6623    -0.1648  -0.57
+     0.45     16.1138     15.6744     0.4395   1.18
+     0.70     25.2118     24.6864     0.5254   0.64
+     0.90     31.5895     31.8961    -0.3066  -0.69
+    residual RMS = 0.3842 mV
+
+  Checks:
+    anchor      D(0) measured =   0.2282 +/- 0.2868 mV  vs beta0 =  -0.5474 mV   pull = +1.63
+    top-drive   D(1.00) measured =  35.3339 +/- 0.6736 mV  vs line =  35.5009 mV   -0.47%  (pull -0.20)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.5474 +/- 0.3793 mV (cross line extrapolated to w=0)
+       a_x         =    0.2233 +/- 0.2746 mV (x-only block)
+       difference  =   -0.7707 +/- 0.4683 mV   pull = -1.65   OK
+    2. product-only dependence   Y depends on (x, w) only via x*w
+       x*w = 0.250   model expects eta^2*(x*w) = 9.0121 mV
+         (1.00, 0.25) n=3  TPA residue =    8.2268 +/- 0.3675 mV
+         (0.50, 0.50) n=3  TPA residue =    8.5001 +/- 0.3277 mV
+         (1.0, 0.25) - (0.5, 0.5) = -0.2733 +/- 0.4414 mV  (-3.27%)  pull = -0.62   OK
+
+=== pair 3 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), 0.200 mV systematic floor)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0616      0.0021         0.0354     0.2016
+    x-only   0.50  0.00   2     0.0969      0.0022         0.0601     0.2045
+    x-only   1.00  0.00   3     0.2175      0.0074         0.0731     0.2044
+    w-only   0.00  0.50   2     0.0620      0.0082         0.0552     0.2038
+    w-only   0.00  1.00   2     0.1747      0.0108         0.0698     0.2060
+    verify+  0.50  0.50   3     8.8918      0.0303         0.3910     0.3016
+    cross    1.00  0.20   4     6.3133      0.0278         0.3431     0.2635
+    verify+  1.00  0.25   3     8.4325      0.0616         0.3994     0.3052
+    cross    1.00  0.45   4    15.9829      0.1823         0.5932     0.3577
+    cross    1.00  0.70   4    25.0701      0.3469         0.7503     0.4251
+    cross    1.00  0.90   6    32.0243      0.1746         0.9241     0.4270
+    cross*   1.00  1.00   2    35.5874      0.1685         1.0124     0.7433
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 0/12 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 2.7849e-04 +/- 2.748e-04
+    a_w = 2.3036e-04 +/- 2.760e-04
+    d   = -5.4812e-02 +/- 1.710e-01 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0068  -0.03
+      x-only   0.50  0.00     0.0124   0.06
+      x-only   1.00  0.00    -0.0062  -0.03
+      w-only   0.00  0.50     0.0016   0.01
+      w-only   0.00  1.00    -0.0008  -0.00
+      residual RMS = 0.0070 mV   max |pull| = 0.06   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 3.6711e-02 +/- 7.077e-04
+    eta   = 1.9160e-01 +/- 1.847e-03   (103.7 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.8947 +/- 0.3850 mV   [= a_x]
+    R^2   = 0.9994
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      6.3220      6.4475    -0.1254  -0.42
+     0.45     15.9341     15.6251     0.3089   0.82
+     0.70     24.9637     24.8028     0.1609   0.36
+     0.90     31.8718     32.1450    -0.2732  -0.60
+    residual RMS = 0.2300 mV
+
+  Checks:
+    anchor      D(0) measured =   0.2791 +/- 0.2871 mV  vs beta0 =  -0.8947 mV   pull = +2.44
+    top-drive   D(1.00) measured =  35.4118 +/- 0.7665 mV  vs line =  35.8160 mV   -1.13%  (pull -0.46)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.8947 +/- 0.3850 mV (cross line extrapolated to w=0)
+       a_x         =    0.2785 +/- 0.2748 mV (x-only block)
+       difference  =   -1.1732 +/- 0.4730 mV   pull = -2.48   OK
+    2. product-only dependence   Y depends on (x, w) only via x*w
+       x*w = 0.250   model expects eta^2*(x*w) = 9.1777 mV
+         (1.00, 0.25) n=3  TPA residue =    8.1512 +/- 0.3688 mV
+         (0.50, 0.50) n=3  TPA residue =    8.6921 +/- 0.3301 mV
+         (1.0, 0.25) - (0.5, 0.5) = -0.5409 +/- 0.4441 mV  (-6.42%)  pull = -1.22   OK
+
+=== pair 4 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), 0.200 mV systematic floor)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0737      0.0085         0.0379     0.2018
+    x-only   0.50  0.00   2     0.0640      0.0016         0.0579     0.2042
+    x-only   1.00  0.00   3     0.1997      0.0088         0.0745     0.2046
+    w-only   0.00  0.50   2     0.0073      0.0042         0.0497     0.2031
+    w-only   0.00  1.00   2     0.0748      0.0000         0.0588     0.2043
+    verify+  0.50  0.50   3    10.0187      0.0478         0.4288     0.3182
+    cross    1.00  0.20   4     7.2206      0.0621         0.3556     0.2676
+    verify+  1.00  0.25   3     9.5199      0.0731         0.4137     0.3115
+    cross    1.00  0.45   4    17.6891      0.1823         0.6164     0.3674
+    cross    1.00  0.70   4    27.7177      0.2232         0.7622     0.4304
+    cross    1.00  0.90   6    35.4770      0.2371         0.9445     0.4344
+    cross*   1.00  1.00   2    40.1685      0.1150         1.0425     0.7638
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 0/12 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 2.7116e-04 +/- 2.750e-04
+    a_w = 1.4865e-04 +/- 2.749e-04
+    d   = -7.1521e-02 +/- 1.710e-01 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0022  -0.01
+      x-only   0.50  0.00    -0.0001  -0.00
+      x-only   1.00  0.00     0.0000   0.00
+      w-only   0.00  0.50     0.0045   0.02
+      w-only   0.00  1.00    -0.0023  -0.01
+      residual RMS = 0.0025 mV   max |pull| = 0.02   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 4.0389e-02 +/- 7.168e-04
+    eta   = 2.0097e-01 +/- 1.783e-03   (112.7 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.7194 +/- 0.3901 mV   [= a_x]
+    R^2   = 0.9997
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      7.2623      7.3583    -0.0959  -0.32
+     0.45     17.6937     17.4554     0.2383   0.62
+     0.70     27.6852     27.5525     0.1327   0.29
+     0.90     35.4148     35.6302    -0.2155  -0.46
+    residual RMS = 0.1803 mV
+
+  Checks:
+    anchor      D(0) measured =   0.2734 +/- 0.2874 mV  vs beta0 =  -0.7194 mV   pull = +2.05
+    top-drive   D(1.00) measured =  40.0914 +/- 0.7861 mV  vs line =  39.6691 mV   +1.06%  (pull +0.47)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.7194 +/- 0.3901 mV (cross line extrapolated to w=0)
+       a_x         =    0.2712 +/- 0.2750 mV (x-only block)
+       difference  =   -0.9906 +/- 0.4773 mV   pull = -2.08   OK
+    2. product-only dependence   Y depends on (x, w) only via x*w
+       x*w = 0.250   model expects eta^2*(x*w) = 10.0971 mV
+         (1.00, 0.25) n=3  TPA residue =    9.2831 +/- 0.3741 mV
+         (0.50, 0.50) n=3  TPA residue =    9.8804 +/- 0.3452 mV
+         (1.0, 0.25) - (0.5, 0.5) = -0.5972 +/- 0.4598 mV  (-6.23%)  pull = -1.30   OK
+
+=== pair 5 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), 0.200 mV systematic floor)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0670      0.0026         0.0350     0.2015
+    x-only   0.50  0.00   2     0.1251      0.0060         0.0646     0.2051
+    x-only   1.00  0.00   3     0.2829      0.0037         0.0809     0.2054
+    w-only   0.00  0.50   2     0.1431      0.0064         0.0670     0.2055
+    w-only   0.00  1.00   2     0.2751      0.0114         0.0802     0.2079
+    verify+  0.50  0.50   3    12.8172      0.0344         0.4624     0.3336
+    cross    1.00  0.20   4     9.1267      0.0840         0.3935     0.2806
+    verify+  1.00  0.25   3    12.0820      0.0687         0.4800     0.3417
+    cross    1.00  0.45   4    22.4366      0.1657         0.6661     0.3885
+    cross    1.00  0.70   4    35.3059      0.0985         1.0315     0.5532
+    cross    1.00  0.90   6    44.6596      0.3014         1.1628     0.5151
+    cross*   1.00  1.00   2    50.0997      0.5426         1.3839     0.9988
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 0/12 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 3.3806e-04 +/- 2.757e-04
+    a_w = 3.3925e-04 +/- 2.773e-04
+    d   = -5.1441e-02 +/- 1.713e-01 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0156  -0.08
+      x-only   0.50  0.00     0.0075   0.04
+      x-only   1.00  0.00    -0.0038  -0.02
+      w-only   0.00  0.50     0.0249   0.12
+      w-only   0.00  1.00    -0.0127  -0.06
+      residual RMS = 0.0148 mV   max |pull| = 0.12   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 5.0893e-02 +/- 8.063e-04
+    eta   = 2.2559e-01 +/- 1.787e-03   (126.2 sigma)   over w in [0.20, 0.90]
+    beta0 = -0.9194 +/- 0.4132 mV   [= a_x]
+    R^2   = 0.9994
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20      9.1103      9.2591    -0.1488  -0.48
+     0.45     22.3353     21.9823     0.3531   0.87
+     0.70     35.1199     34.7055     0.4144   0.73
+     0.90     44.4057     44.8840    -0.4783  -0.88
+    residual RMS = 0.3699 mV
+
+  Checks:
+    anchor      D(0) measured =   0.3499 +/- 0.2877 mV  vs beta0 =  -0.9194 mV   pull = +2.52
+    top-drive   D(1.00) measured =  49.8119 +/- 1.0165 mV  vs line =  49.9733 mV   -0.32%  (pull -0.14)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -0.9194 +/- 0.4132 mV (cross line extrapolated to w=0)
+       a_x         =    0.3381 +/- 0.2757 mV (x-only block)
+       difference  =   -1.2575 +/- 0.4967 mV   pull = -2.53   OK
+    2. product-only dependence   Y depends on (x, w) only via x*w
+       x*w = 0.250   model expects eta^2*(x*w) = 12.7232 mV
+         (1.00, 0.25) n=3  TPA residue =   11.7106 +/- 0.4001 mV
+         (0.50, 0.50) n=3  TPA residue =   12.5300 +/- 0.3599 mV
+         (1.0, 0.25) - (0.5, 0.5) = -0.8194 +/- 0.4912 mV  (-6.76%)  pull = -1.67   OK
+
+=== pair 6 ===
+Estimator: difference   D(w) = Y(1,w) - [a_w w + d] = eta^2 w + (a_x)
+Fit window: w in [0.20, 0.90]  (4 levels)
+
+  Level means  (sigma = hypot(max(rep_std, trace_std)/sqrt(n), 0.200 mV systematic floor)):
+    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)
+    dark     0.00  0.00   2    -0.0583      0.0030         0.0370     0.2017
+    x-only   0.50  0.00   2     0.3407      0.0079         0.0837     0.2086
+    x-only   1.00  0.00   3     0.5652      0.0074         0.1035     0.2087
+    w-only   0.00  0.50   2     0.3977      0.0008         0.0942     0.2108
+    w-only   0.00  1.00   2     0.6910      0.0037         0.1055     0.2134
+    verify+  0.50  0.50   3    18.2464      0.0449         0.6063     0.4031
+    cross    1.00  0.20   4    12.8391      0.2026         0.5151     0.3261
+    verify+  1.00  0.25   3    16.7311      0.1570         0.5731     0.3866
+    cross    1.00  0.45   4    32.1306      0.3195         0.9078     0.4960
+    cross    1.00  0.70   4    50.1255      0.2338         1.2940     0.6772
+    cross    1.00  0.90   6    64.5961      0.6547         1.6082     0.6863
+    cross*   1.00  1.00   2    71.9241      0.1038         1.7174     1.2307
+    (* excluded from the slope fit -- top-drive diagnostic; + verification only)
+    repeat scatter exceeds trace noise on 0/12 repeated levels -- encoding repeatability is not dominant
+
+  Background block (5 levels, 3 parameters -> 2 dof; used by steps 7/8, not by eta):
+    a_x = 6.0390e-04 +/- 2.787e-04
+    a_w = 7.2774e-04 +/- 2.817e-04
+    d   = -1.2838e-02 +/- 1.724e-01 mV
+    (q_x/q_w dropped -- FIT_Q = False; with two drive levels per arm
+     they are not separable from a_x/a_w, which is what produced negative background terms)
+      block     x     w   resid(mV)   pull
+      dark     0.00  0.00    -0.0455  -0.23
+      x-only   0.50  0.00     0.0516   0.25
+      x-only   1.00  0.00    -0.0258  -0.12
+      w-only   0.00  0.50     0.0467   0.22
+      w-only   0.00  1.00    -0.0239  -0.11
+      residual RMS = 0.0404 mV   max |pull| = 0.25   OK
+
+  Difference fit (GLS, background covariance propagated):
+    eta^2 = 7.3537e-02 +/- 9.887e-04
+    eta   = 2.7118e-01 +/- 1.823e-03   (148.7 sigma)   over w in [0.20, 0.90]
+    beta0 = -1.8435 +/- 0.4809 mV   [= a_x]
+    R^2   = 0.9997
+      w    D_meas(mV)   D_fit(mV)  resid(mV)   pull
+     0.20     12.7064     12.8639    -0.1576  -0.45
+     0.45     31.8160     31.2481     0.5679   1.11
+     0.70     49.6289     49.6324    -0.0035  -0.01
+     0.90     63.9540     64.3398    -0.3858  -0.55
+    residual RMS = 0.3522 mV
+
+  Checks:
+    anchor      D(0) measured =   0.6236 +/- 0.2903 mV  vs beta0 =  -1.8435 mV   pull = +4.39
+    top-drive   D(1.00) measured =  71.2092 +/- 1.2459 mV  vs line =  71.6935 mV   -0.68%  (pull -0.35)
+
+  Verification (checks on the model, not inputs to it):
+    1. intercept identity   beta0 = eta^2*0 + (a_x)
+       beta0       =   -1.8435 +/- 0.4809 mV (cross line extrapolated to w=0)
+       a_x         =    0.6039 +/- 0.2787 mV (x-only block)
+       difference  =   -2.4474 +/- 0.5558 mV   pull = -4.40   ** CHECK **
+    2. product-only dependence   Y depends on (x, w) only via x*w
+       x*w = 0.250   model expects eta^2*(x*w) = 18.3842 mV
+         (1.00, 0.25) n=3  TPA residue =   15.9581 +/- 0.4405 mV
+         (0.50, 0.50) n=3  TPA residue =   17.5935 +/- 0.4260 mV
+         (1.0, 0.25) - (0.5, 0.5) = -1.6353 +/- 0.5706 mV  (-9.75%)  pull = -2.87   OK
+
+Saved Step-3 calib + Step-6 v2 fits -> C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_result_0906_1912.json
+Plot saved to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_pair2_0906_1912.png
+Plot saved to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_pair3_0906_1912.png
+Plot saved to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_pair4_0906_1912.png
+Plot saved to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_pair5_0906_1912.png
+Plot saved to C:\Users\weishan\Desktop\RbONN\src\calib_data\run_0906_1835\calib_step6v2_pair6_0906_1912.png
+
+-- step 6 finished in 37.8 min
+-- step 6 result: src/calib_data/run_0906_1835/calib_step6v2_result_0906_1912.json
+
+======================================================================
+== STEP 7  (calib_step7_v2)
+==   in   : src/calib_data/run_0906_1835/calib_step6v2_result_0906_1912.json
+==   out  : src/calib_data/run_0906_1835
+==   pairs: [2, 3, 4, 5, 6]   ref: 2
+======================================================================
+  display 1: 1920x1080 (EM2FPAB24B,ELE,0001,8011730240001)
+  display 2: 1920x1200 (LCOS-SLM,SOC,8001,2018021001)
+SLM: connected on display 2 (1920x1200)
+SLM: DVI mode set (USB device 1)
+DAQ: Dev1 (USB-6251 (BNC)) ai0 @ 1000 S/s, +/-0.2 V, low-pass 20 Hz -- T_both 10 s, T_single 10 s
+
+=== Sweep: pair 2 vs reference 2  (x2=w2=0.9, sweep x2=w2 over [0.1, 0.188889, 0.277778, 0.366667, 0.455556, 0.544444, 0.633333, 0.722222, 0.811111, 0.9]) ===
+[1/11] pair 2 dark (all off, 10s) = -0.0515 mV

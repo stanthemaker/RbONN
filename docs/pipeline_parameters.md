@@ -1,5 +1,11 @@
 # RbONN 校准 Pipeline 参数完全指南
 
+> **已停更 —— `slm_module/pipeline.py` 目前是 legacy。** 整条校准链正在重写，
+> step 顺序和模型都还在变，pipeline 暂时不维护；实际在跑的是
+> `src/drafts/calib_step{6,7,8}_v1.py`。本文中的 SEM / Birge 误差放大 / χ²/dof
+> 已全部移除（改用 trace std），相关段落不再反映代码现状。见 README 的
+> "Code status"。
+
 本文档说明 `src/slm_module/pipeline.py` 中统一校准流水线的**每一个参数**：它的物理含义、取值范围、默认值、对测量速度/精度的影响，以及每个阶段的**算法流程**与**数值运行例子**。
 
 代码入口是 [`run_pipeline`](../src/slm_module/pipeline.py)，GUI 入口是 [`pipeline_page.py`](../src/slm_module/gui/pipeline_page.py)。

@@ -1,0 +1,41 @@
+{
+  "started": "2026-09-08 14:44:35",
+  "run_dir": "src/calib_data/run_0908_1444",
+  "steps_run": [
+    6,
+    7,
+    8
+  ],
+  "pairs": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "ref_index": 2,
+  "inputs": {
+    "step3": "src/calib_data/calib_step3c_0907_1358_pad10.json",
+    "step6_result": "src/calib_data/run_0908_1444/calib_step6v2_result_0908_1517.json",
+    "step7_result": "src/calib_data/run_0908_1444/calib_step7_result_0908_1528.json"
+  },
+  "status": "ok",
+  "outputs": [
+    "calib_step6v2_meas_0908_1517.csv",
+    "calib_step6v2_pair2_0908_1517.png",
+    "calib_step6v2_pair3_0908_1517.png",
+    "calib_step6v2_pair4_0908_1517.png",
+    "calib_step6v2_pair5_0908_1517.png",
+    "calib_step6v2_pair6_0908_1517.png",
+    "calib_step6v2_result_0908_1517.json",
+    "calib_step7_meas_0908_1528.csv",
+    "calib_step7_result_0908_1528.json",
+    "calib_step7_v2_pair3_refit.png",
+    "calib_step7_v2_pair4_refit.png",
+    "calib_step7_v2_pair5_refit.png",
+    "calib_step7_v2_pair6_refit.png",
+    "calib_step8_simple_0908_1535.csv",
+    "calib_step8_simple_0908_1535_compare_auto.png"
+  ],
+  "finished": "2026-09-08 15:35:56"
+}

@@ -110,10 +110,10 @@ class LiveSampleView(QtWidgets.QWidget):
         """Append one MonitorSample; the timer repaints on its own cadence."""
         value = float(sample.value)
         std = float(sample.std) if sample.std is not None else float("nan")
-        sem = getattr(sample, "sem", None)
-        sem = float(sem) if sem is not None else float("nan")
+        std_ratio = getattr(sample, "std_ratio", None)
+        std_ratio = float(std_ratio) if std_ratio is not None else float("nan")
         self.sample_count += 1
-        self._samples.append((self.sample_count, value, std, sem))
+        self._samples.append((self.sample_count, value, std, std_ratio))
         self._dirty = True
 
     def clear(self) -> None:
@@ -147,7 +147,7 @@ class LiveSampleView(QtWidgets.QWidget):
         n = np.array([s[0] for s in self._samples], dtype=float)
         value = np.array([s[1] for s in self._samples], dtype=float)
         std = np.array([s[2] for s in self._samples], dtype=float)
-        sem = np.array([s[3] for s in self._samples], dtype=float)
+        std_ratio = np.array([s[3] for s in self._samples], dtype=float)
 
         self.figure.clear()
         ax = self.figure.add_subplot(111)
@@ -166,8 +166,8 @@ class LiveSampleView(QtWidgets.QWidget):
         last = f"last {_format_volts(value[-1])}"
         if np.isfinite(std[-1]):
             last += f" \N{PLUS-MINUS SIGN} {_format_volts(std[-1])}"
-        if np.isfinite(sem[-1]):
-            last += f"  ·  SEM {_format_volts(sem[-1])}"
+        if np.isfinite(std_ratio[-1]):
+            last += f"  ·  std/mean {std_ratio[-1]*100:.2f}%"
         self.status_label.setText(f"reading {self.sample_count}  ·  {last}")
 
     @staticmethod

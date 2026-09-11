@@ -1,0 +1,86 @@
+==============================================================================
+STEP 7 v2  --  synth_step7_0902_2324.csv
+  step6 in : calib_step6v2_result_0903_0056.json
+  out dir  : c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit
+  REF = 1   SINGLE_BEAM_BG = True   METHOD = fixed_comb_only
+==============================================================================
+Step 6: eta[ref 1] = 0.1636 ; eta[2]=0.1485 eta[3]=0.1481 eta[4]=0.1664 eta[5]=0.1432
+Fitting pair(s) [2, 3, 4, 5] vs reference 1 from c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_step7_0902_2324.csv (one free parameter: dPhi_comb)
+
+=== Re-fit: pair 2 vs reference 1 ===
+Loaded 10 rows, dark = -0.1093 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 2 vs reference 1  (value +/- error):
+  dPhi_comb = +0.0430 +/- 0.0040 rad   ( +2.46 +/- 0.23 deg )
+     of which fringe noise 0.083 deg, step-6 eta 0.211 deg   [d(dPhi)/d(eta): ref +15.63, tgt +4.92 rad per unit eta]
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 148.4735 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 48.5689 mV   (pinned)
+  mean residual    = +0.0438 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 1.72   [pull = residual / std_total]
+     std_total     = 0.0865 (DAQ trace) (+) 0.0798 (step-6 eta) mV, median over points   -> 0.1177 mV
+  max |pull| on std alone = 2.51   (measurement only -- overstates, the eta error is not in it)
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair2_refit.png
+
+=== Re-fit: pair 3 vs reference 1 ===
+Loaded 10 rows, dark = -0.0307 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 3 vs reference 1  (value +/- error):
+  dPhi_comb = +0.1293 +/- 0.0038 rad   ( +7.41 +/- 0.22 deg )
+     of which fringe noise 0.079 deg, step-6 eta 0.200 deg   [d(dPhi)/d(eta): ref +14.87, tgt +4.63 rad per unit eta]
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 148.1091 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 48.4498 mV   (pinned)
+  mean residual    = -0.0669 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 1.91   [pull = residual / std_total]
+     std_total     = 0.0829 (DAQ trace) (+) 0.0752 (step-6 eta) mV, median over points   -> 0.1119 mV
+  max |pull| on std alone = 2.68   (measurement only -- overstates, the eta error is not in it)
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair3_refit.png
+
+=== Re-fit: pair 4 vs reference 1 ===
+Loaded 10 rows, dark = 0.0164 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 4 vs reference 1  (value +/- error):
+  dPhi_comb = +0.2536 +/- 0.0031 rad   ( +14.53 +/- 0.18 deg )
+     of which fringe noise 0.069 deg, step-6 eta 0.163 deg   [d(dPhi)/d(eta): ref +12.40, tgt +3.91 rad per unit eta]
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 166.4100 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 54.4364 mV   (pinned)
+  mean residual    = -0.0384 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 2.33   [pull = residual / std_total]
+     std_total     = 0.0798 (DAQ trace) (+) 0.0692 (step-6 eta) mV, median over points   -> 0.1049 mV
+  max |pull| on std alone = 3.26   (measurement only -- overstates, the eta error is not in it)
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair4_refit.png
+
+=== Re-fit: pair 5 vs reference 1 ===
+Loaded 10 rows, dark = -0.0174 mV
+Model:  Y = a^2 + b^2 sin^4(theta/2) + 2ab sin^2(theta/2) cos(dPhi_comb + pi - theta) + step6 single-beam
+            [both target channels swept together; theta the shared panel phase]
+            a = eta_ref, b = eta_tgt, background and dark ALL fixed from step 6
+            -> dPhi_comb is the ONLY free parameter
+Pair 5 vs reference 1  (value +/- error):
+  dPhi_comb = +0.4157 +/- 0.0033 rad   ( +23.82 +/- 0.19 deg )
+     of which fringe noise 0.071 deg, step-6 eta 0.173 deg   [d(dPhi)/d(eta): ref +12.96, tgt +3.68 rad per unit eta]
+  a (ref R_1)      = 163.5610 mV^0.5   (pinned to step-6 eta)
+  b (tgt eta CxCw) = 143.1672 mV^0.5   (pinned to step-6 eta)
+  fringe amp 2ab   = 46.8331 mV   (pinned)
+  mean residual    = -0.0330 mV   (NOT fitted -- should be ~0 if step 6 is right)
+  max |pull|       = 2.39   [pull = residual / std_total]
+     std_total     = 0.0713 (DAQ trace) (+) 0.0659 (step-6 eta) mV, median over points   -> 0.0971 mV
+  max |pull| on std alone = 3.35   (measurement only -- overstates, the eta error is not in it)
+  R^2 = 1.0000
+Plot saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_v2_pair5_refit.png
+
+Combined step-7 result (step3 + step6 + step7) saved to c:\Users\weishan\Desktop\RbONN\src\calib_data\synth_fit\calib_step7_result_0903_0057.json

@@ -481,6 +481,21 @@ class CenterGapGeometryTests(unittest.TestCase):
         self.assertEqual(legacy.x_channels[0].x_center, 490)
 
 
+SWEEP_LEVELS = np.arange(380, 901, 20, dtype=int)
+
+
+def sin2_curve(levels, *, off_level: float = 390.0, on_level: float = 860.0,
+               contrast: float = 1.0) -> np.ndarray:
+    """A plausible SLM transfer curve: sin^2 retardance, 0 at off, pi at on.
+
+    The layout loader defaults to ``method="fit"``, which fits this shape, so a
+    geometry fixture has to supply something a 4-parameter sin^2 can actually
+    describe -- a 3-point [0, 0.5, 1] ramp cannot.
+    """
+    slope = np.pi / (on_level - off_level)
+    return contrast * np.sin(slope * (np.asarray(levels, float) - off_level) / 2.0) ** 2
+
+
 class ChannelLayoutFromCalibrationTests(unittest.TestCase):
     """Verbatim rebuild of a ChannelLayout from a Step-3b/3c channel result."""
 
@@ -494,14 +509,15 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
         coords = np.asarray(coords, dtype=float)
         # give every row a distinct curve so channel<->row pairing is checkable
         intensity = np.stack(
-            [np.array([0.0, 0.5, 1.0]) + 0.001 * i for i in range(coords.size)]
+            [sin2_curve(SWEEP_LEVELS, contrast=1.0 + 0.001 * i)
+             for i in range(coords.size)]
         )
         return CalibrationResult(
             wavelength=slope * coords + intercept,
             coordinates=coords,
             max_level=1023,
             min_level=0,
-            level_range=np.array([0, 512, 1023]),
+            level_range=SWEEP_LEVELS.copy(),
             intensity_levels=intensity,
         )
 
@@ -531,7 +547,7 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             row = sorted_coords.index(float(ch.x_center))
             self.assertAlmostEqual(ch.wavelength_nm, -0.005 * ch.x_center + 781.0)
             np.testing.assert_allclose(
-                ch.intensity_curve, np.array([0.0, 0.5, 1.0]) + 0.001 * row
+                ch.intensity_curve, sin2_curve(SWEEP_LEVELS, contrast=1.0 + 0.001 * row)
             )
 
     def test_width_defaults_to_pitch_minus_gap(self) -> None:
@@ -568,9 +584,10 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             np.ones(4), np.zeros(4), layout, slm_width=700, slm_height=2
         )
         self.assertEqual(pattern.shape, (2, 700))
-        # x[0] at 500 px lit at its on level, w[0] at 520 px at its off level
-        self.assertTrue(np.all(pattern[:, 493:508] == 1023))
-        self.assertTrue(np.all(pattern[:, 513:528] == 0))
+        # x[0] at 500 px lit at its on level, w[0] at 520 px at its off level.
+        # Both come from the channel's fitted window, not from the swept extremes.
+        self.assertTrue(np.all(pattern[:, 493:508] == layout.x_channels[0].on_level))
+        self.assertTrue(np.all(pattern[:, 513:528] == layout.w_channels[0].off_level))
 
     def test_rejects_odd_or_asymmetric_grids(self) -> None:
         with self.assertRaisesRegex(ValueError, "even number"):
@@ -585,6 +602,39 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
             channel_layout_from_calibration(
                 self._calib(self.GRID), channel_width_px=21
             )
+
+    def test_stored_geometry_drives_the_window(self) -> None:
+        """The width comes from the calibration, not from a guess on the pitch."""
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 8
+        layout = channel_layout_from_calibration(calib, warn=False)
+
+        self.assertEqual(layout.channel_width_px, 12)
+        self.assertEqual(layout.pitch_px, 20)
+        inner = min(layout.x_channels, key=lambda c: abs(c.x_center - 510))
+        self.assertEqual(inner.x_end - inner.x_start, 12)
+
+    def test_argument_overrides_stored_geometry(self) -> None:
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 8
+        layout = channel_layout_from_calibration(
+            calib, channel_width_px=16, warn=False
+        )
+        self.assertEqual(layout.channel_width_px, 16)
+
+    def test_falls_back_to_the_pitch_guess_without_stored_geometry(self) -> None:
+        """A file written before the split was recorded keeps the old behaviour."""
+        calib = self._calib(self.GRID)          # channel_width_px stays None
+        layout = channel_layout_from_calibration(calib, warn=False)
+        self.assertIsNone(calib.channel_width_px)
+        self.assertEqual(layout.channel_width_px, 20 - 5)   # pitch - assumed_gap_px
+
+    def test_inconsistent_stored_split_still_drives_the_window(self) -> None:
+        """width + pad should be the pitch; if it is not, the window still wins."""
+        calib = self._calib(self.GRID)
+        calib.channel_width_px, calib.gap_px = 12, 99
+        layout = channel_layout_from_calibration(calib, warn=False)
+        self.assertEqual(layout.channel_width_px, 12)
 
     def test_requires_intensity_data(self) -> None:
         calib = self._calib(self.GRID)
@@ -602,7 +652,7 @@ class ChannelLayoutFromCalibrationTests(unittest.TestCase):
 class MeasurePairGridsColRatioTests(unittest.TestCase):
     def test_col_ratio_forwarded_to_encode(self) -> None:
         from slm_module import encoding as encoding_module
-        from slm_module import tpa_pair as tpa_pair_module
+        from calibration_module import measure_pair as tpa_pair_module
 
         layout = _make_layout(width=15)
         ratio = mirror_intensity_profile(OPTIMIZED_ENCODING_SHAPE, 15)
