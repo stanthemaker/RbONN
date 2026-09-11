@@ -1,12 +1,13 @@
 """Step 7 v2 -- comb phase dPhi_comb per pair, ONE free parameter.
 
 Needs real hardware for the sweep; the refit path is offline.  Either way
-``--step6`` is required and has no default::
+``--step6``, ``--targets`` and ``--ref`` are required and have no default::
 
-    S=src/calib_data/run_0907_1724/calib_step6v2_result_0907_1757.json
-    python src/calibration_module/steps/calib_step7_v2.py --step6 $S
-    python src/calibration_module/steps/calib_step7_v2.py --step6 $S --meas
-    python src/calibration_module/steps/calib_step7_v2.py --step6 $S some.csv
+    S="--step6 src/calib_data/run_0907_1724/calib_step6v2_result_0907_1757.json --targets 2,3,4,5,6 --ref 2"
+    python src/calibration_module/steps/calib_step7_v2.py $S
+    python src/calibration_module/steps/calib_step7_v2.py $S --out DIR   # CSV, JSON, PNGs into DIR
+    python src/calibration_module/steps/calib_step7_v2.py $S --meas
+    python src/calibration_module/steps/calib_step7_v2.py $S some.csv
 
 A sweep fits the CSV it just wrote (``--meas`` stops after the CSV).  Either way
 the fit writes a combined ``calib_step7_result_*.json`` -- the step-3 + step-6
@@ -19,7 +20,8 @@ named drifted out from under the script every time a run was filed away.  That
 one file decides both what is driven (its embedded step-3 calibration IS the
 channel layout) and what the fringe amplitudes are pinned to, so running against
 the wrong one does not fail -- it reports a phase measured under a different
-aperture.
+aperture.  The targets and the reference are required for the same reason: as
+constants they silently measured whichever pairs the last edit left in them.
 
 What changed vs :mod:`calib_step7_v1`
 -------------------------------------
@@ -80,6 +82,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -113,19 +116,20 @@ from slm_module.calibration.calibration_new import (  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 
 # ---- Edit these to match your setup ----
-CALIB_PATH = REPO_ROOT / "src/calib_data"   # data directory: inputs + outputs live here
+CALIB_PATH = REPO_ROOT / "src/calib_data"   # output directory; --out overrides it
 
-TGT_INDICES = [2, 3, 4, 5, 6]               # target pairs measured vs the reference
-
-# The step-6 result is NOT here -- it is the required --step6 argument.
-# See the module docstring for why it has no default.
+# Neither the step-6 result nor the pairs are here -- they are the required
+# --step6, --targets and --ref arguments.  See the module docstring for why they
+# have no default.  Left empty, so code that imports this module and sweeps
+# without setting the list fails before touching the hardware.
+TGT_INDICES: list[int] = []
 
 # The drive.  Every field has the validated default (see PhaseV2Config); name
 # one here only to change it.  Keep pair_index_base in step with
 # calib_step6_v2.CONFIG -- the pair labels come out of that script's JSON.
 CONFIG = PhaseV2Config(
     pair_index_base=1,                      # pairs are numbered 1..N
-    ref_index=1,                            # the common reference (Phi = 0)
+    ref_index=1,                            # the common reference (Phi = 0); --ref sets it
     ref_level=0.9,
     sweep_min=0.1,
     sweep_max=0.9,
@@ -293,6 +297,8 @@ def save_plot(fit: PhaseFit, tgt: int, path) -> None:
 
 def _run_sweep(step6: Path, fit_after: bool) -> None:
     """Sweep every target pair vs the shared reference; write one raw CSV."""
+    if not TGT_INDICES:
+        raise ValueError("no target pairs -- pass --targets, e.g. --targets 2,3,4,5,6")
     layout = _load_layout(step6)
     print(f"Step 6 in: {step6}")
     drive = build_xw_sweep(CONFIG)
@@ -404,11 +410,24 @@ def fit_csv(path: str | Path, step6: Path) -> None:
     print(f"\nCombined step-7 result (step3 + step6 + step7) saved to {out_json}")
 
 
+def _index_list(text: str) -> list[int]:
+    """``"2,3,4"`` -> ``[2, 3, 4]``: the argparse type of a pair list."""
+    try:
+        out = [int(tok) for tok in text.replace(" ", "").split(",") if tok]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected comma-separated pair labels, got {text!r}") from None
+    if not out:
+        raise argparse.ArgumentTypeError("empty pair list")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
+    global TGT_INDICES, CONFIG, CALIB_PATH
     parser = argparse.ArgumentParser(
         prog="calib_step7_v2.py",
         description="Step 7 v2 -- comb phase dPhi_comb per pair (one free parameter).",
-        epilog="--step6 has no default: that one file decides both what is "
+        epilog="--step6, --targets and --ref have no default.  --step6 decides both what is "
                "driven (its embedded step-3 calibration IS the layout) and what "
                "the fringe amplitudes are pinned to, so running against the "
                "wrong one reports a phase measured under a different aperture.",
@@ -416,6 +435,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--step6", required=True, type=Path, metavar="JSON",
         help="combined step-6 result JSON: layout + pinned etas (required)",
+    )
+    parser.add_argument(
+        "--targets", required=True, type=_index_list, metavar="2,3,4",
+        help="target pair labels measured against the reference, comma-separated (required)",
+    )
+    parser.add_argument(
+        "--ref", required=True, type=int, metavar="K",
+        help="reference pair label, Phi = 0 (required)",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, metavar="DIR",
+        help=f"directory for the CSV, JSON and PNGs, created if missing "
+             f"(default {CALIB_PATH})",
     )
     parser.add_argument(
         "csv", nargs="?", type=Path,
@@ -426,6 +458,12 @@ def main(argv: list[str] | None = None) -> int:
         help="sweep and write the raw CSV only; do not fit",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    TGT_INDICES = args.targets
+    CONFIG = replace(CONFIG, ref_index=args.ref)
+    if args.out is not None:
+        CALIB_PATH = args.out
+    Path(CALIB_PATH).mkdir(parents=True, exist_ok=True)
 
     if args.csv is not None:            # offline re-fit, no hardware
         fit_csv(args.csv, args.step6)

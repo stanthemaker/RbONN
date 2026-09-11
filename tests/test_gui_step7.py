@@ -353,7 +353,7 @@ class SaveRoundTripTests(_WindowCase):
         """Step 8 needs this one file: layout, etas, and the phases."""
         w = self._load()
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "calib_step7_gui.csv"
+            target = Path(tmp) / "calib_step7_meas_0910_2025.csv"
             with unittest.mock.patch.object(
                 QtWidgets.QFileDialog, "getSaveFileName",
                 staticmethod(lambda *a, **k: (str(target), "")),
@@ -361,8 +361,10 @@ class SaveRoundTripTests(_WindowCase):
                 w._tpa_phase_save()
 
             self.assertTrue(target.is_file(), w.tpa_phase_status.text())
-            js_path = target.with_suffix(".json")
+            js_path = target.with_name("calib_step7_result_0910_2025.json")
             self.assertTrue(js_path.is_file(), w.tpa_phase_status.text())
+            self.assertEqual(len(list(target.parent.glob("*.json"))), 1,
+                             "the JSON is named like the script's, not the CSV")
 
             payload = json.loads(js_path.read_text(encoding="utf-8"))
             self.assertEqual(sorted(payload),
@@ -376,7 +378,7 @@ class SaveRoundTripTests(_WindowCase):
             self.assertEqual(got, RECORDED_DPHI)
 
             self.assertEqual(
-                len(list(target.parent.glob("*_pair*.png"))), 4,
+                len(list(target.parent.glob("calib_step7_pair*_0910_2025.png"))), 4,
                 "one fringe PNG per target, same renderer as the page",
             )
 
@@ -392,7 +394,7 @@ class SaveRoundTripTests(_WindowCase):
             ):
                 w._tpa_phase_save()
             self.assertTrue(target.is_file())
-            self.assertFalse(target.with_suffix(".json").is_file())
+            self.assertFalse(list(target.parent.glob("*.json")))
             self.assertIn("no Step-6 result", w.tpa_phase_status.text())
         w.tpa_phase_step6_edit.setText(str(STEP6))
 

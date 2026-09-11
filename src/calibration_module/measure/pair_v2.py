@@ -30,6 +30,8 @@ __all__ = [
     "PairV2Progress",
     "build_schedule",
     "read_point_autorange",
+    "set_range",
+    "can_autorange",
     "measure_pair",
 ]
 
@@ -150,7 +152,7 @@ def run_seconds(schedule: Sequence[tuple[int, float, float]],
     return n_single * acq.t_single_s + n_both * acq.t_both_s + len(schedule) * acq.settle_s
 
 
-def _set_range(daq, rng: float) -> None:
+def set_range(daq, rng: float) -> None:
     """Reconfigure only the input range, keeping every other setting.
 
     ``configure_monitor`` just stores the settings object and every acquisition
@@ -165,7 +167,7 @@ def _set_range(daq, rng: float) -> None:
     daq.configure_monitor(replace(base, min_val=-rng, max_val=rng))
 
 
-def _can_autorange(monitor) -> bool:
+def can_autorange(monitor) -> bool:
     return hasattr(monitor, "_settings") and hasattr(monitor, "last_values")
 
 
@@ -206,7 +208,7 @@ def read_point_autorange(
         return float(np.max(np.abs(raw)))
 
     mean_v, std_v = _read()
-    if not (acq.autorange and _can_autorange(monitor)):
+    if not (acq.autorange and can_autorange(monitor)):
         return mean_v, std_v, acq.range_v
 
     peak = _peak(mean_v)
@@ -216,14 +218,14 @@ def read_point_autorange(
     if log is not None:
         log(f"    near the +/-{acq.range_v:g} V rail (raw peak {peak:.4f} V, "
             f"mean {mean_v*1e3:.2f} mV) -> remeasuring at +/-{acq.range_wide_v:g} V")
-    _set_range(monitor, acq.range_wide_v)
+    set_range(monitor, acq.range_wide_v)
     try:
         mean_v, std_v = _read()
         if log is not None and _peak(mean_v) >= acq.near_rail_frac * acq.range_wide_v:
             log(f"    ** WARNING: still near the rail at +/-{acq.range_wide_v:g} V "
                 f"(raw peak {_peak(mean_v):.4f} V) -- this reading is suspect **")
     finally:
-        _set_range(monitor, acq.range_v)
+        set_range(monitor, acq.range_v)
     return mean_v, std_v, acq.range_wide_v
 
 

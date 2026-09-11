@@ -298,7 +298,7 @@ class SaveRoundTripTests(_WindowCase):
         w = self._load()
         w.tpa_step3_edit.setText(str(STEP3))
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "calib_step6v2_gui.csv"
+            target = Path(tmp) / "calib_step6v2_meas_0910_1938.csv"
             with unittest.mock.patch.object(
                 QtWidgets.QFileDialog, "getSaveFileName",
                 staticmethod(lambda *a, **k: (str(target), "")),
@@ -306,8 +306,10 @@ class SaveRoundTripTests(_WindowCase):
                 w._tpa_save()
 
             self.assertTrue(target.is_file(), w.tpa_status.text())
-            js_path = target.with_suffix(".json")
+            js_path = target.with_name("calib_step6v2_result_0910_1938.json")
             self.assertTrue(js_path.is_file(), w.tpa_status.text())
+            self.assertEqual(len(list(target.parent.glob("*.json"))), 1,
+                             "the JSON is named like the script's, not the CSV")
 
             payload = json.loads(js_path.read_text(encoding="utf-8"))
             self.assertEqual(sorted(payload), ["encoding", "step3", "step6"])
@@ -318,7 +320,7 @@ class SaveRoundTripTests(_WindowCase):
             self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)
 
             self.assertEqual(
-                len(list(target.parent.glob("*_pair*.png"))), 5,
+                len(list(target.parent.glob("calib_step6v2_pair*_0910_1938.png"))), 5,
                 "one diagnostic PNG per pair, same renderer as the offline script",
             )
 
@@ -334,7 +336,7 @@ class SaveRoundTripTests(_WindowCase):
             ):
                 w._tpa_save()
             self.assertTrue(target.is_file())
-            self.assertFalse(target.with_suffix(".json").is_file())
+            self.assertFalse(list(target.parent.glob("*.json")))
             self.assertIn("no Step-3 calibration", w.tpa_status.text())
 
 
@@ -418,7 +420,7 @@ class Step7HandoffTests(_WindowCase):
                 staticmethod(lambda *a, **k: (str(target), "")),
             ):
                 w._tpa_save()
-            w.tpa_phase_step6_edit.setText(str(target.with_suffix(".json")))
+            w.tpa_phase_step6_edit.setText(str(target.with_name("handoff_result.json")))
             layout, models = w._tpa_phase_load_step6()
             self.assertEqual(sorted(models), [2, 3, 4, 5, 6])
             self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)

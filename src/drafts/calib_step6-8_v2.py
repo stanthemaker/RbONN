@@ -4,6 +4,8 @@
     python src/drafts/calib_step6-8_v2.py --dry-run        # resolve inputs, touch no hardware
     python src/drafts/calib_step6-8_v2.py --pairs 1,3,5    # override the default pair list
     python src/drafts/calib_step6-8_v2.py --pairs 1,3,5 --ref 1
+    python src/drafts/calib_step6-8_v2.py --verify-n 1,2,3    # step 8 at n = 1, 2 and 3
+    python src/drafts/calib_step6-8_v2.py --stop-at 7         # steps 6 and 7 only
     python src/drafts/calib_step6-8_v2.py --start-at 7 --run-dir src/calib_data/calib_run_0904_1530
 
 Every run gets a fresh directory ``src/calib_data/calib_run_<MMDD_HHMM>/`` and
@@ -13,30 +15,26 @@ self-contained folder that can be zipped, moved or thrown away whole.
 
 Wiring
 ------
-The step scripts are configured by module-level constants, not by CLI flags, so
-this runner imports each one by path and rebinds those constants before calling
-its ``main([])``.  Every constant below is read at *call* time inside the step,
-so rebinding after import is enough:
+Each step script is imported by path.  Its output directory is a module-level
+constant this runner rebinds; its input -- and for steps 6 and 7 the pair list
+(``--pairs`` / ``--targets``) and step 7's ``--ref`` -- are required flags
+passed through ``main(argv)``:
 
 ===========  =============================  ==================
-step         input rebound                  output dir rebound
+step         input flag                     output dir rebound
 ===========  =============================  ==================
-6 (v2)       ``IN_STEP3``  <- newest         ``CALIB_PATH``
-             ``calib_step3b_*.json``
-7 (v2)       ``IN_STEP6``  <- step 6's       ``OUT_DIR``
+6 (v2)       ``--step3``  <- newest          ``CALIB_PATH``
+             ``calib_step3c_*.json``
+7 (v2)       ``--step6``  <- step 6's        ``CALIB_PATH``
              ``calib_step6v2_result_*``
-8 (v2)       ``IN_STEP7``  <- step 7's       ``OUT_DIR``
-             ``calib_step7_result_*``
+8 (verify)   ``--step7``  <- step 7's        ``OUT_DIR``
+             ``calib_step7_result_*``,
+             once per ``--verify-n``
 ===========  =============================  ==================
 
 Only step 6 reaches outside the run folder, for the step-3 calibration; steps 7
 and 8 are chained to the file the previous step just wrote, found by globbing
 the (initially empty) run folder for that step's result pattern.
-
-Note that step 6's ``CALIB_PATH`` is BOTH its output directory and the directory
-``IN_STEP3`` was built from at import; rebinding ``CALIB_PATH`` alone would
-silently leave ``IN_STEP3`` pointing into the flat directory (it is already a
-fully-resolved Path by then), which is why both are set explicitly.
 
 ``--flip`` is never passed to any step: the DAQ sign on this rig is positive.
 
@@ -81,21 +79,27 @@ STEP3_SKIP_DIRS = ("archive",)       # subtrees the step-3 search ignores
 PAIRS = [2, 3, 4, 5, 6]               # pairs calibrated end to end
 REF_INDEX = 2                   # step 7's reference pair (Phi = 0); must be in PAIRS
 
+# Step 8 runs once per entry.  n = 1 checks step 6 alone (one pair has no phase
+# to get wrong); n = 2 is the first check of step 7's phases.  --verify-n
+# overrides it.
+VERIFY_N = (1, 2)
+
 # Per step: module stem, the glob that finds the result it hands downstream, and
 # the constants to rebind.  ``result_glob = None`` marks the terminal step.
-# Steps 6 and 7 take their input as a REQUIRED command-line flag rather than a
-# module constant -- that constant was exactly what let a filed-away run drift
-# out from under the script -- so it goes in argv.  Step 8 still carries a
-# rebindable ``IN_STEP7``; ``in_flag = None`` marks that.
+# Every step takes its input as a REQUIRED command-line flag rather than a module
+# constant -- that constant was exactly what let a filed-away run drift out from
+# under the script -- so it goes in argv.  A step with an ``n_flag`` is run once
+# per entry of VERIFY_N.
 STEPS = {
     6: {"module": "calib_step6_v2", "out_attr": "CALIB_PATH",
-        "in_flag": "--step3", "in_attr": None, "pairs_attr": "PAIR_INDICES",
+        "in_flag": "--step3", "pairs_attr": "PAIR_INDICES", "pairs_flag": "--pairs",
         "result_glob": "calib_step6v2_result_*.json"},
     7: {"module": "calib_step7_v2", "out_attr": "CALIB_PATH",
-        "in_flag": "--step6", "in_attr": None, "pairs_attr": "TGT_INDICES",
+        "in_flag": "--step6", "pairs_attr": "TGT_INDICES", "pairs_flag": "--targets",
+        "ref_flag": "--ref",
         "result_glob": "calib_step7_result_*.json"},
-    8: {"module": "calib_step8_v2", "out_attr": "OUT_DIR",
-        "in_flag": None, "in_attr": "IN_STEP7", "pairs_attr": "PAIRS",
+    8: {"module": "calib_npair_verify", "out_attr": "OUT_DIR",
+        "in_flag": "--step7", "pairs_attr": "PAIRS", "n_flag": "--n",
         "result_glob": None},
 }
 
@@ -232,7 +236,8 @@ def _set_ref_index(mod, ref_index) -> int | None:
 
 
 def run_step(n: int, run_dir: Path, in_path: Path, *, pairs=None,
-             ref_index=None, dry_run: bool = False) -> Path | None:
+             ref_index=None, dry_run: bool = False,
+             verify_n=VERIFY_N) -> Path | None:
     """Point step ``n`` at this run folder, run it, return its result JSON.
 
     ``in_path`` is what the step reads (step 3 for step 6, the previous step's
@@ -248,13 +253,19 @@ def run_step(n: int, run_dir: Path, in_path: Path, *, pairs=None,
     setattr(mod, spec["out_attr"], run_dir)     # all outputs -> the run folder
     argv: list[str] = []
     if not pending:
-        if spec["in_flag"] is not None:
-            argv += [spec["in_flag"], str(in_path)]
-        else:
-            setattr(mod, spec["in_attr"], in_path)
+        argv += [spec["in_flag"], str(in_path)]
+    runs = ([[spec["n_flag"], str(k)] for k in verify_n]
+            if spec.get("n_flag") else [[]])
     if pairs is not None:
         setattr(mod, spec["pairs_attr"], list(pairs))
     ref = _set_ref_index(mod, ref_index)
+    # Steps 6 and 7 take the pair list (and 7 the reference) as required flags;
+    # the step's own main() rebinds its constants from them.
+    if spec.get("pairs_flag"):
+        argv += [spec["pairs_flag"],
+                 ",".join(str(k) for k in getattr(mod, spec["pairs_attr"]))]
+    if spec.get("ref_flag") and ref is not None:
+        argv += [spec["ref_flag"], str(ref)]
 
     head = (f"\n{'=' * 70}\n== STEP {n}  ({spec['module']})\n"
             f"==   in   : {in_path if pending else _rel(in_path)}\n"
@@ -262,15 +273,19 @@ def run_step(n: int, run_dir: Path, in_path: Path, *, pairs=None,
             f"==   pairs: {getattr(mod, spec['pairs_attr'])}")
     if ref is not None:
         head += f"   ref: {ref}"
+    if spec.get("n_flag"):
+        head += f"   n: {','.join(str(k) for k in verify_n)}"
     print(f"{head}\n{'=' * 70}", flush=True)
     if dry_run:
         print("   (dry run -- not executed)")
         return None
 
     t0 = time.time()
-    rc = mod.main(argv)             # never None: the step must not see OUR argv
-    if rc:
-        raise RuntimeError(f"step {n} ({spec['module']}) returned {rc}")
+    for extra in runs:
+        rc = mod.main(argv + extra)  # never None: the step must not see OUR argv
+        if rc:
+            raise RuntimeError(
+                f"step {n} ({spec['module']} {' '.join(extra)}) returned {rc}")
     print(f"\n-- step {n} finished in {(time.time() - t0) / 60:.1f} min")
 
     if spec["result_glob"] is None:
@@ -296,14 +311,16 @@ def _write_manifest(run_dir: Path, manifest: dict) -> None:
 
 
 def run_sequence(*, run_dir: Path, step3: Path, start_at: int = 6,
-                 pairs=None, ref_index=None, dry_run: bool = False) -> int:
-    order = [n for n in (6, 7, 8) if n >= start_at]
+                 stop_at: int = 8, pairs=None, ref_index=None,
+                 dry_run: bool = False, verify_n=VERIFY_N) -> int:
+    order = [n for n in (6, 7, 8) if start_at <= n <= stop_at]
     manifest = {
         "started": time.strftime("%Y-%m-%d %H:%M:%S"),
         "run_dir": _rel(run_dir),
         "steps_run": order,
         "pairs": list(pairs) if pairs else None,
         "ref_index": ref_index,
+        "verify_n": list(verify_n),
         "inputs": {"step3": _rel(step3)},
         "status": "running",
         "outputs": [],
@@ -330,7 +347,8 @@ def run_sequence(*, run_dir: Path, step3: Path, start_at: int = 6,
     for n in order:
         try:
             result = run_step(n, run_dir, carried, pairs=pairs,
-                              ref_index=ref_index, dry_run=dry_run)
+                              ref_index=ref_index, dry_run=dry_run,
+                              verify_n=verify_n)
         except Exception as exc:
             print(f"\n!! STEP {n} FAILED: {type(exc).__name__}: {exc}")
             traceback.print_exc()
@@ -372,21 +390,31 @@ def main(argv: list[str] | None = None) -> int:
                          "(required with --start-at 7/8)")
     ap.add_argument("--start-at", type=int, choices=(6, 7, 8), default=6,
                     help="skip earlier steps, reusing their results in --run-dir")
+    ap.add_argument("--stop-at", type=int, choices=(6, 7, 8), default=8,
+                    help="last step to run (default 8; 7 skips the n-pair verify)")
     ap.add_argument("--pairs", metavar="1,3,5", default=None,
                     help="pair list for all three steps (default: each step's own)")
     ap.add_argument("--ref", type=int, default=None,
                     help="step-7 reference pair (default: the step's own)")
+    ap.add_argument("--verify-n", metavar="1,2", default=None,
+                    help="pair counts step 8 verifies, one run each "
+                         f"(default: {','.join(str(k) for k in VERIFY_N)})")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve and print the wiring; touch no hardware")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
 
     if args.start_at > 6 and not args.run_dir:
         ap.error("--start-at 7/8 needs --run-dir (the earlier steps' outputs)")
+    if args.stop_at < args.start_at:
+        ap.error(f"--stop-at {args.stop_at} is before --start-at {args.start_at}")
 
     pairs = PAIRS
     if args.pairs:
         pairs = [int(tok) for tok in args.pairs.replace(" ", "").split(",") if tok]
     ref_index = REF_INDEX if args.ref is None else args.ref
+    verify_n = VERIFY_N
+    if args.verify_n:
+        verify_n = tuple(int(tok) for tok in args.verify_n.replace(" ", "").split(",") if tok)
     # Caught here rather than an hour into step 7: the reference has to be one
     # of the pairs step 6 measured, or load_models() has no eta for it.
     if pairs and ref_index is not None and ref_index not in pairs:
@@ -400,12 +428,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Run folder : {_rel(run_dir)}")
         print(f"Step 3 in  : {_rel(step3)}")
         return run_sequence(run_dir=run_dir, step3=step3, start_at=args.start_at,
-                            pairs=pairs, ref_index=ref_index, dry_run=True)
+                            stop_at=args.stop_at,
+                            pairs=pairs, ref_index=ref_index, dry_run=True,
+                            verify_n=verify_n)
 
     log_path = run_dir / "run.log"
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                 f"start-at {args.start_at} ====\n")
+                 f"start-at {args.start_at} stop-at {args.stop_at} ====\n")
         stdout, stderr = sys.stdout, sys.stderr
         sys.stdout = _Tee(stdout, fh)
         sys.stderr = _Tee(stderr, fh)
@@ -414,8 +444,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Step 3 in  : {_rel(step3)}")
             print(f"Log        : {_rel(log_path)}")
             return run_sequence(run_dir=run_dir, step3=step3,
-                                start_at=args.start_at, pairs=pairs,
-                                ref_index=ref_index)
+                                start_at=args.start_at, stop_at=args.stop_at,
+                                pairs=pairs,
+                                ref_index=ref_index, verify_n=verify_n)
         finally:
             sys.stdout, sys.stderr = stdout, stderr
 

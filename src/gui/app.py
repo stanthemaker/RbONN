@@ -197,6 +197,24 @@ def _pattern_to_qimage_color(data: np.ndarray) -> QtGui.QImage:
     return image.copy()
 
 
+def _save_paths(path: str | Path) -> tuple[Path, Path, Callable[[int], Path]]:
+    """The CSV, JSON and per-pair PNG a step 6/7 save writes, named like the scripts.
+
+    ``calib_step7_meas_0910_2025.csv`` -> ``calib_step7_result_0910_2025.json``
+    and ``calib_step7_pair<k>_0910_2025.png``, so a GUI save and a script run
+    leave the same ``*_result_*.json`` behind.  A name without ``_meas_`` keeps
+    its stem and gains ``_result`` / ``_pair<k>``.
+    """
+    csv = Path(path).with_suffix(".csv")
+    head, meas, tail = csv.stem.partition("_meas_")
+    tail = f"_{tail}" if meas else ""
+    return (
+        csv,
+        csv.with_name(f"{head}_result{tail}.json"),
+        lambda k: csv.with_name(f"{head}_pair{k}{tail}.png"),
+    )
+
+
 class WheelSpinBox(QtWidgets.QDoubleSpinBox):
     """Double spin box with an independent (large) mouse-wheel step.
 
@@ -5447,14 +5465,14 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if not self.tpa_fits:
             return
-        default = f"calib_step6v2_{time.strftime('%m%d_%H%M')}.csv"
+        default = f"calib_step6v2_meas_{time.strftime('%m%d_%H%M')}.csv"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Step-6 v2 Result", default, "CSV (*.csv)"
         )
         if not path:
             return
-        base = Path(path).with_suffix("")
-        written = [Path(write_meas_csv(self.tpa_rows, base.with_suffix(".csv"))).name]
+        csv_path, json_path, png_path = _save_paths(path)
+        written = [Path(write_meas_csv(self.tpa_rows, csv_path)).name]
 
         step3 = self._tpa_step3_path()
         if step3 is None or not step3.is_file():
@@ -5466,12 +5484,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             _calib, layout = self._tpa_load_step3()
             js = save_combined_json(
-                self.tpa_fits, base.with_suffix(".json"), step3=step3,
+                self.tpa_fits, json_path, step3=step3,
                 center_wl=float(getattr(layout, "center_wl", 0.0)),
             )
             written.append(Path(js).name)
             for fit in self.tpa_fits:
-                png = base.with_name(f"{base.name}_pair{fit.index}.png")
+                png = png_path(fit.index)
                 save_plot(fit, png)
             written.append(f"{len(self.tpa_fits)} PNG(s)")
         except Exception as exc:
@@ -6293,9 +6311,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        base = Path(path).with_suffix("")
+        csv_path, json_path, png_path = _save_paths(path)
         results = [r for _, r in sorted(self.tpa_phase_results.items())]
-        written = [Path(write_phase_meas_csv(results, base.with_suffix(".csv"))).name]
+        written = [Path(write_phase_meas_csv(results, csv_path)).name]
 
         step6 = self._tpa_phase_step6_path()
         if step6 is None or not step6.is_file():
@@ -6316,14 +6334,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             js = save_comb_phase_json(
-                fits, step6, base.with_suffix(".json"),
+                fits, step6, json_path,
                 ref_index=self._tpa_phase_config().ref_index,
-                csv_path=str(base.with_suffix(".csv").resolve()),
+                csv_path=str(csv_path.resolve()),
                 single_beam_bg=self.tpa_phase_single_beam.isChecked(),
             )
             written.append(Path(js).name)
             for (k, _method), fit in fits.items():
-                png = base.with_name(f"{base.name}_pair{k}.png")
+                png = png_path(k)
                 fig = Figure(figsize=(12, 5))
                 plot_fringe(fig, fit, k)
                 fig.savefig(png, dpi=150)

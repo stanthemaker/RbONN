@@ -1,13 +1,14 @@
 """Step 6 v2 -- per-pair TPA efficiency eta from the DIFFERENCE estimator.
 
 Needs real hardware for the sweep; the refit path is offline.  Either way
-``--step3`` is required and has no default::
+``--step3`` and ``--pairs`` are required and have no default::
 
-    S=src/calib_data/run_0908_1444/calib_step3c_0907_1358_pad10.json
-    python src/calibration_module/steps/calib_step6_v2.py --step3 $S
-    python src/calibration_module/steps/calib_step6_v2.py --step3 $S --meas
-    python src/calibration_module/steps/calib_step6_v2.py --step3 $S some.csv
-    python src/calibration_module/steps/calib_step6_v2.py --step3 $S some.csv --anchor
+    S="--step3 src/calib_data/run_0908_1444/calib_step3c_0907_1358_pad10.json --pairs 2,3,4,5,6"
+    python src/calibration_module/steps/calib_step6_v2.py $S
+    python src/calibration_module/steps/calib_step6_v2.py $S --out DIR   # CSV, JSON, PNGs into DIR
+    python src/calibration_module/steps/calib_step6_v2.py $S --meas
+    python src/calibration_module/steps/calib_step6_v2.py $S some.csv
+    python src/calibration_module/steps/calib_step6_v2.py $S some.csv --anchor
 
 There is deliberately no default step-3 path.  It used to be a constant edited
 by hand, which meant the file it named drifted out from under the script every
@@ -15,7 +16,9 @@ time a run was filed away -- and every level here is *encoded through* that
 calibration, so a run against the wrong one does not fail, it silently
 calibrates a different aperture.  Naming it per run is the only version of this
 that cannot go quietly wrong.  The GUI has no such problem: it passes the
-calibration it already built its layout from.
+calibration it already built its layout from.  The pair list is required for
+the same reason: as a constant it silently calibrated whichever pairs the last
+edit left in it.
 
 The underlying physics is unchanged from v1::
 
@@ -89,12 +92,13 @@ from slm_module.calibration.calibration_new import load_calibration_result  # no
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
 
 # ---- Edit these to match your setup ----
-CALIB_PATH = REPO_ROOT / "src/calib_data"   # data directory: inputs + outputs live here
+CALIB_PATH = REPO_ROOT / "src/calib_data"   # output directory; --out overrides it
 
-PAIR_INDICES = [2, 3, 4, 5, 6]              # pair labels to calibrate
-
-# The Step-3 calibration is NOT here -- it is the required --step3 argument.
-# See the module docstring for why it has no default.
+# Neither the Step-3 calibration nor the pair list is here -- they are the
+# required --step3 and --pairs arguments.  See the module docstring for why they
+# have no default.  Left empty, so code that imports this module and sweeps
+# without setting the list fails before touching the hardware.
+PAIR_INDICES: list[int] = []
 
 # The estimator's setup.  Every field has the validated default (see
 # PairV2Config); name one here only to change it.  Keep pair_index_base in step
@@ -181,6 +185,8 @@ def _pair_wavelengths(layout, index: int) -> tuple[float, float, float]:
 
 def _run_sweep(step3: Path, fit_after: bool, *, include_anchor: bool = False) -> None:
     """Drive every pair's interleaved schedule; optionally fit, plot and save."""
+    if not PAIR_INDICES:
+        raise ValueError("no pairs to calibrate -- pass --pairs, e.g. --pairs 2,3,4,5,6")
     layout = _load_layout(step3)
     print(f"Step 3 in: {step3}")
     schedule = build_schedule(CONFIG)
@@ -286,17 +292,39 @@ def fit_csv(path: str | Path, step3: Path, *, include_anchor: bool = False) -> N
                   layout=layout, include_anchor=include_anchor)
 
 
+def _index_list(text: str) -> list[int]:
+    """``"2,3,4"`` -> ``[2, 3, 4]``: the argparse type of a pair list."""
+    try:
+        out = [int(tok) for tok in text.replace(" ", "").split(",") if tok]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected comma-separated pair labels, got {text!r}") from None
+    if not out:
+        raise argparse.ArgumentTypeError("empty pair list")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
+    global PAIR_INDICES, CALIB_PATH
     parser = argparse.ArgumentParser(
         prog="calib_step6_v2.py",
         description="Step 6 v2 -- per-pair TPA efficiency eta (difference estimator).",
-        epilog="--step3 has no default: every level is encoded through that "
-               "calibration, so running against the wrong one calibrates a "
-               "different aperture without failing.",
+        epilog="--step3 and --pairs have no default: every level is encoded "
+               "through that calibration, so running against the wrong one "
+               "calibrates a different aperture without failing.",
     )
     parser.add_argument(
         "--step3", required=True, type=Path, metavar="JSON",
         help="Step-3b/3c calibration the channel layout is built from (required)",
+    )
+    parser.add_argument(
+        "--pairs", required=True, type=_index_list, metavar="2,3,4",
+        help="pair labels to calibrate, comma-separated (required)",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, metavar="DIR",
+        help=f"directory for the CSV, JSON and PNGs, created if missing "
+             f"(default {CALIB_PATH})",
     )
     parser.add_argument(
         "csv", nargs="?", type=Path,
@@ -311,6 +339,11 @@ def main(argv: list[str] | None = None) -> int:
         help="put the measured D(0) into the fit, pinning the intercept on data",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    PAIR_INDICES = args.pairs
+    if args.out is not None:
+        CALIB_PATH = args.out
+    Path(CALIB_PATH).mkdir(parents=True, exist_ok=True)
 
     if args.csv is not None:            # offline re-fit, no hardware
         fit_csv(args.csv, args.step3, include_anchor=args.anchor)

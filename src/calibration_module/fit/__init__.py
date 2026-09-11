@@ -12,7 +12,9 @@ collected.
     pair      step 6 v1 -- the joint 6-parameter grid fit pair_v2 replaced.
               Reached only by calib_step6_v1.py and calib_synth_v1.py now;
               kept so historical CSVs can be re-fit both ways
-    phase     steps 7 + 8 -- comb phase dPhi_comb, and the forward model
+    phase     step 7 -- comb phase dPhi_comb
+    verify    step 8 -- the n-pair forward model, each block's full scale,
+              and the verify CSV
     center    centre-wavelength scan -- weighted quadratic vertex fit
     sigma     the shared systematic std floor, imported by all three v2 steps
     report    fringe / residual plots over the fits above
