@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,6 +42,7 @@ from slm_module.calibration.calibration_new import (
     CalibrationResult,
     batch_intensity_calibration,
     build_channel_calibration_grid,
+    calibration_result_from_dict,
     find_min_max_intensity_levels,
     intensity_calibration_daq,
     load_calibration_result,
@@ -122,12 +124,22 @@ from calibration_module.measure.center import (
 from calibration_module.fit.phase import (
     PairModel,
     PhaseResult,
-    build_phase_sweep,
+    fit_result,
     load_pair_models,
-    save_phase_json,
-    write_phase_csv,
+    load_phase_csv,
+    save_comb_phase_json,
+    reference_in_csv,
+    targets_in_csv,
+    write_meas_csv as write_phase_meas_csv,
 )
-from calibration_module.measure.phase import TPAPhaseAborted, measure_phase_sweep
+from calibration_module.measure.phase_v2 import (
+    PhaseV2Acq,
+    PhaseV2Aborted,
+    PhaseV2Config,
+    PhaseV2Progress,
+    build_xw_sweep,
+    measure_target,
+)
 from calibration_module.fit.report import plot_fringe
 from slm_module.keepalive import SLMKeepAlive
 from .common import (
@@ -472,7 +484,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpa_stop_event: threading.Event | None = None
         self.tpa_phase_results: dict[int, PhaseResult] = {}
         self.tpa_phase_stop_event: threading.Event | None = None
-        self._tpa_phase_ntargets = 1
         self.tpa_center_result: TPACenterResult | None = None
         self.tpa_center_stop_event: threading.Event | None = None
         self.scope_controller: ScopeController | None = None
@@ -1046,14 +1057,6 @@ class MainWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.addWidget(
-            self._caption(
-                "Use a Step 2 wavelength map to locate the 778 nm center, optionally "
-                "fine tune that center with one OSA trace, generate 30 px + 15 px "
-                "channel centers, then calibrate non-neighboring channel groups from "
-                "full-span OSA sweeps."
-            )
-        )
 
         source = self._panel("Step 2 source")
         source_grid = QtWidgets.QGridLayout(source)
@@ -1460,9 +1463,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_step1_tab(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
-        layout.addWidget(
-            self._caption("Sweep full-screen levels to find the darkest/brightest levels.")
-        )
         layout.addWidget(self._build_measurement_group(1, {}))
         layout.addWidget(self._level_sweep_row(1, stop=1023, stepv=64))
         layout.addWidget(self._output_row(1, "out", "Output JSON", False))
@@ -1473,9 +1473,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_step2_tab(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
-        layout.addWidget(
-            self._caption("Map x→wavelength with a bright window. Needs min/max levels.")
-        )
         layout.addWidget(self._build_measurement_group(2, {}))
 
         cfg = QtWidgets.QHBoxLayout()
@@ -1601,14 +1598,6 @@ class MainWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.addWidget(
-            self._caption(
-                "Sweep levels at each encoding-channel centre and read the DAQ. "
-                "The channel grid is tiled around the target centre and skips "
-                "the guard bands (same structuring as Step 3b); one channel "
-                "window is lit at a time; intensity is dark-frame subtracted."
-            )
-        )
         widgets = self.step_widgets["3c"]
 
         widgets["daq_group"] = self._build_step3_daq_group("3c")
@@ -4706,19 +4695,6 @@ class MainWindow(QtWidgets.QMainWindow):
         the width and the full height.
         """
         page = self._page_shell("Channel TPA Efficiency (η) Calibration")
-        subtitle = QtWidgets.QLabel(
-            "Step 6 v2 · the difference estimator. Along the cross line x = 1 "
-            "the w-only background is subtracted, D(w) = Y(1,w) − B̂(w) = "
-            "η²w + a_x, so η is the slope of a two-parameter line and the "
-            "single-beam terms cancel rather than being fitted alongside it. "
-            "The grid is fixed (37 acquisitions over 12 levels, repeats "
-            "interleaved) because the fit window and the verification levels are "
-            "specified against it. DAQ only."
-        )
-        subtitle.setObjectName("PageSubtitle")
-        subtitle.setWordWrap(True)
-        page.layout().addWidget(subtitle)
-
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_tpa_controls())
         split.addWidget(self._build_tpa_results())
@@ -4727,7 +4703,6 @@ class MainWindow(QtWidgets.QMainWindow):
         split.setSizes([360, 1040])
         page.layout().addWidget(split, 1)
 
-        self._tpa_update_plan()
         self._tpa_redraw()
         return page
 
@@ -4853,26 +4828,47 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         sgrid.addWidget(QtWidgets.QLabel("Pairs"), 2, 0)
         sgrid.addWidget(self.tpa_pairs_edit, 2, 1, 1, 2)
-        self.tpa_plan_label = QtWidgets.QLabel("\N{EN DASH}")
-        self.tpa_plan_label.setObjectName("PageSubtitle")
-        self.tpa_plan_label.setWordWrap(True)
-        sgrid.addWidget(self.tpa_plan_label, 3, 0, 1, 3)
+
+        # The cross line -- the levels eta is the slope of.  The single-beam
+        # block is not on here: it is the five levels the background fit needs
+        # and no ramp changes them.  The fit window follows this ramp, so the
+        # estimator fits exactly what was measured.
+        self.tpa_sweep_min = self._double_spin(0.01, 1.0, 0.20, "", 2)
+        self.tpa_sweep_min.setSingleStep(0.05)
+        self.tpa_sweep_min.setToolTip(
+            "Lowest per-side level on the cross line (x = 1, w = this).\n"
+            "Also the bottom of the fit window."
+        )
+        self.tpa_sweep_max = self._double_spin(0.02, 1.0, 0.90, "", 2)
+        self.tpa_sweep_max.setSingleStep(0.05)
+        self.tpa_sweep_max.setToolTip(
+            "Highest level on the cross line, and the top of the fit window.\n"
+            "Below 1.0, the (1, 1) level is still measured but kept OUT of the "
+            "fit as the top-drive compression diagnostic. Take this to 1.0 and "
+            "that diagnostic is gone — compression then sits inside the fit."
+        )
+        self.tpa_points = self._spin(2, 15, 4)
+        self.tpa_points.setToolTip(
+            "Points on the cross-line ramp, evenly spaced from min to max.\n"
+            "The last one gets 6 repeats instead of 4: the top of the window "
+            "carries the most leverage on the slope."
+        )
+        sgrid.addWidget(QtWidgets.QLabel("Sweep min"), 3, 0)
+        sgrid.addWidget(self.tpa_sweep_min, 3, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Sweep max"), 4, 0)
+        sgrid.addWidget(self.tpa_sweep_max, 4, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Ramp points"), 5, 0)
+        sgrid.addWidget(self.tpa_points, 5, 1, 1, 2)
         box.addWidget(sweep)
 
         self.tpa_step3_edit.textChanged.connect(lambda _="": self._tpa_describe_step3())
         self._tpa_describe_step3()
 
-        # The plan line is the only warning a user gets before committing an
-        # hour of bench time, so it tracks every input that changes its length.
-        for spin in (self.tpa_tboth, self.tpa_tsingle, self.tpa_settle):
-            spin.valueChanged.connect(lambda _=0.0: self._tpa_update_plan())
-        self.tpa_pairs_edit.textChanged.connect(lambda _="": self._tpa_update_plan())
-
-        # --- progress + buttons -----------------------------------------
-        self.tpa_progress_bar = QtWidgets.QProgressBar()
-        self.tpa_progress_bar.setValue(0)
-        box.addWidget(self.tpa_progress_bar)
-
+        # --- status + buttons -------------------------------------------
+        # No progress bar here: a run takes tens of minutes, so it gets the
+        # shared CalibrationProgressDialog (bar, elapsed/ETA, live plot,
+        # Stop) that steps 1-3 pop, rather than a strip in a column the
+        # user is not watching.
         self.tpa_status = QtWidgets.QLabel("\N{EN DASH}")
         self.tpa_status.setObjectName("PageSubtitle")
         self.tpa_status.setWordWrap(True)
@@ -5018,14 +5014,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _tpa_config(self) -> PairV2Config:
-        """The estimator's setup.
+        """The estimator's setup, with the cross line built from the ramp controls.
 
-        Every field is the validated default: the grid, the fit window and the
-        verification levels are specified against each other, so the page shows
-        them and does not offer them for editing.  What the page does own is
-        which pairs and how long to read for, and those are not in here.
+        Falls back to the validated :data:`DEFAULT_GRID` if the three ramp
+        values do not make a grid -- a half-typed spinbox must not stop the page
+        redrawing, and Run validates them again before it drives anything.
         """
-        return PairV2Config()
+        try:
+            return PairV2Config.from_ramp(
+                self.tpa_sweep_min.value(),
+                self.tpa_sweep_max.value(),
+                self.tpa_points.value(),
+            )
+        except ValueError:
+            return PairV2Config()
 
     def _tpa_acq(self) -> PairV2Acq:
         """Acquisition timing and input range, straight off the DAQ group."""
@@ -5038,36 +5040,6 @@ class MainWindow(QtWidgets.QMainWindow):
             range_wide_v=float(min(2.0 * hi, 10.0)),
             autorange=self.tpa_autorange.isChecked(),
             invert=self.tpa_invert.isChecked(),
-        )
-
-    def _tpa_update_plan(self) -> None:
-        """Grid size and the wall-clock estimate, before Run is pressed.
-
-        Ten pairs of the default grid is most of an hour.  A user is entitled to
-        that number in advance rather than discovering it from the progress bar.
-        """
-        cfg = self._tpa_config()
-        schedule = build_schedule(cfg)
-        n_verify = len(cfg.verify_grid) if cfg.verify_enabled else 0
-        try:
-            pairs = self._tpa_parse_pairs(self.tpa_pairs_edit.text())
-        except ValueError:
-            self.tpa_plan_label.setText(
-                f"{len(schedule)} acquisitions/pair · "
-                f"bad pair list — try \"2-6\" or \"1,3,5\""
-            )
-            return
-        secs = run_seconds(schedule, self._tpa_acq())
-        total = secs * len(pairs)
-        # The taper is an app-wide setting from the Shape page, and a sweep
-        # driven through a different band than it reports is measuring a
-        # different aperture -- so it is named here rather than left implicit.
-        shape = "flat band" if self._active_col_ratio() is None else "Shape page taper"
-        self.tpa_plan_label.setText(
-            f"{len(schedule)} acquisitions/pair over {len(cfg.full_grid())} levels "
-            f"({len(cfg.grid)} estimator + {n_verify} verification)\n"
-            f"{len(pairs)} pair(s): {pairs[0]}–{pairs[-1]} · "
-            f"~{secs/60:.1f} min/pair · ~{total/60:.0f} min total · {shape}"
         )
 
     def _tpa_set_running(self, running: bool) -> None:
@@ -5133,13 +5105,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         read_timeout = max(30.0, acq.t_single_s * 3.0 + 10.0)
 
-        self.tpa_progress_bar.setMaximum(total)
-        self.tpa_progress_bar.setValue(0)
         self.tpa_status.setText(
-            f"Starting\N{HORIZONTAL ELLIPSIS} {len(pairs)} pair(s), "
+            f"Running\N{HORIZONTAL ELLIPSIS} {len(pairs)} pair(s), "
             f"{len(schedule)} acquisitions each"
         )
         self._tpa_set_running(True)
+        self._open_calibration_dialog(on_stop=self._tpa_stop)
 
         stop_event = threading.Event()
         self.tpa_stop_event = stop_event
@@ -5176,15 +5147,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tpa_status.setText("Stopping\N{HORIZONTAL ELLIPSIS}")
 
     def _on_tpa_progress(self, progress: PairV2Progress) -> None:
-        self.tpa_progress_bar.setMaximum(max(progress.total, 1))
-        self.tpa_progress_bar.setValue(min(progress.step, progress.total))
+        """Feed one acquisition to the shared progress dialog.
+
+        Adapted rather than reported natively: the dialog already owns the
+        elapsed/ETA arithmetic and the live plot, and it already carries a
+        ``pair_eta`` phase, so step 6 gets the same window steps 1-3 pop instead
+        of a second progress widget with its own idea of how to estimate time.
+        ``y`` is the reading, so the plot fills in as the sweep runs and a dead
+        or blocked beam is visible immediately rather than at the fit.
+        """
         wide = "  [wide range]" if progress.range_v != self._tpa_acq().range_v else ""
-        self.tpa_status.setText(
+        message = (
             f"pair {progress.pair_index} rep {progress.repeat} "
             f"x={progress.x:.2f} w={progress.w:.2f} → "
             f"{progress.mean_v*1e3:.4f} mV  "
             f"std {progress.std_ratio*100:.2f}%{wide}"
         )
+        self.tpa_status.setText(message)
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.update_progress(CalibrationProgress(
+                phase="pair_eta",
+                step=progress.step - 1,        # the dialog adds 1 back
+                total=progress.total,
+                message=message,
+                x=float(progress.step),
+                y=progress.mean_v,
+            ))
 
     def _tpa_fit_rows(self, rows_by_pair: dict[int, list], cfg: PairV2Config,
                       layout=None) -> list[str]:
@@ -5212,6 +5200,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not rows:
             self._tpa_set_running(False)
             self.tpa_status.setText("Sweep stopped before any pair finished.")
+            self._tpa_close_dialog(False, "Stopped before any pair finished.")
             return
         failed = self._tpa_fit_rows(rows, payload["cfg"], payload.get("layout"))
         self._tpa_set_running(False)
@@ -5237,11 +5226,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tpa_status.text()
                 + "  — η undefined (b < 0); check the Invert checkbox"
             )
+        self._tpa_close_dialog(not aborted, self.tpa_status.text())
+
+    def _tpa_close_dialog(self, success: bool, message: str) -> None:
+        """Freeze the progress window and let it be closed.
+
+        The dialog is left open rather than dismissed: on a run this long the
+        last thing a user wants is the log and the trace disappearing the
+        moment it ends.
+        """
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.finish(success, message)
 
     def _tpa_error(self, _error: str) -> None:
         self.tpa_stop_event = None
         self._tpa_set_running(False)
         self.tpa_status.setText("TPA sweep failed (see Status log)")
+        self._tpa_close_dialog(False, "TPA sweep failed (see Status log)")
 
     # ---- results table -----------------------------------------------------
     def _tpa_fill_table(self) -> None:
@@ -5479,384 +5480,860 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tpa_status.setText("Saved " + "  +  ".join(written))
 
     # ===================== TPA comb phase (step 7) tab ==================
+    _TPA_PHASE_COLUMNS = (
+        "pair", "ΔΦ (°)", "±tot", "±fringe", "±η",
+        "a (mV½)", "b (mV½)", "R²", "max|pull|", "resid (mV)",
+    )
+
     def _build_tpa_phase_tab(self) -> QtWidgets.QWidget:
+        """Step 7 v2: controls on the left, results on the right.
+
+        The same split as step 6, for the same reason -- a DAQ group, a sweep
+        group and a per-target results table do not fit above the plots.  Read
+        top to bottom on the left, then across.
+        """
         page = self._page_shell("Comb Phase (ΔΦ_comb) Calibration")
-        subtitle = QtWidgets.QLabel(
-            "Step 7: each target pair's SLM phase is swept symmetrically "
-            "against a fixed, fully-on reference pair and the TPA interference "
-            "fringe Y = a² + b²g² + 2ab·g·cos(ΔΦ_SLM + ΔΦ_comb) is fit for "
-            "the comb phase. Needs the channel grid from the TPA Encoding page "
-            "and step-6 pair models — the Step 6 tab's last result is used "
-            "automatically, or point at a saved step-6 JSON/CSV. Reads use "
-            "whichever monitor (scope or DAQ) is connected; the all-off dark "
-            "reads the DAQ's longer T_single window."
-        )
-        subtitle.setObjectName("PageSubtitle")
-        subtitle.setWordWrap(True)
-        page.layout().addWidget(subtitle)
 
-        # --- sweep settings ---
-        cfg = self._panel("Sweep Settings")
-        grid = QtWidgets.QGridLayout(cfg)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.addWidget(self._build_tpa_phase_controls())
+        split.addWidget(self._build_tpa_phase_results())
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([360, 1040])
+        page.layout().addWidget(split, 1)
+
+        self._tpa_phase_redraw()
+        return page
+
+    def _build_tpa_phase_controls(self) -> QtWidgets.QWidget:
+        """The left column: DAQ, sweep, status, buttons."""
+        col = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(col)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(12)
+
+        # --- DAQ acquisition --------------------------------------------
+        daq = self._panel("DAQ · acquisition")
+        grid = QtWidgets.QGridLayout(daq)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+
+        self.tpa_phase_daq_channel = QtWidgets.QLineEdit("ai0")
+        self.tpa_phase_daq_rate = QtWidgets.QDoubleSpinBox()
+        self.tpa_phase_daq_rate.setRange(1.0, 2_000_000.0)
+        self.tpa_phase_daq_rate.setDecimals(0)
+        self.tpa_phase_daq_rate.setValue(1000.0)
+        self.tpa_phase_daq_rate.setSuffix(" S/s")
+        self.tpa_phase_daq_range = QtWidgets.QComboBox()
+        for lo, hi in self._DAQ_RANGES:
+            self.tpa_phase_daq_range.addItem(f"\N{PLUS-MINUS SIGN}{hi:g} V", (lo, hi))
+        self.tpa_phase_daq_range.setCurrentIndex(1)   # +/-0.2 V; autorange escalates
+        self.tpa_phase_daq_range.setToolTip(
+            "Default input range. Step 7 is the BRIGHTEST calibration step -- "
+            "the reference stays on for every point while a second pair ramps "
+            "up on top of it -- so it starts one step above step 6's "
+            "\N{PLUS-MINUS SIGN}0.1 V."
+        )
+        self.tpa_phase_daq_fcut = QtWidgets.QDoubleSpinBox()
+        self.tpa_phase_daq_fcut.setRange(0.1, 100_000.0)
+        self.tpa_phase_daq_fcut.setDecimals(1)
+        self.tpa_phase_daq_fcut.setValue(20.0)
+        self.tpa_phase_daq_fcut.setSuffix(" Hz")
+        self.tpa_phase_daq_fcut.setToolTip(
+            "Detector 3 dB bandwidth: the low-pass behind the reported mean and "
+            "std. That std is the sigma the fit weights by."
+        )
+        self.tpa_phase_settle = self._double_spin(0.0, 10.0, 0.25, " s", 3)
+        self.tpa_phase_settle.setToolTip(
+            "Wait after each SLM pattern change, before reading."
+        )
+        # Not bound to the DAQ Monitor page's spinboxes the way step 6's are:
+        # step 7 reads a different signal (both pairs on, every point) and runs
+        # its own windows -- tying them together would drag step 6's 8 s onto a
+        # step that validated at 10.
+        self.tpa_phase_tboth = self._double_spin(0.001, 30.0, 10.0, " s", 3)
+        self.tpa_phase_tboth.setToolTip(
+            "T_both: averaging window for every sweep point. The reference is "
+            "on throughout, so they are all bright."
+        )
+        self.tpa_phase_tsingle = self._double_spin(0.001, 60.0, 10.0, " s", 3)
+        self.tpa_phase_tsingle.setToolTip(
+            "T_single: averaging window for the all-off dark read at the start "
+            "of each target — at zero signal it needs the averaging."
+        )
+        self.tpa_phase_invert = QtWidgets.QCheckBox("Invert sign (TIA)")
+        self.tpa_phase_invert.setChecked(True)
+        self.tpa_phase_invert.setToolTip(
+            "The transimpedance amplifier outputs NEGATIVE volts for positive "
+            "light, so recording a positive light signal means inverting.\n"
+            "Leave this on. A sign-flipped run does not fail here — it fits a "
+            "fringe upside down against pinned step-6 amplitudes and reports a "
+            "phase, so check the residual, not just that a number came out."
+        )
+        self.tpa_phase_autorange = QtWidgets.QCheckBox(
+            "Widen one range near rail"
+        )
+        self.tpa_phase_autorange.setChecked(True)
+        self.tpa_phase_autorange.setToolTip(
+            "Remeasure a near-rail read one range up. The clip test runs on the "
+            "raw trace peak, not the reported mean: the low-pass pulls a clipped "
+            "flat-top back under the rail, so a clipped read is a silently wrong "
+            "mean rather than an error."
+        )
+
+        rows = [
+            ("Channel", self.tpa_phase_daq_channel),
+            ("Sample rate", self.tpa_phase_daq_rate),
+            ("Range", self.tpa_phase_daq_range),
+            ("Low-pass", self.tpa_phase_daq_fcut),
+            ("Settle", self.tpa_phase_settle),
+            ("T_both", self.tpa_phase_tboth),
+            ("T_single", self.tpa_phase_tsingle),
+        ]
+        for r, (label, widget) in enumerate(rows):
+            grid.addWidget(QtWidgets.QLabel(label), r, 0)
+            grid.addWidget(widget, r, 1)
+        grid.addWidget(self.tpa_phase_invert, len(rows), 0, 1, 2)
+        grid.addWidget(self.tpa_phase_autorange, len(rows) + 1, 0, 1, 2)
+        box.addWidget(daq)
+
+        # --- sweep -------------------------------------------------------
+        sweep = self._panel("Sweep")
+        sgrid = QtWidgets.QGridLayout(sweep)
+        sgrid.setHorizontalSpacing(8)
+        sgrid.setVerticalSpacing(6)
+
+        # ONE required input, exactly as the offline runner's --step6.  It
+        # decides both what is driven (its embedded Step-3 calibration IS the
+        # channel layout) and what the fringe amplitudes are pinned to, so a run
+        # against the wrong file does not fail -- it reports a phase measured
+        # under a different aperture against someone else's etas.
+        self.tpa_phase_step6_edit = QtWidgets.QLineEdit()
+        self.tpa_phase_step6_edit.setPlaceholderText(
+            "required — combined Step-6 result JSON"
+        )
+        self.tpa_phase_step6_edit.setToolTip(
+            "The combined step-6 result (Save on the Step 6 tab, or the offline "
+            "runner's calib_step6v2_result_*.json).\n"
+            "It carries BOTH halves this step needs: the Step-3 calibration the "
+            "layout is built from, and every pair's η + single-beam background, "
+            "which are pinned rather than fitted here."
+        )
+        self.tpa_phase_step6_browse = QtWidgets.QPushButton(
+            "Browse\N{HORIZONTAL ELLIPSIS}"
+        )
+        self.tpa_phase_step6_browse.setProperty("variant", "ghost")
+        self.tpa_phase_step6_browse.clicked.connect(self._tpa_phase_browse_step6)
+        self.tpa_phase_step6_label = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_phase_step6_label.setObjectName("PageSubtitle")
+        self.tpa_phase_step6_label.setWordWrap(True)
+        sgrid.addWidget(QtWidgets.QLabel("Step 6"), 0, 0)
+        sgrid.addWidget(self.tpa_phase_step6_edit, 0, 1)
+        sgrid.addWidget(self.tpa_phase_step6_browse, 0, 2)
+        sgrid.addWidget(self.tpa_phase_step6_label, 1, 0, 1, 3)
+
         self.tpa_phase_ref = self._spin(0, 63, 1)
-        self.tpa_phase_ref.setToolTip("Reference pair index (ΔΦ_comb = 0 by definition)")
-        self.tpa_phase_targets = QtWidgets.QLineEdit("3, 4, 5")
-        self.tpa_phase_targets.setToolTip("Comma-separated target pair indices")
-        self.tpa_phase_points = self._spin(3, 200, 15)
-        self.tpa_phase_points.setToolTip("Points in the target phase ramp")
-        self.tpa_phase_start = self._double_spin(0.0, 180.0, 0.0, " °", 1)
-        self.tpa_phase_start.setToolTip("Target phase ramp start")
-        self.tpa_phase_stop = self._double_spin(0.0, 180.0, 180.0, " °", 1)
-        self.tpa_phase_stop.setToolTip("Target phase ramp stop")
-        self.tpa_phase_refphase = self._double_spin(0.0, 180.0, 180.0, " °", 1)
-        self.tpa_phase_refphase.setToolTip(
-            "Fixed reference phase (180° = intensity 1, fully on)"
+        self.tpa_phase_ref.setToolTip(
+            "Reference pair label, 1-based. It defines ΔΦ_comb = 0, so every "
+            "phase in the result is relative to this one."
         )
-        self.tpa_phase_bound = QtWidgets.QDoubleSpinBox()
-        self.tpa_phase_bound.setRange(0.01, 10.0)
-        self.tpa_phase_bound.setSingleStep(0.1)
-        self.tpa_phase_bound.setValue(1.0)
-        self.tpa_phase_bound.setToolTip(
-            "a:b locked to the step-6 η ratio; a shared scale floats boxed to ±frac"
+        self.tpa_phase_targets = QtWidgets.QLineEdit("2-6")
+        self.tpa_phase_targets.setToolTip(
+            "Target pair labels, 1-based: \"2-6\", \"1,3,5\" or a mix.\n"
+            "The reference is skipped if it appears here."
         )
-        self.tpa_phase_unconstrained = QtWidgets.QCheckBox("Unconstrained fit")
-        self.tpa_phase_unconstrained.setToolTip(
-            "Ignore the step-6 eta ratio lock (closed-form fit)"
+        sgrid.addWidget(QtWidgets.QLabel("Reference"), 2, 0)
+        sgrid.addWidget(self.tpa_phase_ref, 2, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Targets"), 3, 0)
+        sgrid.addWidget(self.tpa_phase_targets, 3, 1, 1, 2)
+
+        # The ramp.  Both arms deliberately stop below 1.0: step 6 fits its etas
+        # over [0.2, 0.9] and EXCLUDES the measured (1, 1) point, so driving
+        # either arm fully on pins this fringe to an extrapolation.
+        self.tpa_phase_sweep_min = self._double_spin(0.01, 1.0, 0.10, "", 2)
+        self.tpa_phase_sweep_min.setSingleStep(0.05)
+        self.tpa_phase_sweep_min.setToolTip(
+            "Lowest per-side target intensity in the ramp (x_t = w_t = this)."
         )
-        self.tpa_phase_unconstrained.toggled.connect(
-            lambda checked: self.tpa_phase_bound.setEnabled(not checked)
+        self.tpa_phase_sweep_max = self._double_spin(0.02, 1.0, 0.90, "", 2)
+        self.tpa_phase_sweep_max.setSingleStep(0.05)
+        self.tpa_phase_sweep_max.setToolTip(
+            "Highest per-side target intensity in the ramp.\n"
+            "Keep it at 0.9. At 1.0 the amplitudes are pinned to a step-6 "
+            "extrapolation, and d(ΔΦ_SLM)/dv diverges there while the trace std "
+            "is smallest — so 1/std² weighting hands that one point most of the "
+            "fit (~70% of the Fisher information on the 0903 pair-3 fringe)."
         )
-        self.tpa_phase_single_beam = QtWidgets.QCheckBox("Step-6 single-beam background")
+        self.tpa_phase_points = self._spin(2, 60, 10)
+        self.tpa_phase_points.setToolTip(
+            "Points on the ramp, evenly spaced from min to max.\n"
+            "0.1 → 0.9 sweeps the shared panel phase over ~37..143°, most of "
+            "the half fringe."
+        )
+        self.tpa_phase_ref_level = self._double_spin(0.01, 1.0, 0.90, "", 2)
+        self.tpa_phase_ref_level.setSingleStep(0.05)
+        self.tpa_phase_ref_level.setToolTip(
+            "The reference pair is held at x_r = w_r = this for every point.\n"
+            "0.9 for the same reason the ramp stops there — the fit takes "
+            "a = η_ref·√(x_r·w_r), so a reference below 1.0 needs no other "
+            "change."
+        )
+        sgrid.addWidget(QtWidgets.QLabel("Sweep min"), 4, 0)
+        sgrid.addWidget(self.tpa_phase_sweep_min, 4, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Sweep max"), 5, 0)
+        sgrid.addWidget(self.tpa_phase_sweep_max, 5, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Ramp points"), 6, 0)
+        sgrid.addWidget(self.tpa_phase_points, 6, 1, 1, 2)
+        sgrid.addWidget(QtWidgets.QLabel("Ref level"), 7, 0)
+        sgrid.addWidget(self.tpa_phase_ref_level, 7, 1, 1, 2)
+
+        self.tpa_phase_single_beam = QtWidgets.QCheckBox(
+            "Step-6 single-beam background"
+        )
         self.tpa_phase_single_beam.setChecked(True)
-        self.tpa_phase_dark = QtWidgets.QCheckBox("Measure dark")
-        self.tpa_phase_dark.setChecked(True)
-        self.tpa_phase_dark.setToolTip(
-            "All-off reading at the start (T_single window), subtracted per row"
+        self.tpa_phase_single_beam.setToolTip(
+            "Subtract both pairs' step-6 single-beam response as a FIXED "
+            "background. The reference contributes a constant, the swept target "
+            "a ramp; without this the fringe has to absorb that ramp.\n"
+            "Leave it on — turn it off only to diagnose step 6."
         )
-        self.tpa_phase_models_edit = QtWidgets.QLineEdit()
-        self.tpa_phase_models_edit.setPlaceholderText(
-            "step-6 models file (.json/.csv) — empty = use the Step 6 tab's last result"
-        )
-        models_browse = QtWidgets.QPushButton("Browse…")
-        models_browse.setProperty("variant", "ghost")
-        models_browse.clicked.connect(self._tpa_phase_browse_models)
-        grid.addWidget(QtWidgets.QLabel("Reference"), 0, 0)
-        grid.addWidget(self.tpa_phase_ref, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("Targets"), 0, 2)
-        grid.addWidget(self.tpa_phase_targets, 0, 3)
-        grid.addWidget(QtWidgets.QLabel("Points"), 0, 4)
-        grid.addWidget(self.tpa_phase_points, 0, 5)
-        grid.addWidget(QtWidgets.QLabel("φ start"), 1, 0)
-        grid.addWidget(self.tpa_phase_start, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("φ stop"), 1, 2)
-        grid.addWidget(self.tpa_phase_stop, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Ref phase"), 1, 4)
-        grid.addWidget(self.tpa_phase_refphase, 1, 5)
-        grid.addWidget(QtWidgets.QLabel("Bound ±frac"), 2, 0)
-        grid.addWidget(self.tpa_phase_bound, 2, 1)
-        grid.addWidget(self.tpa_phase_unconstrained, 2, 2, 1, 2)
-        grid.addWidget(self.tpa_phase_single_beam, 2, 4, 1, 2)
-        grid.addWidget(self.tpa_phase_dark, 3, 0, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("Step-6 models"), 4, 0)
-        grid.addWidget(self.tpa_phase_models_edit, 4, 1, 1, 4)
-        grid.addWidget(models_browse, 4, 5)
-        page.layout().addWidget(cfg)
+        sgrid.addWidget(self.tpa_phase_single_beam, 8, 0, 1, 3)
+        box.addWidget(sweep)
 
-        # --- results: fringe fit + pulls (plot_fringe, same as the pipeline) ---
-        self.tpa_phase_fig = Figure(figsize=(9, 3.6), tight_layout=True)
-        self.tpa_phase_canvas = FigureCanvas(self.tpa_phase_fig)
-        self.tpa_phase_canvas.setMinimumHeight(260)
-        page.layout().addWidget(
-            self._panel_with_widget("Fringe fit (ΔΦ_comb)", self.tpa_phase_canvas), 1
+        self.tpa_phase_step6_edit.textChanged.connect(
+            lambda _="": self._tpa_phase_describe_step6()
         )
+        self._tpa_phase_describe_step6()
 
-        # --- displayed-pair selector + report ---
-        self.tpa_phase_combo = QtWidgets.QComboBox()
-        self.tpa_phase_combo.setToolTip("Which target pair's fit to display")
-        self.tpa_phase_combo.currentIndexChanged.connect(
-            lambda _=0: self._tpa_phase_redraw()
-        )
-        self.tpa_phase_report = QtWidgets.QLabel("ΔΦ_comb: (run a sweep)")
-        self.tpa_phase_report.setObjectName("PageSubtitle")
-        self.tpa_phase_report.setWordWrap(True)
-        show_row = QtWidgets.QHBoxLayout()
-        show_row.addWidget(QtWidgets.QLabel("Show pair"))
-        show_row.addWidget(self.tpa_phase_combo)
-        show_row.addWidget(self.tpa_phase_report, 1)
-        page.layout().addLayout(show_row)
-
-        # --- controls ---
-        self.tpa_phase_progress_bar = QtWidgets.QProgressBar()
-        self.tpa_phase_progress_bar.setValue(0)
+        # --- status + buttons -------------------------------------------
+        # No progress bar here, same as step 6: a run takes tens of minutes, so
+        # it gets the shared CalibrationProgressDialog (bar, elapsed/ETA, live
+        # plot, Stop) rather than a strip in a column nobody is watching.
         self.tpa_phase_status = QtWidgets.QLabel("\N{EN DASH}")
+        self.tpa_phase_status.setObjectName("PageSubtitle")
+        self.tpa_phase_status.setWordWrap(True)
+        box.addWidget(self.tpa_phase_status)
+
         self.tpa_phase_run_button = QtWidgets.QPushButton("Run Sweep")
         self.tpa_phase_run_button.clicked.connect(self._tpa_phase_run)
         self.tpa_phase_stop_button = QtWidgets.QPushButton("Stop")
         self.tpa_phase_stop_button.setProperty("variant", "danger")
         self.tpa_phase_stop_button.setEnabled(False)
         self.tpa_phase_stop_button.clicked.connect(self._tpa_phase_stop)
-        self.tpa_phase_save_button = QtWidgets.QPushButton("Save…")
+        self.tpa_phase_load_button = QtWidgets.QPushButton(
+            "Load\N{HORIZONTAL ELLIPSIS}"
+        )
+        self.tpa_phase_load_button.setProperty("variant", "ghost")
+        self.tpa_phase_load_button.setToolTip(
+            "Load a recorded step-7 measurement CSV; every target in it is "
+            "re-fit against the step-6 JSON named above."
+        )
+        self.tpa_phase_load_button.clicked.connect(self._tpa_phase_load)
+        self.tpa_phase_save_button = QtWidgets.QPushButton(
+            "Save\N{HORIZONTAL ELLIPSIS}"
+        )
         self.tpa_phase_save_button.setProperty("variant", "ghost")
         self.tpa_phase_save_button.setEnabled(False)
         self.tpa_phase_save_button.clicked.connect(self._tpa_phase_save)
-        ctrl = QtWidgets.QHBoxLayout()
-        ctrl.addWidget(self.tpa_phase_status, 1)
-        ctrl.addWidget(self.tpa_phase_save_button)
-        ctrl.addWidget(self.tpa_phase_run_button)
-        ctrl.addWidget(self.tpa_phase_stop_button)
-        page.layout().addWidget(self.tpa_phase_progress_bar)
-        page.layout().addLayout(ctrl)
-        return page
+        btns = QtWidgets.QGridLayout()
+        btns.addWidget(self.tpa_phase_load_button, 0, 0)
+        btns.addWidget(self.tpa_phase_save_button, 0, 1)
+        btns.addWidget(self.tpa_phase_run_button, 1, 0)
+        btns.addWidget(self.tpa_phase_stop_button, 1, 1)
+        box.addLayout(btns)
 
-    def _tpa_phase_browse_models(self) -> None:
+        box.addStretch(1)
+        return col
+
+    def _build_tpa_phase_results(self) -> QtWidgets.QWidget:
+        """The right column: the all-targets table over the selected fringe."""
+        self.tpa_phase_table = QtWidgets.QTableWidget(
+            0, len(self._TPA_PHASE_COLUMNS)
+        )
+        self.tpa_phase_table.setHorizontalHeaderLabels(
+            list(self._TPA_PHASE_COLUMNS)
+        )
+        self.tpa_phase_table.verticalHeader().setVisible(False)
+        self.tpa_phase_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers
+        )
+        self.tpa_phase_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+        self.tpa_phase_table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SingleSelection
+        )
+        self.tpa_phase_table.setAlternatingRowColors(True)
+        self.tpa_phase_table.horizontalHeader().setStretchLastSection(True)
+        # The table IS the target selector -- no separate combo box.
+        self.tpa_phase_table.itemSelectionChanged.connect(self._tpa_phase_redraw)
+
+        # One figure, not two panels: `plot_fringe` lays the fringe and its
+        # pulls out side by side itself, and it is the same renderer the saved
+        # PNG uses -- so what is reviewed here and what is archived beside the
+        # JSON are the same picture rather than two drawings of one fit.
+        self.tpa_phase_fig = Figure(figsize=(10, 4.2), tight_layout=True)
+        self.tpa_phase_canvas = FigureCanvas(self.tpa_phase_fig)
+        self.tpa_phase_canvas.setMinimumHeight(300)
+
+        stack = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        stack.addWidget(self._panel_with_widget("Targets", self.tpa_phase_table))
+        stack.addWidget(self._panel_with_widget(
+            "Fringe fit · ΔΦ_comb is the only free parameter",
+            self.tpa_phase_canvas,
+        ))
+        stack.setStretchFactor(0, 0)
+        stack.setStretchFactor(1, 1)
+        stack.setSizes([220, 520])
+        return stack
+
+    # ---- inputs ------------------------------------------------------------
+    def _tpa_phase_browse_step6(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Select Step-6 models file", "",
-            "Step-6 models (*.json *.csv);;All files (*)",
+            self, "Combined Step-6 result for this sweep", "", "JSON (*.json)"
         )
         if path:
-            self.tpa_phase_models_edit.setText(path)
+            self.tpa_phase_step6_edit.setText(path)
 
-    def _tpa_phase_models(self, layout) -> dict[int, PairModel] | None:
-        """Step-6 pair models: the file edit if set, else the Step 6 tab's result."""
-        text = self.tpa_phase_models_edit.text().strip()
-        if text:
-            return load_pair_models(text, layout=layout)
-        if self.tpa_fits:
-            models = {
-                fit.index: PairModel.from_pair_v2(fit)
-                for fit in self.tpa_fits if np.isfinite(fit.eta)
-            }
-            if models:
-                return models
-        return None
+    def _tpa_phase_step6_path(self) -> Path | None:
+        text = self.tpa_phase_step6_edit.text().strip().strip('"')
+        return Path(text) if text else None
+
+    def _tpa_phase_load_step6(self):
+        """``(layout, models)`` from the named step-6 JSON, or raise.
+
+        Both halves come out of the one file, exactly as the offline runner's
+        ``--step6`` does it: the embedded Step-3 payload builds the layout, the
+        fitted pairs give the etas the fringe amplitudes are pinned to.  That is
+        what guarantees the phase is measured through the aperture those etas
+        were calibrated under.
+        """
+        path = self._tpa_phase_step6_path()
+        if path is None:
+            raise ValueError("no Step-6 result chosen")
+        if not path.is_file():
+            raise FileNotFoundError(f"Step-6 result not found: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        step3 = payload.get("step3")
+        if step3 is None:
+            raise ValueError(
+                "no embedded 'step3' calibration — this is not a combined "
+                "step-6 result"
+            )
+        # Which encoder drove step 6; a file written before the fitted encoding
+        # existed carries no marker and was measured under "interp".
+        method = (payload.get("encoding") or {}).get("method", "interp")
+        layout = channel_layout_from_calibration(
+            calibration_result_from_dict(step3), method=method
+        )
+        models = load_pair_models([path])
+        if not models:
+            raise ValueError("no fitted pairs in the 'step6' section")
+        return layout, models
+
+    def _tpa_phase_describe_step6(self) -> None:
+        """Say what the chosen file actually is, before an hour is spent on it."""
+        path = self._tpa_phase_step6_path()
+        if path is None:
+            self._set_status(
+                self.tpa_phase_step6_label,
+                "No Step-6 result chosen — required to run.", "off",
+            )
+            return
+        try:
+            layout, models = self._tpa_phase_load_step6()
+        except Exception as exc:
+            self._set_status(
+                self.tpa_phase_step6_label, f"{path.name}: {exc}", "error"
+            )
+            return
+        pairs = sorted(models)
+        self._set_status(
+            self.tpa_phase_step6_label,
+            f"{path.name} · {layout.n_channels} pairs · η for "
+            f"{self._compact_indices(pairs)}",
+            "ok",
+        )
 
     @staticmethod
-    def _tpa_phase_parse_targets(text: str) -> list[int]:
-        return [
-            int(part) for part in text.replace(";", ",").split(",") if part.strip()
-        ]
+    def _compact_indices(values: Sequence[int]) -> str:
+        """[2,3,4,6] -> \"2-4,6\" — a pair list that stays one line at ten pairs."""
+        out: list[str] = []
+        for v in sorted(values):
+            if out and v == int(out[-1].split("-")[-1]) + 1:
+                lo = out[-1].split("-")[0]
+                out[-1] = f"{lo}-{v}"
+            else:
+                out.append(str(v))
+        return ",".join(out) or "none"
+
+    def _tpa_phase_config(self) -> PhaseV2Config:
+        """The drive, straight off the sweep controls.
+
+        Falls back to the validated defaults if the spinboxes do not make a
+        ramp -- a half-typed value must not stop the page redrawing, and Run
+        validates them again before it drives anything.
+        """
+        try:
+            return PhaseV2Config(
+                ref_index=self.tpa_phase_ref.value(),
+                ref_level=self.tpa_phase_ref_level.value(),
+                sweep_min=self.tpa_phase_sweep_min.value(),
+                sweep_max=self.tpa_phase_sweep_max.value(),
+                n_points=self.tpa_phase_points.value(),
+            )
+        except ValueError:
+            return PhaseV2Config()
+
+    def _tpa_phase_acq(self) -> PhaseV2Acq:
+        """Acquisition timing and input range, straight off the DAQ group."""
+        _lo, hi = self.tpa_phase_daq_range.currentData()
+        return PhaseV2Acq(
+            t_single_s=float(self.tpa_phase_tsingle.value()),
+            t_both_s=float(self.tpa_phase_tboth.value()),
+            settle_s=float(self.tpa_phase_settle.value()),
+            range_v=float(hi),
+            range_wide_v=float(min(2.5 * hi, 10.0)),
+            autorange=self.tpa_phase_autorange.isChecked(),
+            invert=self.tpa_phase_invert.isChecked(),
+        )
 
     def _tpa_phase_set_running(self, running: bool) -> None:
         self.tpa_phase_run_button.setEnabled(not running)
         self.tpa_phase_stop_button.setEnabled(running)
+        self.tpa_phase_load_button.setEnabled(not running)
         self.tpa_phase_save_button.setEnabled(
             not running and bool(self.tpa_phase_results)
         )
+        self.tpa_phase_targets.setEnabled(not running)
+
+    # ---- run ---------------------------------------------------------------
+    def _tpa_phase_plan(self):
+        """``(cfg, layout, models, targets)`` for the run, or raise ``ValueError``.
+
+        Every check that does NOT need an instrument, in one place: it is what
+        the page can say about a run before anything is connected, and it is
+        what the tests can drive without a bench.
+        """
+        layout, models = self._tpa_phase_load_step6()
+        cfg = self._tpa_phase_config()
+        try:
+            targets = [k for k in self._tpa_parse_pairs(
+                self.tpa_phase_targets.text()) if k != cfg.ref_index]
+        except ValueError as exc:
+            raise ValueError(f"Bad target list: {exc}") from exc
+        if not targets:
+            raise ValueError(
+                "Need at least one target pair that is not the reference."
+            )
+        bad = [k for k in [cfg.ref_index, *targets]
+               if not (0 <= cfg.slot(k) < layout.n_channels)]
+        if bad:
+            raise ValueError(
+                f"Pair(s) {bad} out of range — the layout has "
+                f"{layout.n_channels} pairs, numbered from {cfg.pair_index_base}."
+            )
+        missing = [k for k in [cfg.ref_index, *targets] if k not in models]
+        if missing:
+            raise ValueError(
+                f"No step-6 η for pair(s) {missing}; the file covers "
+                f"{self._compact_indices(sorted(models))}."
+            )
+        return cfg, layout, models, targets
 
     def _tpa_phase_run(self) -> None:
-        from dataclasses import replace
-        layout = self.encoding_layout
-        if layout is None:
-            self.tpa_phase_status.setText(
-                "No channel grid — build a layout on the TPA Encoding page first."
-            )
+        # The plan first: a typo in the target list is worth saying before
+        # "connect the DAQ", because fixing that one does not need the bench.
+        try:
+            cfg, layout, models, targets = self._tpa_phase_plan()
+        except (ValueError, FileNotFoundError) as exc:
+            self.tpa_phase_status.setText(str(exc))
             return
-        active = self._enc_active_monitor()
-        if active is None:
-            self.tpa_phase_status.setText(
-                "Connect the scope or DAQ first (Scope / DAQ page)."
-            )
+        except Exception as exc:
+            self.tpa_phase_status.setText(f"Step 6: {exc}")
+            return
+        daq = self.daq_controller
+        if daq is None or not daq.is_connected:
+            self.tpa_phase_status.setText("Connect the DAQ first (DAQ page).")
             return
         controller = self._controller()
         if not getattr(controller, "is_open", False):
-            self.tpa_phase_status.setText("Open the SLM on the SLM Control page first.")
-            return
-        try:
-            targets = self._tpa_phase_parse_targets(self.tpa_phase_targets.text())
-        except ValueError:
             self.tpa_phase_status.setText(
-                f"Bad target list: {self.tpa_phase_targets.text()!r}"
-            )
-            return
-        ref = self.tpa_phase_ref.value()
-        if not targets:
-            self.tpa_phase_status.setText("Need at least one target pair index.")
-            return
-        bad = [i for i in [ref, *targets] if not (0 <= i < layout.n_channels)]
-        if bad:
-            self.tpa_phase_status.setText(
-                f"Pair index out of range: {bad} (layout has {layout.n_channels} pairs)."
-            )
-            return
-        if ref in targets:
-            self.tpa_phase_status.setText("Reference pair cannot also be a target.")
-            return
-        try:
-            models = self._tpa_phase_models(layout)
-        except Exception as exc:
-            self.tpa_phase_status.setText(f"Step-6 models load failed: {exc}")
-            return
-        if models is None:
-            self.tpa_phase_status.setText(
-                "No step-6 models — run/load a sweep on the Step 6 tab or pick a file."
-            )
-            return
-        missing = [i for i in [ref, *targets] if i not in models]
-        if missing:
-            self.tpa_phase_status.setText(
-                f"No step-6 model for pair(s) {missing}; models cover {sorted(models)}."
+                "Open the SLM on the SLM Control page first."
             )
             return
 
-        kind, monitor = active
-        if kind == "scope":
-            settings = self._monitor_settings(trigger_mode="AUTO")
-        else:
-            settings = self._daq_monitor_settings()
-        settle = float(settings.hold)               # the tab's settle = monitor-page hold
-        # the dark point reads the longer T_single window on the DAQ
-        window = max(
-            settings.duration, getattr(settings, "single_duration", 0.0)
+        acq = self._tpa_phase_acq()
+        drive = build_xw_sweep(cfg)
+        per_target = len(drive) + 1               # + the all-off dark
+        total = per_target * len(targets)
+        lo, hi = self.tpa_phase_daq_range.currentData()
+        settings = DAQMonitorSettings(
+            channel=self.tpa_phase_daq_channel.text().strip() or "ai0",
+            sample_rate=self.tpa_phase_daq_rate.value(),
+            duration=acq.t_both_s,
+            single_duration=acq.t_single_s,
+            hold=0.0,                 # measure_target owns the settle
+            min_val=lo, max_val=hi,
+            f_cut=self.tpa_phase_daq_fcut.value(),
         )
-        read_timeout = max(30.0, window * 3.0 + 10.0)
-        settings0 = replace(settings, hold=0.0)     # the module owns the settle
+        read_timeout = max(30.0, acq.t_single_s * 3.0 + 10.0)
 
-        drive = build_phase_sweep(
-            n_points=self.tpa_phase_points.value(),
-            phi_start_deg=self.tpa_phase_start.value(),
-            phi_stop_deg=self.tpa_phase_stop.value(),
-            ref_phase_deg=self.tpa_phase_refphase.value(),
-        )
-        measure_dark = self.tpa_phase_dark.isChecked()
-        frac = (
-            None if self.tpa_phase_unconstrained.isChecked()
-            else self.tpa_phase_bound.value()
-        )
-        single_beam_bg = self.tpa_phase_single_beam.isChecked()
-
-        per_target = max(len(drive) + (1 if measure_dark else 0), 1)
-        self._tpa_phase_ntargets = len(targets)
-        self.tpa_phase_progress_bar.setMaximum(len(targets) * per_target)
-        self.tpa_phase_progress_bar.setValue(0)
         self.tpa_phase_status.setText(
-            f"Starting… {len(targets)} target(s) vs ref {ref}, "
-            f"{len(drive)} points via {kind}"
+            f"Running\N{HORIZONTAL ELLIPSIS} {len(targets)} target(s) vs ref "
+            f"{cfg.ref_index}, {len(drive)} points each"
         )
         self._tpa_phase_set_running(True)
+        self._open_calibration_dialog(on_stop=self._tpa_phase_stop)
 
         stop_event = threading.Event()
         self.tpa_phase_stop_event = stop_event
         col_ratio = self._active_col_ratio()
 
+        def report(progress: PhaseV2Progress) -> None:
+            self.tpa_phase_progress.emit(progress)
+
         def work() -> dict[str, Any]:
-            monitor.configure_monitor(settings0)
+            daq.configure_monitor(settings)
             results: dict[int, PhaseResult] = {}
-            for pos, k in enumerate(targets):
-                def report(progress, pos=pos):
-                    self.tpa_phase_progress.emit((pos, progress))
-                try:
-                    results[k] = measure_phase_sweep(
-                        monitor, controller, layout,
-                        tgt_index=k, ref_index=ref, drive=drive,
-                        tgt_model=models[k], ref_model=models[ref],
-                        settle=settle,
+            try:
+                for n, k in enumerate(targets):
+                    results[k] = measure_target(
+                        daq, controller, layout, k, drive,
+                        cfg=cfg, acq=acq, col_ratio=col_ratio,
                         read_timeout=read_timeout,
-                        measure_dark=measure_dark,
-                        col_ratio=col_ratio,
-                        frac=frac, single_beam_bg=single_beam_bg,
-                        stop_event=stop_event, progress_callback=report,
+                        step0=n * per_target, total=total,
+                        progress_callback=report, stop_event=stop_event,
                     )
-                except TPAPhaseAborted:
-                    return {"status": "aborted", "results": results}
-            return {"status": "ok", "results": results}
+            except PhaseV2Aborted:
+                return {"status": "aborted", "results": results, "cfg": cfg,
+                        "models": models}
+            return {"status": "ok", "results": results, "cfg": cfg,
+                    "models": models}
 
         self._run_slm_task(
-            "TPA comb-phase sweep", work,
+            "TPA comb-phase sweep (v2)", work,
             self._tpa_phase_finished, self._tpa_phase_error,
         )
 
     def _tpa_phase_stop(self) -> None:
         if self.tpa_phase_stop_event is not None:
             self.tpa_phase_stop_event.set()
-            self.tpa_phase_status.setText("Stopping…")
+            self.tpa_phase_status.setText("Stopping\N{HORIZONTAL ELLIPSIS}")
 
-    def _on_tpa_phase_progress(self, payload) -> None:
-        pos, progress = payload
-        per = max(progress.total, 1)
-        total = max(self._tpa_phase_ntargets, 1) * per
-        self.tpa_phase_progress_bar.setMaximum(total)
-        self.tpa_phase_progress_bar.setValue(min(pos * per + progress.step, total))
-        self.tpa_phase_status.setText(progress.message)
+    def _on_tpa_phase_progress(self, progress: PhaseV2Progress) -> None:
+        """Feed one acquisition to the shared progress dialog.
+
+        Adapted rather than reported natively, exactly as step 6 does it: the
+        dialog already owns the elapsed/ETA arithmetic and the live plot and
+        already carries a ``comb_phase`` phase.  ``y`` is the reading, so the
+        fringe draws itself as the sweep runs -- a dead reference or a blocked
+        target shows immediately rather than at the fit.
+        """
+        wide = ("  [wide range]"
+                if progress.range_v != self._tpa_phase_acq().range_v else "")
+        if progress.single:
+            message = (f"pair {progress.tgt_index} dark (all off) → "
+                       f"{progress.mean_v*1e3:.4f} mV{wide}")
+        else:
+            message = (
+                f"pair {progress.tgt_index} vs {progress.ref_index} "
+                f"x=w={progress.x_t:.2f} → {progress.mean_v*1e3:.4f} mV  "
+                f"std {progress.std_ratio*100:.2f}%{wide}"
+            )
+        self.tpa_phase_status.setText(message)
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.update_progress(CalibrationProgress(
+                phase="comb_phase",
+                step=progress.step - 1,        # the dialog adds 1 back
+                total=progress.total,
+                message=message,
+                x=float(progress.step),
+                y=progress.mean_v,
+            ))
+
+    def _tpa_phase_fit_results(self, results: dict[int, PhaseResult],
+                               models: dict[int, PairModel],
+                               ref_index: int) -> list[str]:
+        """Fit every target into ``self.tpa_phase_results``; return the failures."""
+        single_beam_bg = self.tpa_phase_single_beam.isChecked()
+        self.tpa_phase_results = {}
+        failed: list[str] = []
+        for k in sorted(results):
+            result = results[k]
+            if k not in models or ref_index not in models:
+                failed.append(f"pair {k}: no step-6 η")
+                self.tpa_phase_results[k] = result
+                continue
+            try:
+                fit_result(result, models[k], models[ref_index],
+                           comb_only=True, single_beam_bg=single_beam_bg)
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                failed.append(f"pair {k}: {exc}")
+            self.tpa_phase_results[k] = result
+        return failed
 
     def _tpa_phase_finished(self, payload: dict[str, Any]) -> None:
         self.tpa_phase_stop_event = None
-        self._tpa_phase_set_running(False)
-        results = payload.get("results", {})
-        if results:
-            self.tpa_phase_results = dict(results)
-            self.tpa_phase_save_button.setEnabled(True)
-            self._tpa_phase_populate_pairs()
-            self._tpa_phase_redraw()
-        if payload.get("status") == "aborted":
+        aborted = payload.get("status") == "aborted"
+        results = payload.get("results") or {}
+        if not results:
+            self._tpa_phase_set_running(False)
             self.tpa_phase_status.setText(
-                "Sweep stopped."
-                + (f" ({len(results)} completed target(s) kept)" if results else "")
+                "Sweep stopped before any target finished."
+            )
+            self._tpa_phase_close_dialog(
+                False, "Stopped before any target finished."
             )
             return
-        parts = []
-        for k, result in sorted(results.items()):
-            f = result.fit
-            if f is None:
-                parts.append(f"ΔΦ[{k}]=no fit")
-            else:
-                parts.append(
-                    f"ΔΦ[{k}]={f.dphi_comb_deg:+.2f}"
-                    f"±{np.degrees(f.dphi_comb_err):.2f}°"
-                )
-        self.tpa_phase_status.setText("Done · " + ("; ".join(parts) or "no results"))
+        cfg = payload["cfg"]
+        failed = self._tpa_phase_fit_results(
+            results, payload["models"], cfg.ref_index
+        )
+        self._tpa_phase_set_running(False)
+        self._tpa_phase_fill_table()
+        self._tpa_phase_redraw()
+
+        parts = [
+            f"ΔΦ[{k}]={r.fit.dphi_comb_deg:+.2f}°"
+            for k, r in sorted(self.tpa_phase_results.items())
+            if r.fit is not None
+        ]
+        head = "Stopped" if aborted else "Done"
+        note = f"  · {len(failed)} fit(s) failed" if failed else ""
+        self.tpa_phase_status.setText(
+            f"{head} · " + ("; ".join(parts) or "no fit") + note
+        )
+        for line in failed:
+            self._log(f"[step 7] fit failed — {line}")
+        self._tpa_phase_close_dialog(not aborted, self.tpa_phase_status.text())
+
+    def _tpa_phase_close_dialog(self, success: bool, message: str) -> None:
+        """Freeze the progress window and let it be closed (see step 6)."""
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.finish(success, message)
 
     def _tpa_phase_error(self, _error: str) -> None:
         self.tpa_phase_stop_event = None
         self._tpa_phase_set_running(False)
-        self.tpa_phase_status.setText("Comb-phase sweep failed (see Status log)")
+        self.tpa_phase_status.setText(
+            "Comb-phase sweep failed (see Status log)"
+        )
+        self._tpa_phase_close_dialog(
+            False, "Comb-phase sweep failed (see Status log)"
+        )
 
-    def _tpa_phase_populate_pairs(self) -> None:
-        self.tpa_phase_combo.blockSignals(True)
-        self.tpa_phase_combo.clear()
-        for k, result in sorted(self.tpa_phase_results.items()):
-            f = result.fit
-            deg = f.dphi_comb_deg if f is not None else float("nan")
-            self.tpa_phase_combo.addItem(f"pair {k} · ΔΦ={deg:+.2f}°", k)
-        self.tpa_phase_combo.blockSignals(False)
-        if self.tpa_phase_combo.count():
-            self.tpa_phase_combo.setCurrentIndex(0)
+    # ---- results table -----------------------------------------------------
+    def _tpa_phase_fill_table(self) -> None:
+        """One row per target: every column a scalar, so ten targets stay readable."""
+        self.tpa_phase_table.blockSignals(True)
+        items = sorted(self.tpa_phase_results.items())
+        self.tpa_phase_table.setRowCount(len(items))
+        for row, (k, result) in enumerate(items):
+            fit = result.fit
+            if fit is None:
+                cells = [str(k)] + ["\N{EN DASH}"] * (
+                    len(self._TPA_PHASE_COLUMNS) - 1
+                )
+            else:
+                cells = [
+                    str(k),
+                    f"{fit.dphi_comb_deg:+.2f}",
+                    # The quoted error is the TOTAL: fringe noise and the pinned
+                    # step-6 eta in quadrature.  a and b do not float, so the
+                    # fitter's own error cannot see the eta term -- it is
+                    # invisible there, not absent, hence all three columns.
+                    f"{np.degrees(fit.dphi_comb_err_total):.2f}",
+                    f"{np.degrees(fit.dphi_comb_err):.2f}",
+                    f"{np.degrees(fit.dphi_comb_err_eta):.2f}",
+                    f"{fit.a*1e3:.3f}",
+                    f"{fit.b*1e3:.3f}",
+                    f"{fit.r2:.5f}",
+                    f"{float(np.max(np.abs(fit.pulls))):.2f}",
+                    # NOT fitted in v2, so it is a pure check on step 6: a big
+                    # mean residual means the pinned amplitudes are off.
+                    f"{float(np.mean(fit.residuals))*1e3:+.4f}",
+                ]
+            for col, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if col:
+                    item.setTextAlignment(
+                        QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                    )
+                self.tpa_phase_table.setItem(row, col, item)
+        self.tpa_phase_table.resizeColumnsToContents()
+        self.tpa_phase_table.blockSignals(False)
+        if items:
+            self.tpa_phase_table.selectRow(0)
+
+    def _tpa_phase_selected(self) -> "tuple[int, PhaseResult] | None":
+        items = sorted(self.tpa_phase_results.items())
+        if not items:
+            return None
+        row = self.tpa_phase_table.currentRow()
+        if row < 0 or row >= len(items):
+            row = 0
+        return items[row]
 
     def _tpa_phase_redraw(self) -> None:
-        k = self.tpa_phase_combo.currentData()
-        result = self.tpa_phase_results.get(k)
-        if result is None or result.fit is None:
-            self.tpa_phase_report.setText("ΔΦ_comb: (run a sweep)")
+        """The selected target's fringe, drawn by the renderer the PNG uses."""
+        picked = self._tpa_phase_selected()
+        if picked is None or picked[1].fit is None:
+            self.tpa_phase_fig.clear()
+            ax = self.tpa_phase_fig.add_subplot(111)
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "Run or load a sweep", ha="center", va="center",
+                    transform=ax.transAxes)
+            self.tpa_phase_canvas.draw_idle()
             return
-        f = result.fit
-        flags = (("  [a@bound]" if f.a_at_bound else "")
-                 + ("  [b@bound]" if f.b_at_bound else ""))
-        self.tpa_phase_report.setText(
-            f"ΔΦ_comb = {f.dphi_comb_deg:+.2f} ± "
-            f"{np.degrees(f.dphi_comb_err):.2f}°   "
-            f"a={f.a:.4g}  b={f.b:.4g}   "
-            f"R²={f.r2:.4f}{flags}"
-        )
-        plot_fringe(self.tpa_phase_fig, f, k)
+        k, result = picked
+        plot_fringe(self.tpa_phase_fig, result.fit, k)
         self.tpa_phase_canvas.draw_idle()
 
+    # ---- files -------------------------------------------------------------
+    def _tpa_phase_load(self) -> None:
+        """Re-fit a recorded step-7 CSV: every target it carries, in one go."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Step-7 measurement CSV", "", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            _layout, models = self._tpa_phase_load_step6()
+        except Exception as exc:
+            # Unlike step 6, this is fatal: the amplitudes are PINNED to step 6,
+            # so without those etas there is no fit to do at all.
+            self.tpa_phase_status.setText(f"Step 6 required to re-fit: {exc}")
+            return
+        name = Path(path).name
+        try:
+            targets = targets_in_csv(path)
+            recorded_ref = reference_in_csv(path)
+        except Exception as exc:
+            self.tpa_phase_status.setText(f"Load failed: {exc}")
+            return
+
+        # The CSV knows its own reference -- every row records it -- so it wins
+        # over the spinbox, which is a setting for the NEXT sweep and has no
+        # business deciding how an existing one is read.  The spinbox is moved
+        # to match, so the page never shows a reference the results are not
+        # against.
+        ref = self._tpa_phase_config().ref_index if recorded_ref is None else recorded_ref
+        if recorded_ref is not None and recorded_ref != self.tpa_phase_ref.value():
+            self.tpa_phase_ref.setValue(recorded_ref)
+            self._log(f"[step 7] {name} was swept against reference "
+                      f"{recorded_ref}; using that, not the {ref} on the page")
+        if ref not in models:
+            # One run-level failure, not one per target: with no eta for the
+            # reference there is no `a` to pin, so nothing in this file is
+            # fittable and saying it five times explains it no better.
+            self.tpa_phase_status.setText(
+                f"{name} was swept against reference {ref}, but the Step-6 file "
+                f"has no η for it — it covers "
+                f"{self._compact_indices(sorted(models))}. Point Step 6 at the "
+                f"result this sweep was measured against."
+            )
+            return
+        fittable = [k for k in targets if k in models and k != ref]
+        if not fittable:
+            missing = [k for k in targets if k not in models and k != ref]
+            why = (f"step 6 has no η for {self._compact_indices(missing)}"
+                   if missing else "it carries only the reference")
+            self.tpa_phase_status.setText(
+                f"No fittable target in {name}: it carries "
+                f"{self._compact_indices(targets)} against reference {ref}, and "
+                f"{why}."
+            )
+            return
+
+        single_beam_bg = self.tpa_phase_single_beam.isChecked()
+        self.tpa_phase_results = {}
+        failed: list[str] = []
+        for k in fittable:
+            try:
+                self.tpa_phase_results[k] = load_phase_csv(
+                    path, models[k], models[ref],
+                    comb_only=True, single_beam_bg=single_beam_bg, only_tgt=k,
+                )
+            except (ValueError, KeyError, np.linalg.LinAlgError) as exc:
+                failed.append(f"pair {k}: {exc}")
+        self._tpa_phase_fill_table()
+        self._tpa_phase_redraw()
+        self.tpa_phase_save_button.setEnabled(bool(self.tpa_phase_results))
+        skipped = [k for k in targets if k not in fittable and k != ref]
+        note = ""
+        if failed:
+            note += "  · " + "; ".join(failed)
+        if skipped:
+            note += (f"  · skipped {self._compact_indices(skipped)} "
+                     f"(no step-6 η)")
+        self.tpa_phase_status.setText(
+            f"Loaded {name} · {len(self.tpa_phase_results)} "
+            f"target(s) re-fit vs ref {ref}{note}"
+        )
+        for line in failed:
+            self._log(f"[step 7] fit failed — {line}")
+
     def _tpa_phase_save(self) -> None:
+        """Raw CSV, the combined JSON step 8 reads, and one PNG per target.
+
+        The JSON carries the step-3 and step-6 payloads over verbatim from the
+        file named on this page, so one file downstream holds the whole chain:
+        layout, etas, and the phase spectrum measured against them.
+
+        The rows are written first and unconditionally.  A measurement is an
+        hour of bench time and must never be lost to an unreadable step-6 file,
+        which is only needed for the derived JSON.
+        """
         if not self.tpa_phase_results:
             return
-        default = f"calib_step7_{time.strftime('%m%d_%H%M')}.json"
+        default = f"calib_step7_meas_{time.strftime('%m%d_%H%M')}.csv"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Comb-Phase Results", default, "JSON (*.json)"
+            self, "Save Step-7 Result", default, "CSV (*.csv)"
         )
         if not path:
             return
         base = Path(path).with_suffix("")
-        saved: list[str] = []
-        for k, result in sorted(self.tpa_phase_results.items()):
-            csv_path = base.parent / f"{base.name}_pair{k}.csv"
-            json_path = base.parent / f"{base.name}_pair{k}.json"
-            write_phase_csv(result, csv_path)
-            save_phase_json(result, json_path)
-            saved += [csv_path.name, json_path.name]
-        self.tpa_phase_status.setText(f"Saved {', '.join(saved)}")
+        results = [r for _, r in sorted(self.tpa_phase_results.items())]
+        written = [Path(write_phase_meas_csv(results, base.with_suffix(".csv"))).name]
+
+        step6 = self._tpa_phase_step6_path()
+        if step6 is None or not step6.is_file():
+            self.tpa_phase_status.setText(
+                f"Saved {written[0]} — no Step-6 result set, so the combined "
+                "JSON was not written (step 8 could not read it)."
+            )
+            return
+        fits = {
+            (k, "fixed_comb_only"): r.fit
+            for k, r in sorted(self.tpa_phase_results.items())
+            if r.fit is not None
+        }
+        if not fits:
+            self.tpa_phase_status.setText(
+                f"Saved {written[0]} — no fitted target, so no JSON was written."
+            )
+            return
+        try:
+            js = save_comb_phase_json(
+                fits, step6, base.with_suffix(".json"),
+                ref_index=self._tpa_phase_config().ref_index,
+                csv_path=str(base.with_suffix(".csv").resolve()),
+                single_beam_bg=self.tpa_phase_single_beam.isChecked(),
+            )
+            written.append(Path(js).name)
+            for (k, _method), fit in fits.items():
+                png = base.with_name(f"{base.name}_pair{k}.png")
+                fig = Figure(figsize=(12, 5))
+                plot_fringe(fig, fit, k)
+                fig.savefig(png, dpi=150)
+            written.append(f"{len(fits)} PNG(s)")
+        except Exception as exc:
+            self.tpa_phase_status.setText(
+                f"Saved {written[0]}; JSON/plots failed: {exc}"
+            )
+            return
+        self.tpa_phase_status.setText("Saved " + "  +  ".join(written))
 
     def _build_tpa_center_tab(self) -> QtWidgets.QWidget:
         page = self._page_shell("TPA Centre-Wavelength Calibration")
@@ -8568,10 +9045,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # treat acquisition as an SLM task so the DVI keep-alive is suspended
         self._run_slm_task(label, run, self._on_step_finished, self._on_step_error)
 
-    def _open_calibration_dialog(self) -> None:
+    def _open_calibration_dialog(self, on_stop: Callable[[], None] | None = None) -> None:
+        """Pop the shared live-progress window.
+
+        ``on_stop`` lets a page that owns its own stop event use this dialog --
+        step 6 sets its sweep's event rather than the full-calibration one.
+        Defaults to the full-calibration stop, which is what steps 1-3 want.
+        """
         if self.calibration_dialog is not None:
             self.calibration_dialog.close()
-        dialog = CalibrationProgressDialog(self, on_stop=self._stop_full_calibration)
+        dialog = CalibrationProgressDialog(
+            self, on_stop=on_stop or self._stop_full_calibration
+        )
         dialog.setStyleSheet(DARK_STYLESHEET)
         dialog.finished.connect(self._on_calibration_dialog_closed)
         self.calibration_dialog = dialog

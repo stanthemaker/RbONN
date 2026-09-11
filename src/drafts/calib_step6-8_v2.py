@@ -56,6 +56,7 @@ import json
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,15 +83,19 @@ REF_INDEX = 2                   # step 7's reference pair (Phi = 0); must be in 
 
 # Per step: module stem, the glob that finds the result it hands downstream, and
 # the constants to rebind.  ``result_glob = None`` marks the terminal step.
+# Steps 6 and 7 take their input as a REQUIRED command-line flag rather than a
+# module constant -- that constant was exactly what let a filed-away run drift
+# out from under the script -- so it goes in argv.  Step 8 still carries a
+# rebindable ``IN_STEP7``; ``in_flag = None`` marks that.
 STEPS = {
     6: {"module": "calib_step6_v2", "out_attr": "CALIB_PATH",
-        "in_attr": "IN_STEP3", "pairs_attr": "PAIR_INDICES",
+        "in_flag": "--step3", "in_attr": None, "pairs_attr": "PAIR_INDICES",
         "result_glob": "calib_step6v2_result_*.json"},
-    7: {"module": "calib_step7_v2", "out_attr": "OUT_DIR",
-        "in_attr": "IN_STEP6", "pairs_attr": "TGT_INDICES",
+    7: {"module": "calib_step7_v2", "out_attr": "CALIB_PATH",
+        "in_flag": "--step6", "in_attr": None, "pairs_attr": "TGT_INDICES",
         "result_glob": "calib_step7_result_*.json"},
     8: {"module": "calib_step8_v2", "out_attr": "OUT_DIR",
-        "in_attr": "IN_STEP7", "pairs_attr": "PAIRS",
+        "in_flag": None, "in_attr": "IN_STEP7", "pairs_attr": "PAIRS",
         "result_glob": None},
 }
 
@@ -207,6 +212,25 @@ def _rel(path: Path) -> str:
 # the sequence
 # ======================================================================
 
+def _set_ref_index(mod, ref_index) -> int | None:
+    """Bind the reference pair wherever this step keeps it; return what it is.
+
+    Step 7 moved its drive settings into a frozen ``CONFIG`` dataclass, so its
+    reference is ``CONFIG.ref_index``; the older steps keep a bare
+    ``REF_INDEX`` global.  Returns None for a step that has no reference.
+    """
+    cfg = getattr(mod, "CONFIG", None)
+    if cfg is not None and hasattr(cfg, "ref_index"):
+        if ref_index is not None:
+            mod.CONFIG = replace(cfg, ref_index=int(ref_index))
+        return int(mod.CONFIG.ref_index)
+    if hasattr(mod, "REF_INDEX"):
+        if ref_index is not None:
+            mod.REF_INDEX = int(ref_index)
+        return int(mod.REF_INDEX)
+    return None
+
+
 def run_step(n: int, run_dir: Path, in_path: Path, *, pairs=None,
              ref_index=None, dry_run: bool = False) -> Path | None:
     """Point step ``n`` at this run folder, run it, return its result JSON.
@@ -222,26 +246,29 @@ def run_step(n: int, run_dir: Path, in_path: Path, *, pairs=None,
     pending = isinstance(in_path, str)          # dry-run placeholder, not a path
     mod = _load_step(spec["module"])
     setattr(mod, spec["out_attr"], run_dir)     # all outputs -> the run folder
+    argv: list[str] = []
     if not pending:
-        setattr(mod, spec["in_attr"], in_path)
+        if spec["in_flag"] is not None:
+            argv += [spec["in_flag"], str(in_path)]
+        else:
+            setattr(mod, spec["in_attr"], in_path)
     if pairs is not None:
         setattr(mod, spec["pairs_attr"], list(pairs))
-    if ref_index is not None and hasattr(mod, "REF_INDEX"):
-        mod.REF_INDEX = int(ref_index)
+    ref = _set_ref_index(mod, ref_index)
 
     head = (f"\n{'=' * 70}\n== STEP {n}  ({spec['module']})\n"
             f"==   in   : {in_path if pending else _rel(in_path)}\n"
             f"==   out  : {_rel(run_dir)}\n"
             f"==   pairs: {getattr(mod, spec['pairs_attr'])}")
-    if hasattr(mod, "REF_INDEX"):
-        head += f"   ref: {mod.REF_INDEX}"
+    if ref is not None:
+        head += f"   ref: {ref}"
     print(f"{head}\n{'=' * 70}", flush=True)
     if dry_run:
         print("   (dry run -- not executed)")
         return None
 
     t0 = time.time()
-    rc = mod.main([])               # [] not None: the step must not see OUR argv
+    rc = mod.main(argv)             # never None: the step must not see OUR argv
     if rc:
         raise RuntimeError(f"step {n} ({spec['module']}) returned {rc}")
     print(f"\n-- step {n} finished in {(time.time() - t0) / 60:.1f} min")

@@ -86,23 +86,65 @@ class PairListTests(_WindowCase):
                 self.win._tpa_parse_pairs(text)
 
 
-class PlanTests(_WindowCase):
-    def test_plan_states_the_grid_and_the_wall_clock(self) -> None:
-        """Ten pairs is most of an hour; the user gets that before pressing Run."""
-        w = self.win
-        w.tpa_pairs_edit.setText("1-10")
-        w._tpa_update_plan()
-        text = w.tpa_plan_label.text()
-        self.assertIn("37 acquisitions/pair", text)
-        self.assertIn("10 pair(s)", text)
-        self.assertRegex(text, r"~\d+ min total")
+class SweepRampTests(_WindowCase):
+    """The three ramp controls build the cross line -- the levels eta is fitted to."""
 
-    def test_bad_pair_list_says_so_instead_of_lying_about_the_time(self) -> None:
+    def tearDown(self) -> None:
+        self.win.tpa_sweep_min.setValue(0.20)
+        self.win.tpa_sweep_max.setValue(0.90)
+        self.win.tpa_points.setValue(4)
+
+    @staticmethod
+    def _cross(cfg):
+        return [(w, n) for x, w, n in cfg.grid if x and w]
+
+    def test_defaults_give_the_37_acquisition_grid(self) -> None:
+        from calibration_module.measure.pair_v2 import build_schedule
+
+        cfg = self.win._tpa_config()
+        self.assertEqual(cfg.fit_w_range, (0.2, 0.9))
+        self.assertEqual(len(build_schedule(cfg)), 37)
+
+    def test_the_ramp_reaches_the_grid_and_the_fit_window(self) -> None:
         w = self.win
-        w.tpa_pairs_edit.setText("nonsense")
-        w._tpa_update_plan()
-        self.assertIn("bad pair list", w.tpa_plan_label.text())
-        w.tpa_pairs_edit.setText("2-6")
+        w.tpa_sweep_min.setValue(0.30)
+        w.tpa_sweep_max.setValue(0.90)
+        w.tpa_points.setValue(3)
+        cfg = w._tpa_config()
+        self.assertEqual(cfg.fit_w_range, (0.3, 0.9))
+        self.assertEqual([lv[0] for lv in self._cross(cfg)][:3], [0.3, 0.6, 0.9])
+
+    def test_last_ramp_point_gets_the_extra_repeats(self) -> None:
+        """The top of the window carries the most leverage on the slope."""
+        cross = self._cross(self.win._tpa_config())
+        in_window = [lv for lv in cross if lv[0] <= 0.9]
+        self.assertEqual(in_window[-1][1], 6)
+        self.assertTrue(all(n == 4 for _w, n in in_window[:-1]))
+
+    def test_max_below_one_keeps_the_top_drive_diagnostic(self) -> None:
+        cross = self._cross(self.win._tpa_config())
+        self.assertEqual(cross[-1], (1.0, 2))          # measured, excluded from the fit
+
+    def test_max_at_one_gives_up_that_diagnostic(self) -> None:
+        """Compression then sits inside the fit -- the cost of the wider window."""
+        w = self.win
+        w.tpa_sweep_max.setValue(1.00)
+        cfg = w._tpa_config()
+        self.assertEqual(cfg.fit_w_range[1], 1.0)
+        self.assertEqual(self._cross(cfg)[-1], (1.0, 6))    # the ramp end, not excluded
+        # Refitting the recorded run under this window pulls w = 1.0 in, so
+        # nothing is left to report as the compression diagnostic.
+        w._tpa_fit_rows(load_meas_csv(MEAS_CSV), cfg, None)
+        self.assertEqual(w.tpa_fits[0].excluded, [])
+
+    def test_a_half_typed_ramp_falls_back_instead_of_raising(self) -> None:
+        """A spinbox mid-edit must not stop the page redrawing."""
+        w = self.win
+        w.tpa_sweep_min.setValue(0.90)
+        w.tpa_sweep_max.setValue(0.90)                 # min == max: not a ramp
+        cfg = w._tpa_config()
+        self.assertEqual(cfg.fit_w_range, (0.2, 0.9))  # the validated default
+        w._tpa_redraw()                                 # must not raise
 
 
 class AcquisitionSettingsTests(_WindowCase):
@@ -296,12 +338,92 @@ class SaveRoundTripTests(_WindowCase):
             self.assertIn("no Step-3 calibration", w.tpa_status.text())
 
 
+class ProgressDialogTests(_WindowCase):
+    """A run takes tens of minutes, so it reports into the shared popup.
+
+    Steps 1-3 already pop ``CalibrationProgressDialog``; reusing it gets step 6
+    the same window with elapsed/ETA and a live trace, rather than a second
+    progress widget with its own idea of how to estimate time.
+    """
+
+    def tearDown(self) -> None:
+        if self.win.calibration_dialog is not None:
+            self.win.calibration_dialog.close()
+            self.win.calibration_dialog = None
+
+    def _progress(self, step: int, total: int = 37):
+        from calibration_module.measure.pair_v2 import PairV2Progress
+
+        return PairV2Progress(
+            step=step, total=total, pair_index=2, repeat=0, x=1.0, w=0.9,
+            mean_v=0.0412, std_v=2e-4, range_v=0.1, single=False, duration_s=8.0,
+        )
+
+    def test_no_inline_progress_bar_on_the_page(self) -> None:
+        self.assertFalse(hasattr(self.win, "tpa_progress_bar"))
+
+    def test_dialog_shows_the_step_6_phase_and_tracks_the_bar(self) -> None:
+        w = self.win
+        w._open_calibration_dialog(on_stop=w._tpa_stop)
+        w._on_tpa_progress(self._progress(1))
+        self.assertEqual(w.calibration_dialog.phase_label.text(),
+                         "Step 6 \N{MIDDLE DOT} TPA pair efficiency")
+        w._on_tpa_progress(self._progress(19))
+        self.assertEqual(w.calibration_dialog.progress_bar.value(), 19)
+        self.assertEqual(w.calibration_dialog.progress_bar.maximum(), 37)
+        self.assertIn("ETA", w.calibration_dialog.eta_label.text())
+        self.assertIn("pair 2", w.calibration_dialog.status_label.text())
+
+    def test_stop_button_reaches_this_page_not_the_full_calibration(self) -> None:
+        w = self.win
+        w.tpa_stop_event = __import__("threading").Event()
+        w._open_calibration_dialog(on_stop=w._tpa_stop)
+        w.calibration_dialog.stop_button.click()
+        self.assertTrue(w.tpa_stop_event.is_set())
+        w.tpa_stop_event = None
+
+    def test_finish_freezes_the_window_but_leaves_it_open(self) -> None:
+        """On a run this long, the log and trace must not vanish when it ends."""
+        w = self.win
+        w._open_calibration_dialog(on_stop=w._tpa_stop)
+        w._on_tpa_progress(self._progress(37))
+        w._tpa_close_dialog(True, "Done · 5 pairs")
+        self.assertFalse(w.calibration_dialog.stop_button.isEnabled())
+        self.assertTrue(w.calibration_dialog.close_button.isEnabled())
+        self.assertIn("Done", w.calibration_dialog.status_label.text())
+
+    def test_a_rejected_run_pops_no_dialog(self) -> None:
+        w = self.win
+        w.calibration_dialog = None
+        w.tpa_step3_edit.setText("")
+        w._tpa_run()
+        self.assertIsNone(w.calibration_dialog)
+
+
 class Step7HandoffTests(_WindowCase):
-    def test_step_7_consumes_the_v2_fits_in_memory(self) -> None:
+    def test_step_7_loads_the_saved_file_not_this_page_s_memory(self) -> None:
+        """The handoff is a named file, not the tab's last result.
+
+        Step 7 pins its fringe amplitudes to these etas AND builds its layout
+        from the step-3 payload beside them, so it takes one file it can record
+        in its own output -- there is deliberately no path by which a step-7 run
+        is driven by something with no file on disk.
+        """
         w = self._load()
-        models = w._tpa_phase_models(None)
-        self.assertEqual(sorted(models), [2, 3, 4, 5, 6])
-        self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)
+        w.tpa_step3_edit.setText(str(STEP3))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "handoff.csv"
+            with unittest.mock.patch.object(
+                QtWidgets.QFileDialog, "getSaveFileName",
+                staticmethod(lambda *a, **k: (str(target), "")),
+            ):
+                w._tpa_save()
+            w.tpa_phase_step6_edit.setText(str(target.with_suffix(".json")))
+            layout, models = w._tpa_phase_load_step6()
+            self.assertEqual(sorted(models), [2, 3, 4, 5, 6])
+            self.assertAlmostEqual(models[5].eta, RECORDED_ETA[3], places=12)
+            self.assertEqual(layout.n_channels, 6)
+        w.tpa_phase_step6_edit.setText("")
 
     def test_dropped_q_columns_arrive_as_exact_zeros(self) -> None:
         """v2 does not fit q_x/q_w; PairModel needs them, and 0.0 is the contract."""

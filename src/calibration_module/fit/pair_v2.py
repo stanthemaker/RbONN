@@ -271,6 +271,49 @@ class PairV2Config:
     #: and the comb phases are all defined at the levels actually written.
     encoding_method: str = "fit"
 
+    @classmethod
+    def from_ramp(cls, sweep_min: float, sweep_max: float, points: int,
+                  **kw) -> "PairV2Config":
+        """Rebuild the grid with an evenly spaced cross-line ramp.
+
+        The single-beam block is fixed -- it is the five levels
+        :func:`fit_background` needs and nothing about a ramp changes them --
+        and so is the verification block, which is defined by its products
+        rather than by the ramp.  What this replaces is the cross line, the part
+        eta is actually the slope of, and ``fit_w_range`` follows the ramp so
+        the estimator fits exactly what was measured.
+
+        Repeat counts follow the same rule the hand-built
+        :data:`DEFAULT_GRID` uses: four per level, six on the last one because
+        the top of the window carries the most leverage on the slope, and two on
+        the excluded top-drive level.
+
+        ``(1, 1.0)`` is appended as the compression diagnostic only when the
+        ramp stops short of it.  Take ``sweep_max`` to 1.0 and there is no
+        excluded level left: top-drive compression then sits inside the fit
+        instead of being measured against it, and the printed ``excluded`` list
+        is empty.  That is the cost of the wider window, not a bug.
+
+        Note this is a *different grid* from :data:`DEFAULT_GRID`, whose cross
+        levels (0.2, 0.45, 0.7, 0.9) are not evenly spaced.  Results measured on
+        one are not identical to results measured on the other; re-fits of an
+        existing CSV are unaffected, since only ``fit_w_range`` reaches those.
+        """
+        lo, hi, n = float(sweep_min), float(sweep_max), int(points)
+        if n < 2:
+            raise ValueError(f"need >= 2 ramp points, got {n}")
+        if not (0.0 < lo < hi <= 1.0):
+            raise ValueError(
+                f"ramp must satisfy 0 < min < max <= 1, got {lo} .. {hi}"
+            )
+        ramp = np.round(np.linspace(lo, hi, n), 6)
+        cross = tuple((1.0, float(w), 6 if i == n - 1 else 4)
+                      for i, w in enumerate(ramp))
+        if hi < 1.0:
+            cross += ((1.0, 1.00, 2),)          # excluded: top-drive compression
+        background = tuple(lv for lv in DEFAULT_GRID if block_of(lv[0], lv[1]) != "cross")
+        return cls(grid=background + cross, fit_w_range=(lo, hi), **kw)
+
     # -- derived ---------------------------------------------------------
     @property
     def params_bg(self) -> tuple[str, ...]:

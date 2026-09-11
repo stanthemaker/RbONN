@@ -14,8 +14,11 @@ running. Nothing marked **legacy** or **dead** should be imported from new code.
 | `src/calibration_module/fit/pair_v2.py` | **current** step 6 estimator — the difference fit (`D(w) = Y(1,w) − Ŷ(0,w) = η²w + a_x + q_x`) over 31 acquisitions on 10 repeated levels, plus 6 verification levels. Driver-free: `tests/test_pair_v2.py` runs the whole estimator off a committed CSV with no fake instrument. `PairV2Config` carries what a fit was specified with, so two configurations can coexist in one process. |
 | `src/calibration_module/measure/pair_v2.py` | step 6 acquisition — one pair's interleaved schedule, the near-rail ±0.1 → ±0.2 V escalation and the TIA sign convention. Takes the monitor as an argument and accepts `progress_callback`/`stop_event`, so the script and the GUI share it. |
 | `src/calibration_module/steps/calib_step6_v2.py` | the step 6 runner (287 lines) — constants, then load layout → `measure.pair_v2` → `fit.pair_v2` → CSV/JSON/PNG. Holds no physics. |
+| `src/calibration_module/fit/phase.py` | **current** step 7 fit — the fringe `Y = a² + b²g² + 2abg·cos(ΔΦ_comb − ΔΦ_SLM)` with `a`, `b`, the single-beam background and the dark ALL pinned to step 6, so `ΔΦ_comb` is the one free parameter. Also owns the phase CSV/JSON formats and the β₂ dispersion check. Driver-free. |
+| `src/calibration_module/measure/phase_v2.py` | step 7 acquisition — one target pair swept against the held reference, the all-off dark, and step 6's near-rail escalation reused rather than retyped. `PhaseV2Config` is the drive (reference, ramp, levels); `PhaseV2Acq` the timing and input range. Takes the monitor as an argument and accepts `progress_callback`/`stop_event`, so the script and the GUI share it. |
+| `src/calibration_module/steps/calib_step7_v2.py` | the step 7 runner (423 lines) — constants, then load the step-6 JSON → `measure.phase_v2` → `fit.phase` → CSV/JSON/PNG. Holds no physics. `--step6` is required and has no default. |
 | `src/calibration_module/fit/pair.py` | step 6 **v1** — the joint 6-parameter grid fit `pair_v2` replaced. GUI Step 6 moved off it; only `calib_step6_v1.py` and `calib_synth_v1.py` still reach it, kept so a historical CSV can be re-fit both ways. |
-| `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Steps 7 and 8 still run on v1; step 6 v1 is kept for the joint-fit comparison and to re-fit historical CSVs. |
+| `src/calibration_module/steps/calib_step{6,7,8}_v1.py` | the v1 chain — dispatch to SLM + DAQ, collect, fit, plot. Step 8 still runs on v1; 6 and 7 v1 are kept for the estimator comparison and to re-fit historical CSVs. |
 | `src/calibration_module/measure/bench.py` | SLM/DAQ connection helpers shared by the step scripts |
 | `src/{daq,osa,scope,heater}_module/`, `src/slm_module/{controller,driver,encoding,generator}` | instrument drivers and pattern encoding |
 | `src/gui/` | the PyQt5 control suite (entry point `src/main.py`). It drives every instrument, not just the SLM, which is why it sits beside them rather than inside `slm_module/`. |
@@ -30,9 +33,8 @@ once its GUI page is rebuilt.
 
 | Path | Kept alive by |
 |------|---------------|
-| `src/calibration_module/measure/phase.py` | Step 7 — [app.py:5302](src/gui/app.py#L5302) only |
-| `src/calibration_module/measure/center.py` | TPA centre scan — [app.py:5581](src/gui/app.py#L5581) only |
-| `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:7170](src/gui/app.py#L7170) still reach it. `phase_for_level` and `predict_intensity` are exported and called nowhere at all — not in `src/`, not in the tests. |
+| `src/calibration_module/measure/center.py` | TPA centre scan — [app.py:6471](src/gui/app.py#L6471) only |
+| `src/slm_module/calibration/calibration.py` | the old sin² transfer-curve fit. Step 3 is `calibration_new.py`; only `intensity_model` (used by `outliers.py`) and one GUI "load a calibration CSV" path at [app.py:8062](src/gui/app.py#L8062) still reach it. `phase_for_level` and `predict_intensity` are exported and called nowhere at all — not in `src/`, not in the tests. |
 
 ### Dead — nothing imports these
 
@@ -58,7 +60,7 @@ you need one, copy it out and repoint it at `calibration_module.fit.*`.
 **Dangling references:** `src/drafts/heat_controller.py` has been deleted, but
 four docstrings still name it as the thing they mirror —
 `heater_module/__init__.py`, `heater_module/controller.py`,
-`heater_module/driver.py` and [app.py:5931](src/gui/app.py#L5931).
+`heater_module/driver.py` and [app.py:6821](src/gui/app.py#L6821).
 The code is fine; only the pointers are stale. `heater_module/` is now the
 sole copy of that logic.
 
@@ -75,7 +77,7 @@ re-tabbing them should be a one-line change rather than a rebuild.
 | **Mod Error** | never had a tab | the Encoding Gain (TPA Encoding page) and Quick Test sweeps read its `ana_*` OSA sweep-settings widgets |
 
 To bring 4b or 6b back, swap the `self._..._page = self._build_...()` line for an
-`addTab` call at [app.py:842](src/gui/app.py#L842). Neither is deleted, and the
+`addTab` call at [app.py:845](src/gui/app.py#L845). Neither is deleted, and the
 underlying calibration code (`optimization.py`, `calibration_module/fit/center.py`)
 is live and tested — it is the GUI wiring that is incomplete.
 

@@ -1060,6 +1060,95 @@ def write_phase_csv(result: PhaseResult, path: str | Path) -> str:
     return str(out)
 
 
+_MEAS_CSV_HEADER = [
+    "trial", "tgt_index", "ref_index",
+    "phi_xt_deg", "phi_wt_deg", "x_t", "w_t", "x_r", "w_r",
+    "dark_v", "voltage_mean_v", "voltage_std_v", "std_ratio",
+]
+
+
+def write_meas_csv(results: Sequence[PhaseResult], path: str | Path) -> str:
+    """Raw rows for one or more target pairs, in a single CSV.
+
+    :func:`write_phase_csv`'s column layout plus a trailing ``std_ratio``
+    (std/|mean|), and it concatenates several :class:`PhaseResult` objects so
+    every row carries its own ``tgt_index`` beside the shared ``ref_index``.
+    That is what makes one file a whole step-7 run: the offline refit and the
+    GUI's Load both read every target back out of it with
+    :func:`load_phase_csv`'s ``only_tgt``.
+
+    Byte-compatible with a v1 CSV -- either version can refit either file.
+    """
+    out = Path(path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(_MEAS_CSV_HEADER)
+        for result in results:
+            for t, x_t, w_t, x_r, w_r, dark_v, mean_v, std_v in zip(
+                result.trial, result.x_t, result.w_t, result.x_r, result.w_r,
+                result.dark_v, result.voltage_mean_v, result.voltage_std_v,
+            ):
+                phi_xt = np.degrees(2.0 * float(phi_half(x_t)))
+                phi_wt = np.degrees(2.0 * float(phi_half(w_t)))
+                ratio = abs(std_v / mean_v) if mean_v else float("inf")
+                writer.writerow(
+                    [int(t), result.tgt_index, result.ref_index,
+                     f"{phi_xt:.4g}", f"{phi_wt:.4g}",
+                     f"{x_t:.6g}", f"{w_t:.6g}", f"{x_r:.6g}", f"{w_r:.6g}",
+                     f"{dark_v:.9g}", f"{mean_v:.9g}", f"{std_v:.9g}",
+                     f"{ratio:.6g}"]
+                )
+    for result in results:
+        result.csv_path = str(out)
+    return str(out)
+
+
+def targets_in_csv(path: str | Path, default=()) -> list[int]:
+    """Distinct target-pair indices recorded in a CSV (sorted).
+
+    A collected file stacks every target vs the shared reference, so its
+    ``tgt_index`` column lists several pairs.  Falls back to ``default`` if the
+    column is missing (an old single-target CSV).
+    """
+    seen: list[int] = []
+    with open(Path(path), newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(line for line in f if not line.startswith("#")):
+            t = row.get("tgt_index")
+            if t in (None, ""):
+                continue
+            k = int(float(t))
+            if k not in seen:
+                seen.append(k)
+    return sorted(seen) if seen else sorted(default)
+
+
+def reference_in_csv(path: str | Path) -> int | None:
+    """The reference pair a recorded run was swept against, from its own rows.
+
+    Every row carries ``ref_index``, so a CSV knows its own reference and a
+    caller never has to be told it a second time -- being told it a second time
+    is how a re-fit silently ends up asking step 6 for a pair that was never the
+    reference.  Returns None for a file with no such column (an old CSV), and
+    raises if the rows disagree, which means several runs were concatenated and
+    no single reference describes the file.
+    """
+    seen: set[int] = set()
+    with open(Path(path), newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(line for line in f if not line.startswith("#")):
+            r = row.get("ref_index")
+            if r not in (None, ""):
+                seen.add(int(float(r)))
+    if not seen:
+        return None
+    if len(seen) > 1:
+        raise ValueError(
+            f"{Path(path).name} mixes references {sorted(seen)}; a step-7 CSV "
+            f"records one run against one reference"
+        )
+    return seen.pop()
+
+
 def load_phase_csv(
     path: str | Path,
     tgt_model: PairModel,
@@ -1682,6 +1771,9 @@ __all__ = [
     "beta2_payload",
     "swap_invariance",
     "write_phase_csv",
+    "write_meas_csv",
+    "targets_in_csv",
+    "reference_in_csv",
     "load_phase_csv",
     "phase_fit_payload",
     "save_phase_json",
