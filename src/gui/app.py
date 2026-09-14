@@ -43,6 +43,7 @@ from slm_module.calibration.calibration_new import (
     batch_intensity_calibration,
     build_channel_calibration_grid,
     calibration_result_from_dict,
+    clip_to_wavelength_range,
     find_min_max_intensity_levels,
     intensity_calibration_daq,
     load_calibration_result,
@@ -1510,17 +1511,23 @@ class MainWindow(QtWidgets.QMainWindow):
             "re-center this narrow span on the predicted wavelength at every "
             "other position — much faster."
         )
+        # The usable BAND, applied to the finished mapping -- not a peak-search
+        # mask.  The sweep measures and fits every peak it finds, however far
+        # outside the band it lands; only the saved/handed-on mapping is clipped.
+        usable_tip = (
+            "Usable wavelength band for the steps downstream (0 = off).\n"
+            "The sweep itself is NOT restricted: every window peak is measured "
+            "and goes into the one linear coordinate -> wavelength fit, so a "
+            "region whose edges fall outside the band is fine and in fact pins "
+            "the slope down better.\nThe band is applied when the mapping is "
+            "handed on: the saved JSON and the in-memory result keep only the "
+            "coordinates that map into it, with the full-region fit "
+            "coefficients carried over."
+        )
         widgets["min_wl"] = self._double_spin(0.0, 2000.0, 775.0, " nm", 2)
-        widgets["min_wl"].setToolTip(
-            "Ignore peak-search samples below this wavelength (0 = off). Use "
-            "to mask artifacts below the source band."
-        )
+        widgets["min_wl"].setToolTip(usable_tip)
         widgets["max_wl"] = self._double_spin(0.0, 2000.0, 781.0, " nm", 2)
-        widgets["max_wl"].setToolTip(
-            "Ignore peak-search samples above this wavelength (0 = off). Use "
-            "to mask a fixed leakage artifact the SLM never modulates, "
-            "e.g. 781.5."
-        )
+        widgets["max_wl"].setToolTip(usable_tip)
         cfg.addWidget(QtWidgets.QLabel("Window px"))
         cfg.addWidget(widgets["window"])
         cfg.addWidget(QtWidgets.QLabel("Peak ± window"))
@@ -1529,9 +1536,9 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg.addWidget(widgets["stride"])
         cfg.addWidget(QtWidgets.QLabel("Sweep span"))
         cfg.addWidget(widgets["sweep_nm"])
-        cfg.addWidget(QtWidgets.QLabel("Exclude peak λ <"))
+        cfg.addWidget(QtWidgets.QLabel("Usable λ ≥"))
         cfg.addWidget(widgets["min_wl"])
-        cfg.addWidget(QtWidgets.QLabel("Exclude peak λ >"))
+        cfg.addWidget(QtWidgets.QLabel("Usable λ ≤"))
         cfg.addWidget(widgets["max_wl"])
         cfg.addStretch(1)
         layout.addLayout(cfg)
@@ -8558,28 +8565,53 @@ class MainWindow(QtWidgets.QMainWindow):
             peak_nm = self.step_widgets[2]["peak_nm"].value() or None
             stride = self.step_widgets[2]["stride"].value()
             sweep_nm = self.step_widgets[2]["sweep_nm"].value() or None
+            # The usable band is NOT a peak-search mask -- see below.
             min_wl = self.step_widgets[2]["min_wl"].value() or None
             max_wl = self.step_widgets[2]["max_wl"].value() or None
+            if min_wl is not None and max_wl is not None and min_wl >= max_wl:
+                raise ValueError("usable λ minimum must be below the maximum")
             region = self._step_region(2)
         except ValueError as exc:
             return self._reject_calibration(exc)
         out_path = self._resolve_output_path(self.step_widgets[2]["out"].text(), 2)
         controller = self._controller()
-        self._log(f"Step 2 started: window {window} px")
+        lo_txt = "open" if min_wl is None else f"{min_wl:.2f}"
+        hi_txt = "open" if max_wl is None else f"{max_wl:.2f}"
+        band = "off" if min_wl is None and max_wl is None else f"{lo_txt}-{hi_txt} nm"
+        self._log(
+            f"Step 2 started: window {window} px, usable band {band} "
+            "(applied to the result, not to the peak search)"
+        )
 
         def work(report: ProgressEmit, stop_event: threading.Event) -> dict[str, Any]:
+            # Sweep the whole region unmasked: this step only has to land one
+            # straight coordinate -> wavelength line, and a window whose peak
+            # sits outside the usable band still measures a real peak that
+            # belongs in the fit.  Masking the peak search instead used to fail
+            # the run outright ("shows no clear peak") whenever a region edge
+            # dispersed past the band.
             result = wavelength_calibration(
                 osa, controller, [], settings, seed,
                 window_size=window, peak_half_window_nm=peak_nm, region=region,
                 coordinate_stride=stride,
-                sweep_span_nm=sweep_nm, min_peak_wavelength_nm=min_wl,
-                max_peak_wavelength_nm=max_wl,
+                sweep_span_nm=sweep_nm,
                 stop_event=stop_event, progress_callback=report,
             )
-            save_calibration_result(result, out_path)
+            swept = result.coordinates.size
+            span = (
+                f"{result.wavelength.min():.3f}-{result.wavelength.max():.3f} nm"
+                if swept else "no coordinates"
+            )
+            # Clip only now, on the way out: the JSON and the in-memory result
+            # downstream steps read carry the usable band, the fit coefficients
+            # still describe the whole swept region.
+            clipped = clip_to_wavelength_range(result, min_wl, max_wl)
+            kept = clipped.coordinates.size
+            note = "" if kept == swept else f" of {swept} swept ({span})"
+            save_calibration_result(clipped, out_path)
             return {
-                "status": "ok", "step": 2, "result": result, "saved": out_path,
-                "summary": f"{result.coordinates.size} coordinates",
+                "status": "ok", "step": 2, "result": clipped, "saved": out_path,
+                "summary": f"{kept} coordinates{note}",
             }
 
         self._launch_calibration("Run step 2", work)

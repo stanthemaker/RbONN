@@ -4,9 +4,11 @@
     python src/calibration_module/steps/calib_npair_verify.py --step7 RESULT.json some.csv        # COMPARE offline
     python src/calibration_module/steps/calib_npair_verify.py --step7 RESULT.json some.csv --n 1  # one n only
     python src/calibration_module/steps/calib_npair_verify.py --step7 RESULT.json --n 2 --out DIR # CSV + PNG into DIR
+    python src/calibration_module/steps/calib_npair_verify.py --step7 RESULT.json --n 2 --p 2 3 4  # only these pairs
 
 Every n-subset of the N pairs the step-7 result calibrates is a block, C(N, n)
-of them, and each block is driven with PATTERNS random patterns: every driven
+of them -- or of the pairs --p names, when a run should skip some -- and each
+block is driven with PATTERNS random patterns: every driven
 pair gets its own x_k and w_k, independent and uniform in [DRIVE_MIN, DRIVE_MAX],
 and every other pair is off.  Nothing is fitted.  Step 6's eta and single-beam
 response and step 7's Phi_k predict each pattern, and each block's error is::
@@ -93,7 +95,7 @@ OUT_DIR = CALIB_PATH                        # CSVs and PNGs land here
 # The step-7 result is NOT here -- it is the required --step7 argument, as
 # step 6's --step3 and step 7's --step6 are.
 
-PAIRS = None                # None -> every pair the step-7 result calibrates
+PAIRS = None                # None -> every pair the step-7 result calibrates; --p overrides
 PAIR_INDEX_BASE = 1         # pairs are numbered 1..N; keep in step with steps 6 and 7
 PHASE_METHOD = None         # stored step-7 fit; None -> the single one a v2 JSON has
 
@@ -127,6 +129,22 @@ DAQ_CHANNEL = "ai0"
 # ======================================================================
 # inputs
 # ======================================================================
+
+def select_pairs(pairs) -> list[int] | None:
+    """Normalize a ``--p`` / ``PAIRS`` selection; ``None`` means every pair.
+
+    The selection is the POOL the blocks are drawn from, not a block: with
+    ``--n 2 --p 2 3 4`` the run drives C(3, 2) = 3 blocks, (2,3), (2,4), (3,4).
+    Duplicates collapse and the order does not matter -- blocks come out in
+    lexical order either way.
+    """
+    if pairs is None:
+        return None
+    out = sorted({int(k) for k in pairs})
+    if not out:
+        raise ValueError("pair selection is empty; drop it to use every pair")
+    return out
+
 
 def _slot(pair: int) -> int:
     """Pair label -> its 0-based slot in the Step-3 layout / SLM drive arrays."""
@@ -240,14 +258,21 @@ def run_patterns(daq, slm, layout, blocks, x, w, models, phases, *, rows: list,
                 f"diff {(mean - dark - pred) * 1e3:+.4f}  [+/-{used:g} V]")
 
 
-def collect(step7: Path, n: int, *, method=None, out_dir=None) -> str:
+def collect(step7: Path, n: int, *, pairs=None, method=None, out_dir=None) -> str:
     """Drive every n-pair block, write the CSV (partial if interrupted), compare.
+
+    ``pairs`` (``--p``) restricts the pool the blocks are drawn from -- useful
+    when one channel is dead, or when a full C(N, n) would run too long; ``None``
+    falls back to ``PAIRS``, and ``PAIRS = None`` to every calibrated pair.  A
+    pair named here that the step-7 file does not calibrate end to end is an
+    error, not a silent drop.
 
     The CSV and the PNG go to ``out_dir``, created if missing (default OUT_DIR).
     """
     out = Path(OUT_DIR if out_dir is None else out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    models, phases, ref = load_forward_model(step7, pairs=PAIRS, method=method)
+    wanted = select_pairs(PAIRS if pairs is None else pairs)
+    models, phases, ref = load_forward_model(step7, pairs=wanted, method=method)
     pairs = sorted(models)
     layout = load_layout(step7, pairs)
     blocks = blocks_for(pairs, n)
@@ -257,7 +282,8 @@ def collect(step7: Path, n: int, *, method=None, out_dir=None) -> str:
     secs = reads * (ACQ.t_both_s + ACQ.settle_s)
     secs += ACQ.t_single_s * (1 + secs // DARK_EVERY_S)
     print(f"Step 7 in : {step7}")
-    print(f"Pairs     : {pairs}  (N = {len(pairs)}, reference {ref})")
+    print(f"Pairs     : {pairs}  (N = {len(pairs)}, reference {ref})"
+          + ("" if wanted is None else "  [selected with --p]"))
     print(f"Blocks    : C({len(pairs)}, {n}) = {len(blocks)} x {PATTERNS} patterns "
           f"= {reads} reads, ~{secs / 60:.0f} min")
     print(f"Drive     : x_k, w_k uniform in [{DRIVE_MIN:g}, {DRIVE_MAX:g}], seed {seed}")
@@ -436,9 +462,13 @@ def make_plot(errors: list[BlockError], stds: list[np.ndarray], *, n: int,
     plt.close(fig)
 
 
-def compare_csv(path, step7: Path, *, method=None, n: int | None = None,
+def compare_csv(path, step7: Path, *, pairs=None, method=None, n: int | None = None,
                 out_dir=None) -> dict[int, list[BlockError]]:
     """Recompute every prediction for a recorded CSV and quote the error (no hardware).
+
+    ``pairs`` (``--p``) keeps only the blocks driven entirely from that pool, so
+    one CSV can be re-read for a subset of the pairs it recorded; ``n`` then
+    selects a block size within what is left.
 
     The PNGs go to ``out_dir``, created if missing (default OUT_DIR).
     """
@@ -451,6 +481,20 @@ def compare_csv(path, step7: Path, *, method=None, n: int | None = None,
         print(f"NOTE: {path.name} was collected against {Path(recorded).name}; "
               f"comparing against {Path(step7).name}")
     lo, hi = drive_bounds(meta, (DRIVE_MIN, DRIVE_MAX))
+    wanted = select_pairs(PAIRS if pairs is None else pairs)
+    if wanted is not None:
+        # A block is kept only if EVERY pair it drove is in the pool: a block
+        # that also drove an excluded pair measured a different interference,
+        # so it cannot stand in for one of the selected blocks.
+        keep = [b for b in blocks if set(b.driven) <= set(wanted)]
+        if not keep:
+            recorded = sorted({k for b in blocks for k in b.driven})
+            raise ValueError(f"{path.name} has no block driven only from pairs "
+                             f"{wanted}; it recorded {recorded}")
+        if len(keep) != len(blocks):
+            print(f"Selected pairs {wanted}: keeping {len(keep)} of "
+                  f"{len(blocks)} recorded blocks")
+        blocks = keep
     driven = sorted({k for b in blocks for k in b.driven})
     models, phases, _ = load_forward_model(step7, pairs=driven, method=method)
     in_file = sorted({b.n for b in blocks})
@@ -495,6 +539,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n", type=int, default=None,
                         help="pairs driven at once; required to collect, "
                              "selects one n when comparing")
+    parser.add_argument("--p", nargs="+", type=int, default=None, metavar="PAIR",
+                        help="only use these pairs, e.g. --p 2 3 4: the blocks "
+                             "are the n-subsets of THIS pool, not of every "
+                             "calibrated pair (when comparing, keeps only the "
+                             "recorded blocks driven entirely from it)")
     parser.add_argument("csv", nargs="?", type=Path,
                         help="compare this recorded CSV offline instead of collecting")
     parser.add_argument("--method", default=PHASE_METHOD,
@@ -504,13 +553,21 @@ def main(argv: list[str] | None = None) -> int:
                              f"(default {OUT_DIR})")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
+    try:
+        wanted = select_pairs(args.p)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if wanted is not None and args.n is not None and args.n > len(wanted):
+        parser.error(f"--n {args.n} needs at least {args.n} pairs, but --p "
+                     f"selects {len(wanted)}: {wanted}")
+
     if args.csv is not None:            # offline comparison, no hardware
-        compare_csv(args.csv, args.step7, method=args.method, n=args.n,
-                    out_dir=args.out)
+        compare_csv(args.csv, args.step7, pairs=wanted, method=args.method,
+                    n=args.n, out_dir=args.out)
         return 0
     if args.n is None:
         parser.error("--n is required to collect (how many pairs to drive at once)")
-    collect(args.step7, args.n, method=args.method, out_dir=args.out)
+    collect(args.step7, args.n, pairs=wanted, method=args.method, out_dir=args.out)
     return 0
 
 
