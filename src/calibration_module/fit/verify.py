@@ -1,0 +1,487 @@
+"""n-pair verification -- predict every pattern from the calibration, compare.
+
+Steps 3-7 calibrate every parameter the forward model needs.  For a block of
+``n`` pairs driven at ``(x_k, w_k)``, every other pair off, the dark-subtracted
+detector output is predicted with nothing left free::
+
+    E = sum_k  eta_k sqrt(x_k w_k) exp(i [phi_half(x_k) + phi_half(w_k) + Phi_k])
+    Y = |E|^2 + sum_k single_beam_k(x_k, w_k)
+
+The error is quoted against the block's FULL SCALE -- the range an n-pair
+computation has to divide into levels::
+
+    FS = Y_max - Y_min = Y_max
+
+``Y_min = 0`` because a pair driven at ``x_k = 0`` contributes no field, so
+RbONN never needs the phasor polygon to close.  ``Y_max`` is the reachable
+ceiling from :func:`reachable_max`, which is NOT ``(sum_k eta_k)^2`` -- see the
+note above :func:`support_h` for why that bound is out of reach here.
+
+Imports no driver, so all of it runs against a saved CSV.
+"""
+from __future__ import annotations
+
+import csv
+import itertools
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from scipy.optimize import minimize_scalar
+
+from .phase import PairModel, load_comb_phase_json, load_pair_models, phi_half
+
+__all__ = [
+    "load_forward_model",
+    "predict",
+    "FullScale",
+    "full_scale",
+    "support_h",
+    "reachable_max",
+    "blocks_for",
+    "random_patterns",
+    "VerifyBlock",
+    "BlockError",
+    "evaluate",
+    "pairs_tag",
+    "write_verify_csv",
+    "load_verify_csv",
+    "drive_bounds",
+    "check_sign",
+]
+
+
+# ======================================================================
+# the forward model
+# ======================================================================
+
+def load_forward_model(
+    step7: str | Path, *, pairs: Sequence[int] | None = None,
+    method: str | None = None,
+) -> tuple[dict[int, PairModel], dict[int, float], int]:
+    """``(models, phases, ref)`` for ``pairs`` out of a combined step-7 JSON.
+
+    ``phases[k]`` is in radians in the ``slm+comb`` convention :func:`predict`
+    uses, with ``phases[ref] = 0``.  ``pairs=None`` takes every pair the file
+    calibrates end to end: the reference plus each target with a stored fit.
+    """
+    step7 = Path(step7)
+    models = load_pair_models([step7])
+    ref, entries = load_comb_phase_json(step7, method=method)
+    phases = {int(ref): 0.0}
+    for k, ch in entries.items():
+        if int(k) == int(ref):
+            continue                       # the reference defines Phi = 0
+        fit = ch["fit"]
+        # Step 7 v2 fits cos(dPhi_comb - dPhi_SLM); the field here is
+        # exp(i[phi_half(x) + phi_half(w) + Phi]), so its Phi is the negative.
+        # A v1 JSON stores no convention and is already slm+comb.
+        conv = str(fit.get("convention") or "slm+comb")
+        phases[int(k)] = (-1.0 if conv == "comb-slm" else 1.0) * float(fit["dphi_comb_rad"])
+    calibrated = sorted(k for k in phases if k in models)
+    pairs = calibrated if pairs is None else sorted(int(k) for k in pairs)
+    missing = [k for k in pairs if k not in calibrated]
+    if missing:
+        raise ValueError(
+            f"pair(s) {missing} are not calibrated end to end in {step7.name} "
+            f"(a step-6 eta and, unless it is reference {ref}, a step-7 phase); "
+            f"it covers {calibrated}"
+        )
+    return {k: models[k] for k in pairs}, {k: phases[k] for k in pairs}, int(ref)
+
+
+def predict(models: Mapping[int, PairModel], phases: Mapping[int, float],
+            driven: Sequence[int], x, w) -> np.ndarray:
+    """Dark-free ``Y`` for drives ``x``, ``w`` of shape ``(..., len(driven))``.
+
+    Column ``i`` drives pair ``driven[i]``.  The single-beam response is detector
+    background rather than TPA field, so it adds OUTSIDE the coherent sum.
+    """
+    x = np.asarray(x, dtype=float)
+    w = np.asarray(w, dtype=float)
+    if x.shape != w.shape or x.shape[-1] != len(driven):
+        raise ValueError(f"x {x.shape} and w {w.shape} must both end in "
+                         f"len(driven) = {len(driven)}")
+    field = np.zeros(x.shape[:-1], dtype=complex)
+    bg = np.zeros(x.shape[:-1])
+    for i, k in enumerate(driven):
+        m = models[k]
+        xi, wi = x[..., i], w[..., i]
+        field = field + m.amplitude(xi, wi) * np.exp(
+            1j * (phi_half(xi) + phi_half(wi) + phases[k]))
+        bg = bg + m.single_beam(xi, wi)
+    return np.abs(field) ** 2 + bg
+
+
+# ======================================================================
+# full scale
+# ======================================================================
+#
+# Why FS is not (sum_k eta_k)^2
+# -----------------------------
+# That is the FREE-PHASE bound: n phasors of fixed magnitudes eta_k whose phases
+# may be chosen at will, all lined up.  It is out of reach here, because a
+# pair's phase and amplitude move together.  With u = phi_half(x) = asin sqrt(x)
+# (so x = sin^2 u) and u, v in [0, pi/2],
+#
+#     z_k(u, v) = eta_k sin u sin v exp(i [u + v + Phi_k])
+#
+# -- the same field :func:`predict` sums.  A pair reaches |z_k| = eta_k only at
+# u = v = pi/2, and there its phase is pinned to Phi_k.  Buying phase costs
+# amplitude, so S^2 is attained only when every Phi_k is equal.  On the runs in
+# src/calib_data the phases span ~290 deg and S^2 over-predicts the real ceiling
+# by 54..67 %, which would flatter every NRMSE by roughly 2x.
+#
+# The exact Y_max is cheap.  The pairs are driven independently, so the
+# reachable set of E = sum_k z_k is the Minkowski sum of the per-pair sets, and
+# a Minkowski sum's support function is the SUM of the per-pair support
+# functions -- so for a fixed projection axis psi each pair optimises on its own:
+#
+#     h_k(psi) = max_{u,v} Re(z_k e^{-i psi})
+#              = max_{t in [0, pi]} eta_k (1 - cos t)/2 cos(a_k - t)
+#
+# with a_k = psi - Phi_k and t = u + v (at fixed t the phase is fixed and
+# sin u sin v peaks at u = v = t/2, so u = v = t/2 is exactly optimal).  Since
+# |E| = max_psi h(psi),
+#
+#     Y_max = max_psi ( sum_k h_k(psi) )^2 ,
+#
+# which stays a 1-D scan for every n -- O(n) per psi, against O(m^(2n)) for a
+# grid sweep over the 2n drives.
+
+#: psi samples for the Y_max scan, before the local refinement that follows it.
+#: The grid only has to land in the right basin: 2001 and 200001 agree to 12
+#: digits on every run in src/calib_data, so this is not a tolerance to tune.
+PSI_GRID = 4001
+
+
+def support_h(psi, eta: float, phase: float) -> tuple[np.ndarray, np.ndarray]:
+    """``(h_k(psi), t)`` for one pair: its support, and the ``t = u + v`` attaining it.
+
+    ``h_k(psi) = max_{t in [0, pi]} eta (1 - cos t)/2 cos(psi - phase - t)``,
+    maximised in closed form -- ``d/dt = 0`` gives ``t* = (pi + 2a)/3`` up to
+    ``2 pi n/3``, so every branch landing in ``[0, pi]`` is tried, plus both
+    endpoints.  ``a = psi - phase`` spans ``(-2 pi, 2 pi]``, hence ``n = -3..3``:
+    too narrow a window silently undershoots the maximum rather than failing.
+    """
+    psi = np.atleast_1d(np.asarray(psi, dtype=float))
+    a = psi - float(phase)
+    n = np.arange(-3.0, 4.0)[:, None]
+    t = np.concatenate([(np.pi + 2.0 * a) / 3.0 + 2.0 * np.pi * n / 3.0,
+                        np.zeros_like(a)[None, :],
+                        np.full_like(a, np.pi)[None, :]])
+    ok = (t >= -1e-12) & (t <= np.pi + 1e-12)
+    t = np.clip(t, 0.0, np.pi)
+    f = np.where(ok, float(eta) * 0.5 * (1.0 - np.cos(t)) * np.cos(a - t), -np.inf)
+    i = f.argmax(axis=0)
+    j = np.arange(f.shape[1])
+    return f[i, j], t[i, j]
+
+
+def reachable_max(etas, phases) -> tuple[float, np.ndarray, float]:
+    """``(Y_max, drive, psi)`` -- the largest ``|E|^2`` these pairs can be driven to.
+
+    ``drive[k]`` is the ``x_k = w_k`` that attains it: the optimum is symmetric
+    in x and w, since at fixed ``u + v`` the amplitude ``sin u sin v`` peaks at
+    ``u = v``.  So ``predict(models, phases, driven, drive, drive)`` reproduces
+    ``Y_max`` exactly, which is how this is tested -- :func:`predict` knows
+    nothing about the support scan.
+    """
+    etas = np.asarray(etas, dtype=float)
+    phases = np.asarray(phases, dtype=float)
+
+    def total(psi):
+        return sum(support_h(psi, etas[k], phases[k])[0] for k in range(etas.size))
+
+    psi = np.linspace(-np.pi, np.pi, PSI_GRID)
+    grid = total(psi)
+    i = int(grid.argmax())
+    step = float(psi[1] - psi[0])
+    best = float(psi[i])
+    try:
+        # Brent off the grid maximum.  The bracket is only valid in the
+        # interior, and a refinement that came out worse than the grid point
+        # itself is discarded rather than trusted.
+        if 0 < i < psi.size - 1:
+            r = minimize_scalar(lambda q: -total(np.array([q]))[0],
+                                bracket=(psi[i] - step, psi[i], psi[i] + step))
+            if -float(r.fun) >= float(grid[i]):
+                best = float(r.x)
+    except (ValueError, RuntimeError):
+        pass                            # the grid point stands
+    h = float(total(np.array([best]))[0])
+    t = np.array([support_h(np.array([best]), etas[k], phases[k])[1][0]
+                  for k in range(etas.size)])
+    return h ** 2, (1.0 - np.cos(t)) / 2.0, best
+
+
+@dataclass(frozen=True)
+class FullScale:
+    """A block's full scale ``FS = Y_max``, the span a computation divides into levels.
+
+    ``Y_min = 0`` is always reachable, so ``FS = Y_max - Y_min = Y_max``: the
+    largest ``|E|^2`` the pairs can actually be driven to, phase and amplitude
+    coupled as they are (see the note above).  The single-beam background is not
+    part of it -- that is detector offset, not what a computation drives.
+
+    :attr:`bound` is the free-phase ``S^2`` for comparison, and
+    :attr:`headroom` how much of it the measured phases actually allow.
+    """
+
+    driven: tuple[int, ...]
+    amplitudes: tuple[float, ...]
+    phases: tuple[float, ...]
+    fs: float
+    drive: tuple[float, ...]
+    psi: float
+
+    @property
+    def s(self) -> float:
+        return float(sum(self.amplitudes))
+
+    @property
+    def bound(self) -> float:
+        """``S^2`` -- the free-phase ceiling, reached only if every ``Phi_k`` is equal."""
+        return self.s ** 2
+
+    @property
+    def headroom(self) -> float:
+        """``Y_max / S^2`` -- exactly 1 for a single pair, less once phases disagree."""
+        return self.fs / self.bound if self.bound > 0 else float("nan")
+
+
+def full_scale(models: Mapping[int, PairModel], phases: Mapping[int, float],
+               driven: Sequence[int]) -> FullScale:
+    """``FS = Y_max`` over the pairs in ``driven`` -- see :func:`reachable_max`.
+
+    Takes the phases, not just the amplitudes: the ceiling depends on how far
+    out of line the ``Phi_k`` are.
+    """
+    driven = tuple(int(k) for k in driven)
+    etas = [float(models[k].amplitude(1.0, 1.0)) for k in driven]
+    phi = [float(phases[k]) for k in driven]
+    fs, drive, psi = reachable_max(etas, phi)
+    return FullScale(driven, tuple(etas), tuple(phi), fs,
+                     tuple(float(d) for d in drive), psi)
+
+
+# ======================================================================
+# the drive
+# ======================================================================
+
+def blocks_for(pairs: Sequence[int], n: int) -> list[tuple[int, ...]]:
+    """Every ``n``-subset of ``pairs``, ``C(N, n)`` of them, in lexical order."""
+    pairs = sorted(int(k) for k in pairs)
+    if not 1 <= int(n) <= len(pairs):
+        raise ValueError(f"n must be in 1..{len(pairs)} (the calibrated pairs "
+                         f"{pairs}), got {n}")
+    return list(itertools.combinations(pairs, int(n)))
+
+
+def random_patterns(n_blocks: int, n: int, patterns: int, lo: float, hi: float,
+                    *, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """``(x, w)``, each ``(n_blocks, patterns, n)``, independent uniform in ``[lo, hi]``.
+
+    Rounded to 6 decimals, which is what the CSV stores, so a prediction
+    recomputed from the file is the one made at collect time.
+    """
+    if not 0.0 <= lo < hi <= 1.0:
+        raise ValueError(f"drive box must satisfy 0 <= lo < hi <= 1, got {lo} .. {hi}")
+    rng = np.random.default_rng(seed)
+    shape = (int(n_blocks), int(patterns), int(n))
+    return (np.round(rng.uniform(lo, hi, shape), 6),
+            np.round(rng.uniform(lo, hi, shape), 6))
+
+
+# ======================================================================
+# measured blocks and their error
+# ======================================================================
+
+@dataclass
+class VerifyBlock:
+    """One driven block's recorded patterns: drives ``(P, n)``, reads ``(P,)``."""
+
+    driven: tuple[int, ...]
+    x: np.ndarray
+    w: np.ndarray
+    dark_v: np.ndarray
+    mean_v: np.ndarray
+    std_v: np.ndarray
+    range_v: np.ndarray
+    pred_v: np.ndarray
+
+    @property
+    def n(self) -> int:
+        return len(self.driven)
+
+    @property
+    def y(self) -> np.ndarray:
+        """The dark-subtracted signal the model predicts."""
+        return self.mean_v - self.dark_v
+
+
+@dataclass
+class BlockError:
+    """One block's prediction against its measurement, on its full scale."""
+
+    driven: tuple[int, ...]
+    scale: FullScale
+    y: np.ndarray
+    pred: np.ndarray
+
+    @property
+    def resid(self) -> np.ndarray:
+        return self.y - self.pred
+
+    @property
+    def rms_v(self) -> float:
+        return float(np.sqrt(np.mean(self.resid ** 2)))
+
+    @property
+    def nrmse_pct(self) -> float:
+        """``rms(meas - pred)`` as a percentage of the block's reachable ``Y_max``."""
+        fs = self.scale.fs
+        return 100.0 * self.rms_v / fs if fs > 0 else float("nan")
+
+    @property
+    def max_pct(self) -> float:
+        fs = self.scale.fs
+        return 100.0 * float(np.max(np.abs(self.resid))) / fs if fs > 0 else float("nan")
+
+    def position(self, values) -> np.ndarray:
+        """``values`` as a fraction of the full scale: 0 is dark, 1 is ``S^2``."""
+        return np.asarray(values, dtype=float) / self.scale.fs
+
+
+def evaluate(block: VerifyBlock, models, phases) -> BlockError:
+    """Predict a recorded block and quote its error against its full scale."""
+    return BlockError(
+        driven=block.driven,
+        scale=full_scale(models, phases, block.driven),
+        y=block.y,
+        pred=predict(models, phases, block.driven, block.x, block.w),
+    )
+
+
+# ======================================================================
+# persistence
+# ======================================================================
+
+_TAIL = ["dark_v", "voltage_mean_v", "voltage_std_v", "range_v", "pred_v"]
+
+
+def pairs_tag(driven: Sequence[int]) -> str:
+    """``(2, 4)`` -> ``"2+4"`` -- the self-describing driven-set column."""
+    return "+".join(str(int(k)) for k in driven)
+
+
+def write_verify_csv(path: str | Path, pairs: Sequence[int], rows: Sequence[Mapping],
+                     *, meta: Mapping[str, object]) -> str:
+    """One row per pattern; ``x_k, w_k`` for every pair, 0 for the undriven ones.
+
+    Each row mapping carries ``block, driven, x, w`` (``x``/``w`` in ``driven``
+    order) and ``dark_v, mean_v, std_v, range_v, pred_v``.  ``meta`` is written
+    as trailing ``# key,value`` lines.  The layout is step 8's with ``v``
+    dropped and ``range_v`` added, so :func:`load_verify_csv` reads both.
+    """
+    pairs = sorted(int(k) for k in pairs)
+    out = Path(path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["block", "pairs"]
+                        + [c for k in pairs for c in (f"x_{k}", f"w_{k}")] + _TAIL)
+        for r in rows:
+            drive = dict(zip(r["driven"], zip(r["x"], r["w"])))
+            line = [r["block"], pairs_tag(r["driven"])]
+            for k in pairs:
+                xk, wk = drive.get(k, (0.0, 0.0))
+                line += [f"{float(xk):.6f}", f"{float(wk):.6f}"]
+            line += [f"{r['dark_v']:.9g}", f"{r['mean_v']:.9g}", f"{r['std_v']:.9g}",
+                     f"{r['range_v']:g}", f"{r['pred_v']:.9g}"]
+            writer.writerow(line)
+        for key, value in meta.items():
+            f.write(f"# {key},{value}\n")
+    return str(out)
+
+
+def load_verify_csv(path: str | Path) -> tuple[list[int], list[VerifyBlock], dict[str, str]]:
+    """``(pairs, blocks, meta)`` from a verify CSV or an older step-8 CSV.
+
+    Blocks come back in file order, grouped by the ``block`` and ``pairs``
+    columns; each block's drives are read from its own ``x_k, w_k`` columns, so
+    an old ``x = w = v`` file loads the same way.  Columns an old file lacks
+    (``range_v``) come back NaN.
+    """
+    meta: dict[str, str] = {}
+    lines: list[str] = []
+    with open(Path(path), newline="", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#"):
+                key, _, value = line[1:].strip().partition(",")
+                meta[key.strip()] = value.strip()
+            else:
+                lines.append(line)
+    rows = list(csv.DictReader(lines))
+    if not rows:
+        raise ValueError(f"{Path(path).name} has no data rows")
+    if "pairs" not in rows[0]:
+        raise ValueError(f"{Path(path).name} has no 'pairs' column, so it is not "
+                         f"a verify or step-8 CSV")
+    pairs = sorted(int(c[2:]) for c in rows[0] if c.startswith("x_"))
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        grouped.setdefault((r["block"], r["pairs"]), []).append(r)
+
+    def col(group, name) -> np.ndarray:
+        return np.array([float(r[name]) if r.get(name) not in (None, "") else np.nan
+                         for r in group])
+
+    blocks = []
+    for (_, tag), g in grouped.items():
+        driven = tuple(int(t) for t in tag.split("+"))
+        blocks.append(VerifyBlock(
+            driven=driven,
+            x=np.array([[float(r[f"x_{k}"]) for k in driven] for r in g]),
+            w=np.array([[float(r[f"w_{k}"]) for k in driven] for r in g]),
+            dark_v=col(g, "dark_v"), mean_v=col(g, "voltage_mean_v"),
+            std_v=col(g, "voltage_std_v"), range_v=col(g, "range_v"),
+            pred_v=col(g, "pred_v"),
+        ))
+    check_sign(path, blocks)
+    return pairs, blocks, meta
+
+
+def drive_bounds(meta: Mapping[str, str], default: tuple[float, float]) -> tuple[float, float]:
+    """The drive box a CSV was collected over.
+
+    Read from its ``# drive`` line, else an old step-8 file's ``# sweep`` line,
+    else ``default``.
+    """
+    for key in ("drive", "sweep"):
+        fields = dict(p.split("=", 1) for p in meta.get(key, "").split(",") if "=" in p)
+        if "min" in fields and "max" in fields:
+            return float(fields["min"]), float(fields["max"])
+    return default
+
+
+def check_sign(path, blocks: Sequence[VerifyBlock]) -> None:
+    """Refuse a CSV whose dark-subtracted signal is negative (inverted twice).
+
+    The read inverts the TIA's negative-for-light output once, so a well-collected
+    file has ``mean - dark > 0``.  Taken as a median, so one noisy near-dark
+    pattern cannot trip it.  Against a negated measurement the model yields a
+    plausible table of large errors rather than an error, which is what this
+    catches.
+    """
+    y = np.concatenate([b.y for b in blocks])
+    med = float(np.median(y))
+    if med < 0.0:
+        raise ValueError(
+            f"{Path(path).name}: dark-subtracted signal is NEGATIVE (median "
+            f"{med * 1e3:.4f} mV) -- the sign was inverted a second time on top of "
+            f"the read's own inversion. Re-collect, or negate voltage_mean_v and "
+            f"dark_v to undo it."
+        )

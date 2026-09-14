@@ -1,4 +1,4 @@
-from slm_module.gui import main
+from gui import main
 
 
 if __name__ == "__main__":

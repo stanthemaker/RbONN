@@ -25,7 +25,7 @@ step 3b (07-14)                 channel layout (wavelength <-> SLM column, inten
 | 7 | `src/drafts/calib_step7_test.py` | `calib_step6_result_0715_1714.json` | `calib_step7_meas_0715_1722.csv`, `calib_step7_result_0715_1756.json` (embeds steps 3+6, both fit methods) |
 | 8 | `src/drafts/calib_step8_test.py` | `calib_step7_result_0715_1756.json` | `calib_step8_meas_0715_1811.csv`, `calib_step8_meas_0715_1811_compare_bounded.png` |
 
-Common acquisition settings (all three steps, `draft_hw.py` + `daq_module`): NI-DAQ `Dev1/ai0`,
+Common acquisition settings (all three steps, `measure/bench.py` + `daq_module`): NI-DAQ `Dev1/ai0`,
 1 kS/s, ±0.1 V differential, 20 Hz low-pass; per point **5 s** when at most one beam is on
 (single-beam lines, all-off dark) and **3 s** when both beams are on; 0.25 s settle after each SLM
 pattern change. Every CSV row records the mean, its SEM, and `sem_ratio = sem/|mean|`.
@@ -192,4 +192,4 @@ python src/drafts/calib_step8_test.py src/calib_data/calib_step8_meas_0715_1811.
 
 Offline refit/analyze paths need no hardware. Loaders/fitters live in `slm_module.tpa_pair`
 (step 6) and `slm_module.tpa_phase` (steps 7/8 models + combined-JSON IO); unit tests in
-`tests/test_pipeline.py` (`python -m unittest tests.test_pipeline`).
+`tests/test_phase_report.py` (`python -m unittest tests.test_phase_report`).

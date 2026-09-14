@@ -54,7 +54,7 @@ intensity ``v`` sits at panel phase ``theta = 2*asin(sqrt(v))`` with field
 with ``R_1`` the fully-on reference amplitude.  Sweeping ``v`` 0.1 -> 1.0 sweeps
 ``theta`` over ~37..180 deg, tracing the half fringe.
 
-The fit (in :mod:`calibration_module.phase`).  Every point is reduced to
+The fit (in :mod:`calibration_module.fit.phase`).  Every point is reduced to
 ``(g, dPhi_SLM)`` from its commanded intensities.  It floats ``dPhi_comb`` in
 
     Y = a^2 + b^2 g^2 + 2 a b g cos(dPhi_comb - dPhi_SLM) + step-6 background + d
@@ -79,7 +79,7 @@ is the only input -- it embeds the raw Step-3 calibration under ``"step3"``
 Point ``IN_STEP6`` at the latest step-6 run.
 
 All model / background removal / weighted fit / persistence live in
-:mod:`calibration_module.phase`; this file only wires up hardware and prints/plots.
+:mod:`calibration_module.fit.phase`; this file only wires up hardware and prints/plots.
 """
 from __future__ import annotations
 
@@ -93,12 +93,11 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for draft_hw
 
-from draft_hw import connect_daq, connect_slm, read_point  # noqa: E402
+from calibration_module.measure.bench import connect_daq, connect_slm, read_point  # noqa: E402
 from slm_module.calibration.calibration_new import calibration_result_from_dict  # noqa: E402
 from slm_module.encoding import channel_layout_from_calibration  # noqa: E402
-from calibration_module.phase import (  # noqa: E402
+from calibration_module.fit.phase import (  # noqa: E402
     PhaseFit,
     PhaseResult,
     load_pair_models,

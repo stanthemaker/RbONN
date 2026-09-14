@@ -22,6 +22,7 @@ from slm_module.calibration.calibration_new import (
     batch_intensity_calibration,
     build_channel_calibration_grid,
     calibration_result_from_dict,
+    clip_to_wavelength_range,
     intensity_calibration,
     intensity_calibration_daq,
     load_calibration_result,
@@ -1454,6 +1455,83 @@ class OutlierRemeasureTests(unittest.TestCase):
 
         self.assertEqual(osa.measure_calls, 13)
         self.assertAlmostEqual(float(result.intensity_levels[0, 5]), 0.9)
+
+
+class ClipToWavelengthRangeTests(unittest.TestCase):
+    """Step 2's usable band is applied to the finished mapping, not the sweep."""
+
+    @staticmethod
+    def _mapping(n: int = 11, lo: float = 772.0, hi: float = 784.0):
+        coordinates = np.arange(n, dtype=float) * 100.0 + 600.0
+        wavelengths = np.linspace(lo, hi, n)
+        return CalibrationResult(
+            wavelength=wavelengths,
+            coordinates=coordinates,
+            max_level=1023,
+            min_level=0,
+            level_range=np.arange(n, dtype=int),   # same length as coords, on purpose
+            intensity_levels=np.linspace(0.0, 1.0, n),   # step-1 style 1-D sweep
+            wavelength_fit_coefficients=np.polyfit(coordinates, wavelengths, 1),
+        )
+
+    def test_keeps_only_the_in_band_coordinates(self) -> None:
+        mapping = self._mapping()
+        clipped = clip_to_wavelength_range(mapping, 775.0, 781.0)
+        keep = (mapping.wavelength >= 775.0) & (mapping.wavelength <= 781.0)
+        np.testing.assert_array_equal(clipped.coordinates, mapping.coordinates[keep])
+        np.testing.assert_array_equal(clipped.wavelength, mapping.wavelength[keep])
+        self.assertLess(clipped.coordinates.size, mapping.coordinates.size)
+
+    def test_fit_coefficients_still_describe_the_whole_swept_region(self) -> None:
+        mapping = self._mapping()
+        clipped = clip_to_wavelength_range(mapping, 775.0, 781.0)
+        np.testing.assert_allclose(
+            clipped.wavelength_fit_coefficients, mapping.wavelength_fit_coefficients
+        )
+
+    def test_arrays_that_are_not_per_coordinate_survive_untouched(self) -> None:
+        # level_range and a step-1 seed sweep happen to have the coordinate
+        # count here; neither is indexed by coordinate and both must be kept.
+        mapping = self._mapping()
+        clipped = clip_to_wavelength_range(mapping, 775.0, 781.0)
+        np.testing.assert_array_equal(clipped.level_range, mapping.level_range)
+        np.testing.assert_array_equal(
+            clipped.intensity_levels, mapping.intensity_levels
+        )
+
+    def test_intensity_rows_are_sliced_with_the_mapping(self) -> None:
+        mapping = self._mapping()
+        mapping.intensity_levels = np.tile(
+            np.linspace(0.0, 1.0, 5), (mapping.coordinates.size, 1)
+        )
+        clipped = clip_to_wavelength_range(mapping, 775.0, 781.0)
+        self.assertEqual(clipped.intensity_levels.shape[0], clipped.coordinates.size)
+
+    def test_open_or_covering_bounds_return_the_input(self) -> None:
+        mapping = self._mapping()
+        self.assertIs(clip_to_wavelength_range(mapping), mapping)
+        self.assertIs(clip_to_wavelength_range(mapping, 700.0, 900.0), mapping)
+
+    def test_empty_band_names_the_swept_span(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            clip_to_wavelength_range(self._mapping(), 900.0, 901.0)
+        self.assertIn("772.000-784.000", str(caught.exception))
+
+    def test_inverted_band_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            clip_to_wavelength_range(self._mapping(), 781.0, 775.0)
+
+    def test_round_trips_through_the_step_2_json(self) -> None:
+        clipped = clip_to_wavelength_range(self._mapping(), 775.0, 781.0)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "calib_step2.json"
+            save_calibration_result(clipped, path, fit_transfer=False)
+            loaded = load_calibration_result(path)
+        np.testing.assert_allclose(loaded.wavelength, clipped.wavelength)
+        np.testing.assert_allclose(loaded.coordinates, clipped.coordinates)
+        np.testing.assert_allclose(
+            loaded.wavelength_fit_coefficients, clipped.wavelength_fit_coefficients
+        )
 
 
 if __name__ == "__main__":

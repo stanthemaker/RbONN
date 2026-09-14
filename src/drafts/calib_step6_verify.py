@@ -1,8 +1,8 @@
 """Draft: step 6 v2's PRODUCT-only check, on its own short grid.
 
-    python src/drafts/calib_step6_verify.py             # measure, then check
-    python src/drafts/calib_step6_verify.py --meas      # raw CSV only, no check
-    python src/drafts/calib_step6_verify.py some.csv    # re-check a CSV offline
+    python src/drafts/calib_step6_verify.py --step3 S.json             # measure, then check
+    python src/drafts/calib_step6_verify.py --step3 S.json --meas      # raw CSV only, no check
+    python src/drafts/calib_step6_verify.py --step3 S.json some.csv    # re-check a CSV offline
 
 Why this exists
 ---------------
@@ -44,16 +44,21 @@ they are inputs to the subtraction rather than the thing under test.
 
 How it borrows
 --------------
-The measurement path, the sigma model, ``fit_background`` and ``verify_product``
-are IMPORTED from ``calib_step6_v2`` -- by path, the way
-``src/drafts/calib_step6-8_v2.py`` imports the steps -- and the config below is
-pushed into it before anything runs.  Nothing is reimplemented, so a split this
-script reports is a split step 6 would report on the same rows, which is the
-only thing that makes a shortened grid worth trusting.
+The sigma model, ``fit_background`` and ``verify_product`` come from
+``calibration_module.fit.pair_v2`` and the measurement path from
+``calibration_module.measure.pair_v2``; the step script itself is still imported
+by path (the way ``src/drafts/calib_step6-8_v2.py`` imports the steps) for its
+layout loader and its ``CONFIG``/``ACQ``.  Nothing is reimplemented, so a split
+this script reports is a split step 6 would report on the same rows, which is
+the only thing that makes a shortened grid worth trusting.
 
-:data:`~calib_step6_v2.FIT_Q` is inherited rather than redeclared, for the same
-reason: the background subtracted here has to be the background subtracted
-there.
+``fit_q`` is inherited rather than redeclared, for the same reason: the
+background subtracted here has to be the background subtracted there.
+:func:`_config` gets that by starting from step 6's own ``CONFIG`` and
+``dataclasses.replace``-ing only the few fields this draft owns -- so what it
+does not name cannot disagree.  It used to be done by assigning into step 6's
+module globals, which worked but left this file able to change step 6's
+behaviour for anything else importing it in the same process.
 
 The CSV keeps step 6's column layout, so ``load_meas_csv`` reads it back.  It
 will NOT re-fit under ``calib_step6_v2 <csv>``: there is no cross line in it and
@@ -61,6 +66,8 @@ the slope fit correctly refuses it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+import argparse
 import importlib.util
 import json
 import sys
@@ -84,6 +91,22 @@ Grid = tuple[tuple[float, float, int], ...]
 # quietly lose members on an offline re-check while the live run kept them.
 # 6 dp is also what ``average_levels`` and :func:`_key` index on.
 LEVEL_DP = 6
+
+
+from calibration_module.fit.pair_v2 import (  # noqa: E402
+    PairV2Fit,
+    _background_dict,  # noqa: PLC2701 -- same family, see "How it borrows"
+    average_levels,
+    fit_background,
+    load_meas_csv,
+    verify_product,
+    write_meas_csv,
+)
+from calibration_module.fit.sigma import STD_FLOOR_V  # noqa: E402
+from calibration_module.measure.pair_v2 import (  # noqa: E402
+    build_schedule,
+    measure_pair,
+)
 
 
 def _load_step6():
@@ -134,7 +157,11 @@ def group_at(product: float, *xs: float) -> Group:
 
 # ---- Edit these to match your setup ----
 CALIB_PATH = REPO_ROOT / "src" / "calib_data"
-IN_STEP3 = CALIB_PATH / "run_0907_productcheck_fit" / "calib_step3c_0907_1358.json"
+# The Step-3 calibration is the required --step3 argument, not a constant.  It
+# used to be one, and this draft's copy was independent of step 6's, so the two
+# drifted apart quietly -- which is exactly the failure this file exists to
+# catch: a check run against the wrong step-3 file looks like a check that
+# passed.  Naming it per run is the only version that cannot go wrong silently.
 
 ENCODING_METHOD = "fit"          # must match the run being investigated
 PAIR_INDEX_BASE = 1
@@ -272,28 +299,56 @@ def validate_checks() -> None:
             )
 
 
-def _push_config() -> None:
-    """Rebind step 6's module constants to this draft's.
+def _config():
+    """The estimator config this check runs under: step 6's, with our overrides.
 
-    Everything borrowed from step 6 reads these at CALL time, so rebinding after
-    import is enough -- the mechanism ``calib_step6-8_v2.py`` already relies on.
-    ``IN_STEP3`` is set explicitly alongside ``CALIB_PATH``: it is a fully
-    resolved Path by import time, so setting the directory alone would leave it
-    pointing at step 6's own step-3 file.
+    ``replace`` rather than a fresh :class:`PairV2Config` so everything this
+    draft does not own -- ``fit_q`` and the ``params_bg`` derived from it above
+    all -- is *inherited* from step 6 and cannot silently disagree with it.
+    That was the point of the old rebinding dance; a frozen config does it
+    without mutating another module.
 
-    ``FIT_Q`` and ``PARAMS_BG`` are deliberately NOT rebound -- see the module
-    docstring.
+    ``verify_enabled`` / ``verify_grid`` matter only to the level table's tag --
+    nothing here calls ``on_cross_line`` -- but a check level should still print
+    as "verify+" and not as "cross".
     """
-    for name in ("CALIB_PATH", "IN_STEP3", "ENCODING_METHOD", "PAIR_INDEX_BASE",
-                 "PAIR_INDICES", "SLM_DISPLAY_NO", "USB_SLM_NO",
-                 "DAQ_DEVICE", "DAQ_CHANNEL", "T_SINGLE_S", "T_BOTH_S", "SETTLE_S",
-                 "DAQ_RANGE_V", "DAQ_RANGE_WIDE_V", "DAQ_NEAR_RAIL_FRAC",
-                 "PRODUCT_CHECKS"):
+    return replace(
+        s6.CONFIG,
+        encoding_method=ENCODING_METHOD,
+        pair_index_base=PAIR_INDEX_BASE,
+        product_checks=PRODUCT_CHECKS,
+        verify_enabled=True,
+        verify_grid=check_grid(),
+    )
+
+
+def _acq():
+    """Acquisition timing: step 6's, with this draft's windows and range."""
+    return replace(
+        s6.ACQ,
+        t_single_s=T_SINGLE_S, t_both_s=T_BOTH_S, settle_s=SETTLE_S,
+        range_v=DAQ_RANGE_V, range_wide_v=DAQ_RANGE_WIDE_V,
+        near_rail_frac=DAQ_NEAR_RAIL_FRAC,
+    )
+
+
+def _push_config() -> None:
+    """Rebind the step-6 script's remaining module constants to this draft's.
+
+    Only the *script-level* ones are left: paths, pair list and device numbers,
+    which ``s6._load_layout`` reads at call time.  The estimator's parameters no
+    longer live on the module at all -- they are in :func:`_config` -- so this
+    can no longer reach into the fit by accident.
+
+    The step-3 calibration is no longer among them: it is passed explicitly to
+    every function that needs it, so this draft and step 6 cannot end up naming
+    two different files.
+    """
+    for name in ("CALIB_PATH", "PAIR_INDICES",
+                 "SLM_DISPLAY_NO", "USB_SLM_NO", "DAQ_DEVICE", "DAQ_CHANNEL"):
         setattr(s6, name, globals()[name])
-    # Only the level table's tag reads these -- nothing here calls on_cross_line
-    # -- but a check level should still print as "verify+" and not as "cross".
-    s6.VERIFY_ENABLED = True
-    s6.VERIFY_GRID = check_grid()
+    s6.CONFIG = _config()
+    s6.ACQ = _acq()
 
 
 # ======================================================================
@@ -310,8 +365,8 @@ def _shell_fit(index: int, levels, bg, bg_cov, b: float):
     """
     nan = float("nan")
     eta = float(np.sqrt(b)) if np.isfinite(b) and b > 0 else nan
-    return s6.PairV2Fit(
-        index=index, levels=levels, bg=bg, bg_cov=bg_cov,
+    return PairV2Fit(
+        index=index, cfg=_config(), levels=levels, bg=bg, bg_cov=bg_cov,
         fit_w=np.zeros(0), fit_d=np.zeros(0),
         fit_sigma=np.zeros(0), fit_pred=np.zeros(0),
         b=b, b_err=nan, beta0=nan, beta0_err=nan,
@@ -322,9 +377,9 @@ def _shell_fit(index: int, levels, bg, bg_cov, b: float):
 
 def check_pair(index: int, levels, *, b: float = float("nan")):
     """Fit the background block, then run :func:`verify_product` against it."""
-    bg, bg_cov = s6.fit_background(levels)
+    bg, bg_cov = fit_background(levels, _config())
     fit = _shell_fit(index, levels, bg, bg_cov, b)
-    fit.checks = {"product": s6.verify_product(fit)}
+    fit.checks = {"product": verify_product(fit)}
     return fit
 
 
@@ -390,7 +445,7 @@ def _ref_etas() -> dict[int, float]:
         print(f"(REF_STEP6 not found, expected value left blank: {path})")
         return {}
     try:
-        from calibration_module.phase import load_pair_models
+        from calibration_module.fit.phase import load_pair_models
         return {k: float(m.eta) for k, m in load_pair_models(path).items()}
     except Exception as exc:                 # noqa: BLE001 -- a cosmetic input only
         print(f"(REF_STEP6 unreadable, expected value left blank: {exc})")
@@ -404,10 +459,10 @@ def _ref_etas() -> dict[int, float]:
 def _report_levels(fit) -> None:
     """The measured level means and the two spreads sigma is built from."""
     print(f"  sigma = hypot(max(rep_std, trace_std)/sqrt(n), "
-          f"{s6.STD_FLOOR_V*1e3:.3f} mV systematic floor)")
+          f"{STD_FLOOR_V*1e3:.3f} mV systematic floor)")
     print("    block     x     w   n   mean(mV)  rep_std(mV)  trace_std(mV)  sigma(mV)")
     for L in fit.levels:
-        tag = "verify+" if L.is_verification else L.block
+        tag = "verify+" if L.is_verification(fit.cfg) else L.block
         rep = f"{L.rep_std*1e3:11.4f}" if np.isfinite(L.rep_std) else f"{'--':>11}"
         print(f"    {tag:<7} {L.x:5.2f} {L.w:5.2f} {L.n:3d} {L.mean*1e3:10.4f} "
               f"{rep}  {L.trace_std*1e3:13.4f} {L.sigma*1e3:10.4f}")
@@ -417,11 +472,12 @@ def _report_levels(fit) -> None:
 def _report_background(fit) -> None:
     """The single-beam fit that gets subtracted, and whether it fits."""
     n_bg = sum(1 for L in fit.levels if L.block != "cross")
-    dof = n_bg - len(s6.PARAMS_BG)
+    params_bg = fit.cfg.params_bg
+    dof = n_bg - len(params_bg)
     shape = "saturated" if dof == 0 else f"{dof} dof"
-    print(f"\n  Background block ({n_bg} levels, {len(s6.PARAMS_BG)} parameters "
+    print(f"\n  Background block ({n_bg} levels, {len(params_bg)} parameters "
           f"-> {shape}) -- this is what gets subtracted:")
-    for name in s6.PARAMS_BG:
+    for name in params_bg:
         v, e = fit.bg[name]
         scale, unit = (1e3, "mV") if name == "d" else (1.0, "")
         print(f"    {name:<3} = {v*scale:.4e} +/- {e*scale:.3e} {unit}".rstrip())
@@ -661,20 +717,20 @@ def _channel_dict(fit, plot: Path | None) -> dict:
         # parameter NAMES) that would otherwise silently replace this one.
         "background": {
             "params": {n: {"value": v, "err": e} for n, (v, e) in fit.bg.items()},
-            "block": s6._background_dict(fit),     # noqa: SLF001 -- same family
+            "block": _background_dict(fit),     # noqa: SLF001 -- same family
         },
         "check": _check_dict(fit),
         "levels": [
             {"x": L.x, "w": L.w, "n": L.n, "mean_v": L.mean,
              "rep_std_v": None if not np.isfinite(L.rep_std) else L.rep_std,
              "trace_std_v": L.trace_std, "sigma_v": L.sigma,
-             "is_check": L.is_verification}
+             "is_check": L.is_verification(fit.cfg)}
             for L in fit.levels
         ],
     }
 
 
-def save_json(fits: list, out_path: str | Path,
+def save_json(fits: list, out_path: str | Path, step3: Path,
               plots: dict[int, Path] | None = None) -> Path:
     """Background parameters and the check records, per pair.
 
@@ -690,15 +746,15 @@ def save_json(fits: list, out_path: str | Path,
         "version": 2,
         "kind": "step6-verify",
         "borrows": "calib_step6_v2.fit_background + calib_step6_v2.verify_product",
-        "fit_q": s6.FIT_Q,
-        "params_bg": list(s6.PARAMS_BG),
+        "fit_q": _config().fit_q,
+        "params_bg": list(_config().params_bg),
         "bg_grid": [{"x": x, "w": w, "n": n} for x, w, n in BG_GRID],
         "check_grid": [{"x": x, "w": w, "n": n} for x, w, n in check_grid()],
         "product_checks": [[list(pt) for pt in group] for group in PRODUCT_CHECKS],
         "pull_limit": PULL_LIMIT,
         "ref_step6": None if REF_STEP6 is None else str(REF_STEP6),
         "encoding": {"method": ENCODING_METHOD},
-        "step3_path": str(IN_STEP3),
+        "step3_path": str(step3),
         "channels": [_channel_dict(fit, plots.get(fit.index)) for fit in fits],
     }
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -732,13 +788,14 @@ def _plot_pair(fit, stamp: str) -> Path | None:
     return written
 
 
-def _check_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None) -> None:
+def _check_and_save(rows_by_pair: dict[int, list], stamp: str, step3: Path, *,
+                    layout=None) -> None:
     """Check every pair, print the report, draw its PNG, write the JSON."""
     etas = _ref_etas()
     fits: list = []
     plots: dict[int, Path] = {}
     for index in sorted(rows_by_pair):
-        levels = s6.average_levels(rows_by_pair[index])
+        levels = average_levels(rows_by_pair[index])
         eta = etas.get(index)
         b = float(eta) ** 2 if eta is not None else float("nan")
         try:
@@ -760,7 +817,7 @@ def _check_and_save(rows_by_pair: dict[int, list], stamp: str, *, layout=None) -
         print("\nNo pair checked -- nothing saved.")
         return
     path = save_json(fits, CALIB_PATH / f"calib_step6verify_result_{stamp}.json",
-                     plots)
+                     step3, plots)
     print(f"\nSaved background + product checks -> {path}")
 
     flagged = _flagged(fits)
@@ -781,13 +838,15 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def _print_inputs() -> None:
+def _print_inputs(step3: Path) -> None:
     """Name the step-3 calibration every level here is encoded through.
 
     Both entry points print it -- a sweep and an offline re-check -- because
     both encode through it, and a check run against the wrong step-3 file looks
-    exactly like a check that passed.  ``IN_STEP3`` is edited by hand and this
-    draft's copy is independent of step 6's, so the two drift apart quietly.
+    exactly like a check that passed.  It arrives as ``--step3`` now rather than
+    as a hand-edited constant, which is what stopped this draft's copy and step
+    6's from drifting apart; printing it is still worth the line, since the
+    argument can name the wrong file just as easily as a constant could.
 
     Printed before the layout is loaded, so a missing or misnamed file names
     itself on the way to the exception rather than after it; ``check_csv``
@@ -797,8 +856,8 @@ def _print_inputs() -> None:
     does not -- a "fit" check over levels driven under "interp" compares
     against the wrong grayscale.
     """
-    mark = "" if IN_STEP3.is_file() else "   (MISSING)"
-    print(f"Step 3 in : {_rel(IN_STEP3)}{mark}")
+    mark = "" if Path(step3).is_file() else "   (MISSING)"
+    print(f"Step 3 in : {_rel(step3)}{mark}")
     print(f"Encoding  : {ENCODING_METHOD}")
 
 
@@ -820,14 +879,14 @@ def _print_plan(grid: Grid, schedule) -> None:
     print(f"Pairs:  {list(PAIR_INDICES)}")
 
 
-def _run_sweep(check_after: bool) -> None:
+def _run_sweep(step3: Path, check_after: bool) -> None:
     """Drive every pair's interleaved schedule; optionally check and save."""
     validate_checks()
     _push_config()
-    _print_inputs()
+    _print_inputs(step3)
     grid = measure_grid()
-    layout = s6._load_layout()                             # noqa: SLF001
-    schedule = s6.build_schedule(grid)
+    layout = s6._load_layout(step3)                        # noqa: SLF001
+    schedule = build_schedule(_config(), grid)
     _print_plan(grid, schedule)
 
     slm = s6.connect_slm(SLM_DISPLAY_NO, USB_SLM_NO)
@@ -837,22 +896,24 @@ def _run_sweep(check_after: bool) -> None:
     try:
         for index in PAIR_INDICES:
             print(f"\n=== Sweep: pair {index} ===")
-            rows_by_pair[index] = s6._measure_pair(        # noqa: SLF001
-                slm, daq, layout, index, schedule)
+            rows_by_pair[index] = measure_pair(
+                daq, slm, layout, index, schedule,
+                cfg=_config(), acq=_acq(),
+                progress_callback=lambda p: print(p.line()), log=print)
     finally:
         slm.close_slm()
         daq.disconnect()
 
     stamp = time.strftime("%m%d_%H%M")
-    csv_path = s6.write_meas_csv(
+    csv_path = write_meas_csv(
         rows_by_pair, CALIB_PATH / f"calib_step6verify_meas_{stamp}.csv")
     total = sum(len(v) for v in rows_by_pair.values())
     print(f"\nSaved {total} rows to {csv_path}")   # raw rows on disk BEFORE checking
     if check_after:
-        _check_and_save(rows_by_pair, stamp, layout=layout)
+        _check_and_save(rows_by_pair, stamp, step3, layout=layout)
 
 
-def check_csv(path: str | Path) -> None:
+def check_csv(path: str | Path, step3: Path) -> None:
     """Re-run the check on an already-recorded CSV (no hardware).
 
     Reads step 6's own column layout, so a full ``calib_step6v2_meas_*.csv`` works
@@ -861,26 +922,44 @@ def check_csv(path: str | Path) -> None:
     """
     validate_checks()
     _push_config()
-    _print_inputs()
-    rows_by_pair = s6.load_meas_csv(path)
+    _print_inputs(step3)
+    rows_by_pair = load_meas_csv(path)
     n = sum(len(v) for v in rows_by_pair.values())
     print(f"Loaded {path}: {len(rows_by_pair)} pair(s), {n} acquisitions")
     try:
-        layout = s6._load_layout()                         # noqa: SLF001
+        layout = s6._load_layout(step3)                    # noqa: SLF001
     except (FileNotFoundError, ValueError) as exc:
         print(f"(layout unavailable, wavelengths left as NaN: {exc})")
         layout = None
-    _check_and_save(rows_by_pair, time.strftime("%m%d_%H%M"), layout=layout)
+    _check_and_save(rows_by_pair, time.strftime("%m%d_%H%M"), step3,
+                    layout=layout)
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    flags = {"--meas", "-m"}
-    positional = [a for a in argv if a not in flags]
-    if positional:                      # a CSV path -> offline re-check, no hardware
-        check_csv(positional[0])
+    parser = argparse.ArgumentParser(
+        prog="calib_step6_verify.py",
+        description="Step 6 v2's product-only check, on its own short grid.",
+        epilog="--step3 has no default: a check run against the wrong step-3 "
+               "calibration looks exactly like a check that passed.",
+    )
+    parser.add_argument(
+        "--step3", required=True, type=Path, metavar="JSON",
+        help="Step-3b/3c calibration the channel layout is built from (required)",
+    )
+    parser.add_argument(
+        "csv", nargs="?", type=Path,
+        help="re-check this recorded CSV offline instead of measuring",
+    )
+    parser.add_argument(
+        "--meas", "-m", action="store_true",
+        help="measure and write the raw CSV only; do not check",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.csv is not None:            # offline re-check, no hardware
+        check_csv(args.csv, args.step3)
         return 0
-    _run_sweep(check_after=not any(a in flags for a in argv))
+    _run_sweep(args.step3, check_after=not args.meas)
     return 0
 
 

@@ -413,7 +413,12 @@ def wavelength_calibration(
     ``min_peak_wavelength_nm`` / ``max_peak_wavelength_nm`` exclude trace
     samples below / above that wavelength from the peak search, e.g. to mask a
     fixed leakage artifact the SLM never modulates (light falling outside the
-    active area). None (default) leaves that end of the trace unclipped.
+    active area). None (default) leaves that end of the trace unclipped.  This
+    is a mask on the SEARCH, so a window whose real peak falls outside it reads
+    as dark and aborts the run; it is not the usable output band.  To keep only
+    part of the finished mapping -- the band downstream steps can actually use
+    -- sweep unmasked and pass the result through
+    :func:`clip_to_wavelength_range`, which is what the GUI's step 2 does.
 
     ``outlier_policy`` enables post-sweep auto-remeasurement: after the sweep, a
     linear coordinate->wavelength fit flags points whose residual exceeds
@@ -532,8 +537,12 @@ def wavelength_calibration(
             if anchor_strength < _MIN_ANCHOR_PEAK_STRENGTH:
                 raise ValueError(
                     f"anchor window at x={a_start} shows no clear peak "
-                    f"(normalized strength {anchor_strength:.3g}); check the "
-                    "scan region, OSA settings, and min/max_peak_wavelength_nm"
+                    f"(normalized strength {anchor_strength:.3g}); check that "
+                    "the scan region is actually illuminated and that the OSA "
+                    "span covers it. If a peak-search mask "
+                    "(min/max_peak_wavelength_nm) is set, a real peak outside "
+                    "it reads as dark here -- sweep unmasked and narrow the "
+                    "finished mapping with clip_to_wavelength_range instead"
                 )
             anchor_wavelengths[a_start] = anchor_wl
             _report(
@@ -645,6 +654,94 @@ def wavelength_calibration(
         level_range=np.asarray(calibration_results.level_range, dtype=int),
         intensity_levels=calibration_results.intensity_levels,
         wavelength_fit_coefficients=coeffs,
+    )
+
+
+def clip_to_wavelength_range(
+    calibration_results: CalibrationResult,
+    min_wavelength_nm: float | None = None,
+    max_wavelength_nm: float | None = None,
+) -> CalibrationResult:
+    """Keep only the coordinates whose mapped wavelength lies in [min, max] nm.
+
+    Step 2 sweeps whatever SLM region is illuminated and fits ONE line through
+    every peak it measured.  A peak outside the usable band is good fit data,
+    not an error -- the wider lever arm pins the slope down better -- so the
+    band is not a peak-search mask.  It is a property of the DOWNSTREAM steps:
+    only channels inside it carry usable light.  Hence it is applied here,
+    where the mapping is handed on (saved to JSON, or passed to step 3), and
+    never during acquisition.
+
+    ``wavelength_fit_coefficients`` is carried over untouched: it is the fit
+    over the whole swept region, and it is what predicts a wavelength at a
+    coordinate this clip dropped.  Per-coordinate arrays (the intensity sweeps,
+    the transfer fits, per-coordinate min/max levels) are sliced along with the
+    mapping; ``level_range`` and scalar levels are not per coordinate and are
+    left alone.  ``None`` on either bound leaves that end unclipped.
+    """
+    coordinates = np.asarray(calibration_results.coordinates).ravel()
+    wavelengths = np.asarray(calibration_results.wavelength, dtype=float).ravel()
+    if coordinates.size != wavelengths.size:
+        raise ValueError(
+            f"coordinate/wavelength size mismatch: {coordinates.size} vs "
+            f"{wavelengths.size}"
+        )
+    if coordinates.size == 0:
+        raise ValueError("calibration has no coordinate -> wavelength mapping")
+
+    lo = -np.inf
+    if min_wavelength_nm is not None:
+        lo = float(min_wavelength_nm)
+        if not np.isfinite(lo):
+            raise ValueError("min_wavelength_nm must be finite")
+    hi = np.inf
+    if max_wavelength_nm is not None:
+        hi = float(max_wavelength_nm)
+        if not np.isfinite(hi):
+            raise ValueError("max_wavelength_nm must be finite")
+    if lo >= hi:
+        raise ValueError("min_wavelength_nm must be below max_wavelength_nm")
+
+    keep = np.flatnonzero((wavelengths >= lo) & (wavelengths <= hi))
+    if keep.size == 0:
+        raise ValueError(
+            f"no calibrated coordinate maps into {lo:g}-{hi:g} nm; the swept "
+            f"region covers {wavelengths.min():.3f}-{wavelengths.max():.3f} nm"
+        )
+    if keep.size == wavelengths.size:
+        return calibration_results
+
+    def _rows(value: Any) -> Any:
+        """Slice an intensity sweep, which is one ROW per coordinate."""
+        if value is None:
+            return None
+        array = np.asarray(value)
+        # A step-1 seed's sweep rides along in the same field but is 1-D (one
+        # entry per LEVEL), so only a 2-D per-coordinate block is sliced.
+        if array.ndim != 2 or array.shape[0] != wavelengths.size:
+            return value
+        return array[keep].copy()
+
+    def _levels(value: Any) -> Any:
+        """Slice a per-coordinate min/max level; a scalar level is shared."""
+        array = np.asarray(value)
+        if array.ndim != 1 or array.size != wavelengths.size:
+            return value
+        return array[keep].copy()
+
+    fits = calibration_results.transfer_fits
+    if fits is not None and len(fits) == wavelengths.size:
+        fits = [fits[int(i)] for i in keep]
+
+    return replace(
+        calibration_results,
+        wavelength=wavelengths[keep],
+        coordinates=coordinates[keep],
+        max_level=_levels(calibration_results.max_level),
+        min_level=_levels(calibration_results.min_level),
+        intensity_levels=_rows(calibration_results.intensity_levels),
+        raw_intensity_levels=_rows(calibration_results.raw_intensity_levels),
+        transfer_fits=fits,
     )
 
 
